@@ -1,7 +1,10 @@
 # mcopt
 
-A Minecraft performance mod for Apple Silicon Macs. **mcopt no longer requires Sodium:** since 0.3.0-alpha.1 it draws
-the world with its own Metal renderer. **Very much alpha:** expect bugs, and back up your worlds.
+> [!WARNING]
+> mcopt no longer requires Sodium 🎉
+
+A Minecraft performance mod for Apple Silicon Macs. Since 0.3.0-alpha.1 it draws the world with its own Metal renderer.
+**Very much alpha:** expect bugs, and back up your worlds.
 
 ## Requirements
 
