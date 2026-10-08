@@ -21,8 +21,8 @@ Install
 No Sodium needed: mcopt won't start alongside it (Fabric says so), so take Sodium out of the mods folder.
 Fabric API isn't required; keep it if your other mods need it.
 Mods that require Sodium (for example Better Block Entities or Iris) can't be used with this build.
-Distant Horizons isn't supported by this build's renderer yet; Fabric refuses to start with both installed, so remove
-one of them.
+Distant Horizons runs on the Metal renderer next to mcopt's own terrain. With DH set to its OpenGL renderer, mcopt
+switches its renderer off for it.
 
 The jar is a mod, not an app: double-clicking it only shows these install steps.
 

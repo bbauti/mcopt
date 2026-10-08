@@ -42,7 +42,7 @@ fps spinning / flying, same test world, 1920x1080, render distance 16, VSync off
 | MacBook Neo (A18 Pro, 5-core GPU, 8 GB) | 79-81 / 69-72 | 133-146 / 85-91 | 514-579 / 422-449 | 591-638 / 477-504 |
 | Mac mini M6 (12-core GPU, 16 GB) | 297-328 / 283-291 | 454-460 / 406-413 | 1988-1991 / 1738-1742 | 2020-2022 / 1690-1704 |
 
-The mini and Neo cells ran on 6c133ecc, whose only difference from 9865a0a3 is vGroup, which is gated off on those GPUs. The Neo's vanilla and Sodium cells come from the da566d00 run.
+The mini and Neo cells ran on 6c133ecc, whose only difference from 9865a0a3 is vGroup, which is gated off on those GPUs. The Neo's vanilla and Sodium cells come from the da566d00 run. This build differs from 9865a0a3 only in code that runs when Distant Horizons is installed.
 
 For the most fps: Options > Video Settings, VSync off and Max Framerate Unlimited. The numbers above are with VSync off.
 
@@ -51,8 +51,8 @@ For the most fps: Options > Video Settings, VSync off and Max Framerate Unlimite
 - Mods that require Sodium (for example Better Block Entities or Iris) can't be used with this build.
 - Mods that call OpenGL directly can't draw on the Metal backend. To switch mcopt's renderer off, add
   `mcopt.metal=false` to `config/mcopt.properties` (or launch with `-Dmcopt.metal=false`).
-- Distant Horizons isn't supported by this build's renderer yet; Fabric refuses to start with both installed, so remove
-  one of them.
+- Distant Horizons runs on the Metal renderer next to mcopt's own terrain. With DH set to its OpenGL renderer, mcopt
+  switches its renderer off for it.
 - Far terrain is experimental. On Macs with fewer than 10 GPU cores, it costs most of the fps.
 
 ## Plans

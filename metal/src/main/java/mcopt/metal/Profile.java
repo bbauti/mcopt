@@ -38,25 +38,45 @@ public final class Profile {
 		if (applied) return;
 		applied = true;
 		applyFlags();
-		distantHorizons();
+		distantHorizonsOnOpenGl();
 	}
 
 	/**
-	 * Distant Horizons casts the game's textures to OpenGL's (ClassCastException MetalTexture -> GlTexture in its Lightmap
-	 * mixin), so with DH loaded mcopt.metal defaults to false: OpenGL, exactly as -Dmcopt.metal=false. An explicit
-	 * mcopt.metal (command line or config/mcopt.properties, already applied above) wins.
+	 * Distant Horizons draws through the Metal backend with its default Blaze3D renderer (DhRenderApiMixin), next to our own
+	 * terrain: it draws its LODs in LevelRenderer.prepareTranslucents and its fades in executeOutline / executeOit, none of
+	 * which our renderer replaces. Its OpenGL renderer can't: DH picks that one when its config says renderingEngine =
+	 * "OPEN_GL" (or when Iris is loaded, which needs Sodium and so never loads with this build), and on the Metal backend it
+	 * then stops at startup ("API doesn't match"). Then mcopt.metal defaults to false (OpenGL, exactly as -Dmcopt.metal=false;
+	 * no own renderer). An explicit mcopt.metal wins. Without DH nothing here runs.
 	 */
-	private static void distantHorizons() {
+	private static void distantHorizonsOnOpenGl() {
 		if (System.getProperty("mcopt.metal") != null) return;
-		boolean dh;
+		String why;
 		try {
-			dh = net.fabricmc.loader.api.FabricLoader.getInstance().isModLoaded("distanthorizons");
+			net.fabricmc.loader.api.FabricLoader loader = net.fabricmc.loader.api.FabricLoader.getInstance();
+			if (!loader.isModLoaded("distanthorizons")) return;
+			why = loader.isModLoaded("iris") ? "with Iris" : dhOpenGlEngine() ? "set to its OpenGL renderer" : null;
 		} catch (Throwable t) {
 			return;
 		}
-		if (!dh) return;
+		if (why == null) return;
 		System.setProperty("mcopt.metal", "false");
-		System.out.println("[mcopt] mcopt: Distant Horizons detected, using OpenGL; mcopt's other optimizations stay on (-Dmcopt.metal=true overrides)");
+		System.out.println("[mcopt] mcopt: Distant Horizons " + why + " needs OpenGL, using OpenGL; mcopt's other optimizations stay on (-Dmcopt.metal=true overrides)");
+	}
+
+	/** config/DistantHorizons.toml says renderingEngine = "OPEN_GL" (its default is AUTO: Blaze3D on 26.x). */
+	private static boolean dhOpenGlEngine() {
+		Path toml = gameDir().resolve("config").resolve("DistantHorizons.toml");
+		if (!Files.isRegularFile(toml)) return false;
+		try {
+			for (String line : Files.readAllLines(toml, StandardCharsets.UTF_8)) {
+				String t = line.strip();
+				if (t.startsWith("renderingEngine")) return t.replace(" ", "").startsWith("renderingEngine=\"OPEN_GL\"");
+			}
+		} catch (IOException | RuntimeException e) {
+			System.out.println("[mcopt] profile: can't read " + toml + ": " + e);
+		}
+		return false;
 	}
 
 	private static void applyFlags() {
