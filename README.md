@@ -1,7 +1,7 @@
 # mcopt
 
-A Minecraft performance mod for Apple Silicon Macs. No Sodium needed. **Very much alpha:** expect bugs, and back up
-your worlds.
+A Minecraft performance mod for Apple Silicon Macs. **mcopt no longer requires Sodium:** since 0.3.0-alpha.1 it draws
+the world with its own Metal renderer. **Very much alpha:** expect bugs, and back up your worlds.
 
 ## Requirements
 
@@ -18,8 +18,8 @@ your worlds.
    (Finder: Go > Go to Folder). In Prism: Edit the instance > Mods > Add file.
 4. Start Minecraft with the Fabric profile.
 
-No Sodium needed: mcopt won't start alongside it, so take Sodium out of that folder if it's there. Fabric API isn't
-required; keep it if your other mods need it.
+Sodium isn't needed anymore: mcopt won't start alongside it, so take Sodium out of that folder if it's there. Fabric API
+isn't required; keep it if your other mods need it.
 
 To check it's working: press F3 (fn + F3 on a Mac keyboard); the bottom right says `Metal 3 (mcopt)`.
 
