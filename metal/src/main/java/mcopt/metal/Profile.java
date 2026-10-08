@@ -18,8 +18,8 @@ import java.util.TreeMap;
  * <li>Any {@code mcopt.*} key in config/mcopt.properties is applied too, and wins over the profile's value.</li>
  * <li>A flag given on the command line wins over both: a key is only set when System.getProperty(key) is still null.</li>
  * </ul>
- * With no profile named anywhere, {@code alpha} applies (the perf-only set); {@code profile=none} applies no profile,
- * exactly the old no-profile behaviour. If config/mcopt.properties is absent it is written with the effective profile ({@code alpha}, or what -Dmcopt.profile names)
+ * With no profile named anywhere, {@code indie} applies (our own renderer); {@code profile=none} applies no profile,
+ * exactly the old no-profile behaviour (vanilla's renderer). If config/mcopt.properties is absent it is written with the effective profile ({@code indie}, or what -Dmcopt.profile names)
  * and comment lines on how to turn it off and how to try far terrain. For {@code alpha} on the small tier (GPU under
  * 10 cores, or 8 GB of RAM or less, or either unreadable) the keys in {@link #SMALL_OUT} are left out. It runs first in every mixin config plugin
  * and in the preLaunch entrypoint, before any of our classes read a flag; the first call does the work, later calls
@@ -29,7 +29,7 @@ public final class Profile {
 	private static boolean applied;
 	/** Alpha keys left out on the small tier: the 4096-entry clone cache costs memory an 8 GB / small-GPU Mac lacks. */
 	static final java.util.List<String> SMALL_OUT = java.util.List.of("mcopt.chunk.clones", "mcopt.chunk.clonesCleanup");
-	static final String DEFAULT = "alpha";
+	static final String DEFAULT = "indie";
 
 	private Profile() {
 	}
@@ -114,10 +114,16 @@ public final class Profile {
 			+ (out.isEmpty() ? "" : "; left out:" + out));
 	}
 
-	private static int gpuCores() {
-		String s = run("/usr/sbin/ioreg", "-rd1", "-c", "AGXAccelerator");
-		java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"gpu-core-count\"\\s*=\\s*(\\d+)").matcher(s);
-		return m.find() ? Integer.parseInt(m.group(1)) : -1;
+	private static int gpuCores = -2;
+
+	/** The GPU's core count from the IORegistry (AGXAccelerator "gpu-core-count"), -1 if unreadable; read once. */
+	public static synchronized int gpuCores() {
+		if (gpuCores == -2) {
+			String s = run("/usr/sbin/ioreg", "-rd1", "-c", "AGXAccelerator");
+			java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"gpu-core-count\"\\s*=\\s*(\\d+)").matcher(s);
+			gpuCores = m.find() ? Integer.parseInt(m.group(1)) : -1;
+		}
+		return gpuCores;
 	}
 
 	private static long memBytes() {
@@ -143,10 +149,12 @@ public final class Profile {
 		String text = """
 			# mcopt settings. Written on first launch; edit freely.
 			#
-			# profile=alpha: measured vanilla performance options (chunk meshing, render lists, startup), the default.
-			# To turn it off:  profile=none
+			# The indie profile: mcopt's own terrain renderer on Apple Metal (no Sodium), plus measured startup and
+			# thread-priority options. To turn all of it off (vanilla's renderer), change the next line to:  profile=none
 			profile=%s
 			#
+			# Single switches win over the profile, e.g. our renderer off but the rest on:
+			#mcopt.own=false
 			# Far terrain (EXPERIMENTAL, off by default; for Macs with 10 or more GPU cores): remove the # below.
 			#mcopt.lod=true
 			""".formatted(name);

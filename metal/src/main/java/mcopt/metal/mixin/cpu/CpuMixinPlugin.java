@@ -17,7 +17,8 @@ public final class CpuMixinPlugin implements IMixinConfigPlugin {
 	@Override public String getRefMapperConfig() { return null; }
 	@Override public boolean shouldApplyMixin(String targetClassName, String mixinClassName) {
 		String name = mixinClassName.substring(mixinClassName.lastIndexOf('.') + 1);
-		if (name.endsWith("Access")) return Cpu.cullHooks();
+		if (name.startsWith("CullFast")) return false;  // (the culler mixins need Sodium: not in this tree)
+		if (name.endsWith("Access")) return false;  // (likewise)
 		if (name.startsWith("Cull")) return Cpu.cullHooks();
 		if (name.startsWith("AbFrame")) return Cpu.AB_SHOTS || Cpu.PASS_AB || Cpu.LEASH_AB || Cpu.LISTS_AB || Cpu.MODEL_AB || Cpu.MERGE_AB || mcopt.metal.cpu.EntityBox.AB;
 		if (name.startsWith("List")) return Cpu.LISTS;

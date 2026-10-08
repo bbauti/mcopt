@@ -39,6 +39,32 @@ final class MetalEncoder implements CommandEncoderBackend {
 	 * and the average per-encoder GPU time of submits N to N + PROFILE_FRAMES - 1. Traced runs are a few % slower; don't bench them.
 	 */
 	private static final long TRACE_SUBMIT = Long.getLong("mcopt.metal.trace", -1);
+	/** -Dmcopt.own.int.encLog (measurement only, with frameLog): GPU timestamps on every submit, each encoder logged (FrameLog's enclog.csv). */
+	private static final boolean ENC_LOG = Boolean.getBoolean("mcopt.own.int.encLog");
+	/** -Dmcopt.metal.passTest=N,MODE (measurement only, with encLog): N empty passes at the head of every 20th frame (mcmetal.m mc_pass_test). */
+	private static final int PASS_TEST_N, PASS_TEST_MODE;
+	static {
+		String[] pt = System.getProperty("mcopt.metal.passTest", "0,0").split(",");
+		PASS_TEST_N = Integer.parseInt(pt[0].trim());
+		PASS_TEST_MODE = pt.length > 1 ? Integer.parseInt(pt[1].trim()) : 0;
+	}
+	private boolean passTestPending;
+	private String[] encLabels = new String[128];
+	private long[][] encStats = new long[128][4];  // per group: draws, texture binds, first binds this submit, cold binds
+	private int encGroupOpen = -1;
+
+	boolean encLogOn() {
+		return ENC_LOG;
+	}
+
+	void encBind(MetalTexture t) {
+		if (this.encGroupOpen < 0 || this.encGroupOpen >= 128) return;
+		long[] st = this.encStats[this.encGroupOpen];
+		st[1]++;
+		if (t.encLastBind != this.submitIndex) st[2]++;
+		if (t.encLastBind < this.submitIndex - 30) st[3]++;
+		t.encLastBind = this.submitIndex;
+	}
 	/** Above this, an upload is cheaper as an async GPU blit than as a memcpy on the render thread. */
 	private static final long CPU_COPY_MAX = 256 << 10;
 	private static final int PROFILE_FRAMES = 100, PROFILE_ENCODERS = 16;
@@ -60,15 +86,33 @@ final class MetalEncoder implements CommandEncoderBackend {
 	private final ArrayDeque<Frame> inFlight = new ArrayDeque<>();
 	private List<Runnable> afterThisFrame = new ArrayList<>();
 	private final Set<MetalTexture> pendingClears = new HashSet<>();
+	/**
+	 * -Dmcopt.metal.lazyClears: a deferred clear is no longer written out as an empty pass whenever some other pass opens (all pending
+	 * clears that weren't the new pass's attachments were, in case the pass samples them); it stays pending until the texture is
+	 * drawn to (folded into that pass's load action) or actually bound for sampling. The second case splits the open pass: end it, write
+	 * the clear, reopen the same attachments with load, restore the pass's state. Why: the game clears the main target, then updates
+	 * the lightmap (on ticks) or draws other small passes before the level; the old flush turned the main target's clear into two
+	 * full-screen passes, which wait for the previous frame (still drawing that target) and hold up everything after them, so the
+	 * level's main pass loses its overlap with the previous frame (~0.6-1 ms of GPU on the base chips on those frames). Exact: every
+	 * texture still reads its clear wherever it is read.
+	 */
+	static final boolean LAZY_CLEARS = Boolean.getBoolean("mcopt.metal.lazyClears");
+	private long[] passColors = new long[8];
+	private int passColorCount, passWidth, passHeight;
+	private long passDepth;
+	private boolean passLazy;
+	private long lazySplits, lazySplitLog;
 	private long submitIndex;
 	private long completedIndex = -1;
 	/** Render encoders opened in this submit; the trace's #numbers, which the GPU profile lines refer to. */
 	private int encoderIndex;
 	private @Nullable MetalRenderPass currentPass;
 	/** Recording the current submit's terrain draws for the visibility probe (-Dmcopt.metal.probe=N); null otherwise. */
-	@Nullable MetalProbe probe;
 	/** Summed GPU µs over the profiled frames: whole submit, then vertex and fragment per encoder. */
 	private final double[] profileSums = new double[1 + 2 * PROFILE_ENCODERS];
+	/** Per encoder: summed {vertex start, vertex end, fragment start, fragment end} offsets in the frame (us from its first sample), and how many frames had each. */
+	private final double[] profileAt = new double[4 * PROFILE_ENCODERS];
+	private final int[] profileAtN = new int[4 * PROFILE_ENCODERS];
 	private int profiledFrames;
 	private long waitNanos, statStart, statTerrainFrames;
 	private int statFrames, statPresents;
@@ -87,6 +131,15 @@ final class MetalEncoder implements CommandEncoderBackend {
 	boolean tracing() {
 		return this.submitIndex == TRACE_SUBMIT;
 	}
+
+	/**
+	 * -Dmcopt.metal.frameDepthDiscard: at a submit that presented (the frame's end), the main render target's depth is not written back
+	 * (its open encoder stores it 'dontCare'). Vanilla clears the main color and depth unconditionally at the start of every frame
+	 * (GameRenderer.render: clearColorAndDepthTextures before anything draws) and clears the depth again before the GUI, so nothing
+	 * reads the depth a frame ends with: 8 MB a frame at 1080p, 33 MB at 4K of store traffic at the frame's tail.
+	 */
+	private static final boolean FRAME_DEPTH_DISCARD = Boolean.getBoolean("mcopt.metal.frameDepthDiscard");
+	private boolean presentedThisSubmit;
 
 	void trace(String op, Object... args) {
 		if (!this.tracing()) return;
@@ -125,39 +178,69 @@ final class MetalEncoder implements CommandEncoderBackend {
 		if (profiled(this.submitIndex)) {
 			try (MemoryStack stack = MemoryStack.stackPush()) {
 				long count = stack.ncalloc(4, 1, 4);
+				if (ENC_LOG) {
+					long names = stack.ncalloc(1, 128 * 64, 1);
+					Native.profileLabels(this.enc, names, 64, 128);
+					for (int g = 0; g < 128; g++) {
+						String native_ = MemoryUtil.memASCII(names + g * 64L);
+						if (native_.isEmpty()) continue;
+						// native kind and label; the game's pass label where the native one is empty
+						String java = this.encLabels[g];
+						this.encLabels[g] = native_.length() > 2 || java == null ? native_ : native_ + java;
+						long[] st = this.encStats[g];
+						if (st[0] + st[1] > 0) this.encLabels[g] += " d=" + st[0] + " tb=" + st[1] + " first=" + st[2] + " cold=" + st[3];
+					}
+				}
 				samples = Native.profileEnd(this.enc, count);
 				sampleCount = MemoryUtil.memGetInt(count);
 			}
 		}
 		this.terrain.releaseHeld(true);
+		if (this.presentedThisSubmit && mcopt.metal.own.OwnProbe.bool("metal.frameDepthDiscard", FRAME_DEPTH_DISCARD)) {  // (in-run A/B: probe mode metal.frameDepthDiscard=true)
+			net.minecraft.client.renderer.GameRenderer game = net.minecraft.client.Minecraft.getInstance().gameRenderer;
+			GpuTexture depth = game != null ? game.mainRenderTarget().getDepthTexture() : null;
+			if (depth instanceof MetalTexture t) Native.discard(this.enc, t.handle);  // (no-op unless it is the open encoder's depth)
+		}
+		this.presentedThisSubmit = false;
 		MetalEvents.Operation commitEvent = MetalEvents.begin("commit", this.submitIndex, 0);
 		long cmd;
 		try {
-			if (GPU_TIMES) GpuTimes.submit(this.submitIndex);
+			if (GPU_TIMES) GpuTimes.submit(this.submitIndex, this.encoderIndex);
 			cmd = Native.encCommit(this.enc);
 		} finally {
 			MetalEvents.end(commitEvent);
-		}
-		if (this.probe != null) {
-			Native.cmdWait(cmd); // the probe reads back what this frame's terrain culling kept
-			this.probe.run(this.ctx, this.terrain.drawnForProbe);
-			this.terrain.drawnForProbe.clear();
-			this.probe = null;
 		}
 		this.terrain.endFrame();
 		if (samples != 0) {
 			long s = samples;
 			int n = sampleCount;
-			this.afterThisFrame.add(() -> this.accumulateProfile(cmd, s, n));
+			if (ENC_LOG) {
+				long submit = this.submitIndex;
+				String[] labels = this.encLabels;
+				this.afterThisFrame.add(() -> FrameLog.encoders(this.ctx, submit, s, n, labels));
+			} else {
+				this.afterThisFrame.add(() -> this.accumulateProfile(cmd, s, n));
+			}
 		}
 		this.inFlight.add(new Frame(this.submitIndex++, cmd, this.afterThisFrame));
+		if (TRACE_SUBMIT >= 0) Native.rpLog(this.submitIndex == TRACE_SUBMIT);  // (measurement: the traced submit's render encoders, mcmetal.m rpLog)
 		if (mcopt.metal.cpu.Cpu.FENCE_STATS) mcopt.metal.cpu.Cpu.fenceTick(this.submitIndex); // opt-in
 		this.afterThisFrame = new ArrayList<>();
 		this.encoderIndex = 0;
-		if (this.submitIndex == MetalProbe.SUBMIT) this.probe = new MetalProbe();
+		if (PASS_TEST_N > 0 && profiled(this.submitIndex) && this.submitIndex % 20 == 0) this.passTestPending = true;
+		if (ENC_LOG) {
+			this.encLabels = new String[128];
+			this.encStats = new long[128][4];
+			this.encGroupOpen = -1;
+		}
 		if (profiled(this.submitIndex) && !Native.profileBegin(this.enc, 512)) System.out.println("mcopt-metal trace: no GPU timestamps on this device");
-		while (this.inFlight.size() > MAX_IN_FLIGHT) this.retire(this.inFlight.poll());
+		if (this.passTestPending) {
+			Native.passTest(this.enc, PASS_TEST_N, PASS_TEST_MODE);
+			this.passTestPending = false;
+		}
+		while (this.inFlight.size() > MAX_IN_FLIGHT) this.retire(this.inFlight.poll(), WaitStats.INFLIGHT);
 		if (STATS) this.stats();
+		if (WaitStats.ON) WaitStats.frame(this.submitIndex - 1);
 	}
 
 	/** Once a second: how much of each frame the render thread spent blocked on the GPU. Near zero means the CPU is the limit. */
@@ -184,7 +267,7 @@ final class MetalEncoder implements CommandEncoderBackend {
 
 	/** GPU timestamps cover the traced submit and the PROFILE_FRAMES - 1 after it; one frame alone is too noisy to compare shader variants. */
 	private static boolean profiled(long submit) {
-		return TRACE_SUBMIT >= 0 && submit >= TRACE_SUBMIT && submit < TRACE_SUBMIT + PROFILE_FRAMES;
+		return ENC_LOG || TRACE_SUBMIT >= 0 && submit >= TRACE_SUBMIT && submit < TRACE_SUBMIT + PROFILE_FRAMES;
 	}
 
 	private void accumulateProfile(long cmd, long samples, int count) {
@@ -197,21 +280,31 @@ final class MetalEncoder implements CommandEncoderBackend {
 				double fs = MemoryUtil.memGetDouble(out + e * 32L + 16), fe = MemoryUtil.memGetDouble(out + e * 32L + 24);
 				if (vs >= 0) this.profileSums[1 + 2 * e] += ve - vs;
 				if (fs >= 0) this.profileSums[2 + 2 * e] += fe - fs;
+				double[] at = {vs, ve, fs, fe};
+				for (int k = 0; k < 4; k++) if (at[k] >= 0) { this.profileAt[4 * e + k] += at[k]; this.profileAtN[4 * e + k]++; }
 			}
 		}
 		if (++this.profiledFrames < PROFILE_FRAMES) return;
 		double[] avg = Arrays.stream(this.profileSums).map(v -> v / PROFILE_FRAMES).toArray();
 		System.out.printf("mcopt-metal gpu: submits %d-%d took %.0f us on the GPU on average%n", TRACE_SUBMIT, TRACE_SUBMIT + PROFILE_FRAMES - 1, avg[0]);
 		for (int e = 0; e < PROFILE_ENCODERS && avg[1 + 2 * e] + avg[2 + 2 * e] > 0; e++) {
-			System.out.printf("mcopt-metal gpu: #%d vertex %6.0f us, fragment %6.0f us%n", e, avg[1 + 2 * e], avg[2 + 2 * e]);
+			double[] at = new double[4];
+			for (int k = 0; k < 4; k++) at[k] = this.profileAtN[4 * e + k] > 0 ? this.profileAt[4 * e + k] / this.profileAtN[4 * e + k] : -1;
+			System.out.printf("mcopt-metal gpu: #%d vertex %6.0f us, fragment %6.0f us; at vertex %.0f-%.0f, fragment %.0f-%.0f us%n", e, avg[1 + 2 * e], avg[2 + 2 * e],
+				at[0], at[1], at[2], at[3]);
 		}
 	}
 
 	private void retire(Frame frame) {
+		this.retire(frame, WaitStats.DRAIN);
+	}
+
+	private void retire(Frame frame, int site) {
 		long waitStart = System.nanoTime();
 		MetalEvents.Operation event = MetalEvents.begin("wait", frame.index, 0);
 		try {
 			Native.cmdWait(frame.cmd);
+			if (WaitStats.ON) WaitStats.wait(site, System.nanoTime() - waitStart, this.submitIndex - frame.index);
 			if (GPU_TIMES) GpuTimes.retire(frame.index, frame.cmd);
 			if (event != null) event.gpuMicros = Native.cmdGpuMicros(frame.cmd);
 		} finally {
@@ -234,6 +327,7 @@ final class MetalEncoder implements CommandEncoderBackend {
 
 	@Override
 	public RenderPassBackend createRenderPass(RenderPassDescriptor descriptor) {
+		if (FrameLog.ON) FrameLog.op(FrameLog.PASSES, 1);
 		// Shaderpack runtime (-Dmcopt.pack): the pass may draw into the pack's targets instead of its color attachments.
 		MetalHooks.PassRedirector redirector = MetalHooks.redirector;
 		MetalHooks.Redirect redirect = redirector == null ? null : redirector.redirect(descriptor);
@@ -242,10 +336,17 @@ final class MetalEncoder implements CommandEncoderBackend {
 		if (keptDelegate != null) redirect = null;
 		List<RenderPassDescriptor.@Nullable Attachment<Optional<Vector4fc>>> colors = redirect != null ? List.of() : descriptor.colorAttachments();
 		RenderPassDescriptor.@Nullable Attachment<OptionalDouble> depth = redirect != null && redirect.depth() != 0 ? null : descriptor.depthAttachment();
-		// Anything sampled inside this pass must have its deferred clear in memory before the pass starts.
+		// Anything sampled inside this pass must have its deferred clear in memory before the pass starts (with lazyClears: when it's bound)
+		boolean lazy = LAZY_CLEARS && redirect == null && keptDelegate == null;
 		for (MetalTexture t : List.copyOf(this.pendingClears)) {
 			if (t.isClosed()) this.pendingClears.remove(t);
-			else if (!this.isAttachment(t, colors, depth)) this.flushClear(t);
+			else if (!lazy && !this.isAttachment(t, colors, depth)) this.flushClear(t);
+		}
+		if (FrameLog.ON && FrameLog.inTick()) {
+			var c0 = descriptor.colorAttachments().isEmpty() ? null : descriptor.colorAttachments().get(0);
+			MetalTexture.View v0 = c0 == null ? null : (MetalTexture.View) c0.textureView();
+			String target = v0 == null ? "-" : v0.texture().getLabel() + " mip " + v0.baseMipLevel() + " " + v0.getWidth(0) + "x" + v0.getHeight(0);
+			FrameLog.tickPass(descriptor.label().get() + " -> " + target + " area " + descriptor.renderArea(), v0 == null ? 0 : (long) v0.getWidth(0) * v0.getHeight(0));
 		}
 		int width = 0, height = 0;
 		try (MemoryStack stack = MemoryStack.stackPush()) {
@@ -278,7 +379,7 @@ final class MetalEncoder implements CommandEncoderBackend {
 				}
 				OptionalDouble explicit = depth.clearValue();
 				clearDepth = explicit.isPresent() || !Double.isNaN(texture.pendingDepthClear);
-				depthValue = explicit.orElse(texture.pendingDepthClear);
+				depthValue = clearDepth ? explicit.orElse(texture.pendingDepthClear) : 0; // not NaN in a Load pass's descriptor (Metal API validation)
 				texture.pendingDepthClear = Double.NaN;
 			}
 			this.forgetSettledClears();
@@ -307,10 +408,23 @@ final class MetalEncoder implements CommandEncoderBackend {
 			}
 			int continued = Native.renderBegin(this.enc, colorCount, colorHandles, clears, depthHandle, clearDepth ? 1 : 0, (float) depthValue, width, height);
 			if (mcopt.metal.cpu.Cpu.PASS_AB) mcopt.metal.cpu.Cpu.PASS_TIMER.end();
+			this.passLazy = lazy && colorCount <= this.passColors.length;
+			if (this.passLazy) {
+				for (int i = 0; i < colorCount; i++) this.passColors[i] = MemoryUtil.memGetAddress(colorHandles + i * 8L);
+				this.passColorCount = colorCount;
+				this.passDepth = depthHandle;
+				this.passWidth = width;
+				this.passHeight = height;
+			}
 			if (redirect != null) redirect.delegate().begin(this.enc, depthHandle != 0);
 			if (keptDelegate != null) keptDelegate.begin(this.enc, depthHandle != 0);
 			MetalHooks.Labeler labeler = MetalHooks.labeler;
 			if (labeler != null && continued == 0) labeler.label(this.enc, "game " + descriptor.label().get());
+			if (ENC_LOG && continued == 0) {
+				int c = Native.profileCount(this.enc);
+				if (c >= 4 && c / 4 - 1 < this.encLabels.length) this.encLabels[c / 4 - 1] = descriptor.label().get();
+				this.encGroupOpen = c >= 4 ? c / 4 - 1 : -1;
+			}
 			if (this.submitIndex == TRACE_SUBMIT) {
 				StringBuilder targets = new StringBuilder();
 				for (int i = 0; i < colors.size(); i++) {
@@ -357,6 +471,7 @@ final class MetalEncoder implements CommandEncoderBackend {
 	public void submitRenderPass() {
 		if (this.currentPass == null) throw new IllegalStateException("No render pass to submit");
 		this.currentPass.end();
+		if (ENC_LOG && this.encGroupOpen >= 0 && this.encGroupOpen < 128) this.encStats[this.encGroupOpen][0] += this.currentPass.draws;
 		this.trace("  end, draws:", this.currentPass.draws, "triangles:", this.currentPass.indices / 3);
 		this.currentPass = null;
 	}
@@ -372,11 +487,44 @@ final class MetalEncoder implements CommandEncoderBackend {
 		return true;
 	}
 
+	/** The open pass was split by someone outside the backend (MetalBridge.restorePass); false when no pass is open. */
+	boolean restorePass() {
+		if (this.currentPass == null) return false;
+		this.currentPass.restoreAfterSplit();
+		return true;
+	}
+
 	/** Forgets a pending clear of t: something is about to overwrite all of it (the shaderpack's final pass). */
 	void dropPendingClear(MetalTexture t) {
 		t.pendingColorClear = null;
 		t.pendingDepthClear = Double.NaN;
 		this.pendingClears.remove(t);
+	}
+
+	/**
+	 * lazyClears: t (pending a clear) is about to be sampled inside the open pass: split the pass around writing the clear, then reopen
+	 * the pass's attachments with load and restore its state. Without an open pass (or a pass opened the old way) it's flushClear.
+	 */
+	void flushClearInPass(MetalTexture t) {
+		if (!t.hasPendingClear()) return;
+		if (this.currentPass == null || !this.passLazy) {
+			this.flushClear(t);
+			return;
+		}
+		this.flushClear(t);  // (ends the open render encoder: other attachments)
+		try (MemoryStack stack = MemoryStack.stackPush()) {
+			long colors = stack.nmalloc(8, Math.max(1, this.passColorCount) * 8);
+			long clears = stack.ncalloc(4, Math.max(1, this.passColorCount) * 5, 4);  // all zero: load
+			for (int i = 0; i < this.passColorCount; i++) MemoryUtil.memPutAddress(colors + i * 8L, this.passColors[i]);
+			Native.renderBegin(this.enc, this.passColorCount, colors, clears, this.passDepth, 0, 0, this.passWidth, this.passHeight);
+		}
+		this.currentPass.restoreAfterSplit();
+		this.lazySplits++;
+		long now = System.nanoTime();
+		if (now - this.lazySplitLog > 10_000_000_000L) {
+			System.out.println("mcopt-metal: lazy clears split a pass " + this.lazySplits + " times so far (" + t.getLabel() + ")");
+			this.lazySplitLog = now;
+		}
 	}
 
 	/** Writes a deferred clear to memory with an empty pass: needed when the texture is read before it is drawn to. */
@@ -455,6 +603,10 @@ final class MetalEncoder implements CommandEncoderBackend {
 
 	@Override
 	public void writeToBuffer(GpuBufferSlice destination, ByteBuffer data) {
+		if (FrameLog.ON) {
+			FrameLog.op(FrameLog.BUF_WRITES, 1);
+			FrameLog.op(FrameLog.BUF_KB, data.remaining() >> 10);
+		}
 		MetalEvents.Operation event = MetalEvents.begin("upload", this.submitIndex, data.remaining());
 		try {
 			MetalBuffer dst = (MetalBuffer) destination.buffer();
@@ -489,6 +641,10 @@ final class MetalEncoder implements CommandEncoderBackend {
 
 	@Override
 	public void copyToBuffer(GpuBufferSlice source, GpuBufferSlice target) {
+		if (FrameLog.ON) {
+			FrameLog.op(FrameLog.BUF_COPIES, 1);
+			FrameLog.op(FrameLog.COPY_KB, source.length() >> 10);
+		}
 		MetalEvents.Operation event = MetalEvents.begin("copy", this.submitIndex, source.length());
 		try {
 			MetalBuffer src = (MetalBuffer) source.buffer(), dst = (MetalBuffer) target.buffer();
@@ -509,6 +665,10 @@ final class MetalEncoder implements CommandEncoderBackend {
 
 	@Override
 	public void writeToTexture(GpuTexture destination, ByteBuffer source, int mip, int layer, int x, int y, int width, int height) {
+		if (FrameLog.ON) {
+			FrameLog.op(FrameLog.TEX_WRITES, 1);
+			FrameLog.op(FrameLog.TEX_PX, (long) width * height);
+		}
 		this.trace("writeToTexture", destination, width + "x" + height);
 		this.flushClear(destination);
 		GpuBufferSlice staging = this.transientMemory.uploadGpu(source, 16L, GpuBuffer.USAGE_COPY_SRC);
@@ -544,23 +704,12 @@ final class MetalEncoder implements CommandEncoderBackend {
 
 	@Override
 	public void copyTextureToTexture(GpuTexture source, GpuTexture destination, int mip, int destX, int destY, int sourceX, int sourceY, int width, int height) {
+		if (FrameLog.ON) FrameLog.op(FrameLog.TEX_COPIES, 1);
 		this.trace("copyTextureToTexture", source, destination, width + "x" + height);
 		this.flushClear(source);
 		this.flushClear(destination);
 		Native.blitTextureToTexture(this.enc, ((MetalTexture) source).handle, ((MetalTexture) destination).handle, mip, destX, destY, sourceX, sourceY,
 			width, height);
-	}
-
-	/** MetalFX: rebuilds dst (full size) from color and depth (render scale); see MetalFx. dst's old contents don't matter. */
-	void upscale(long fx, MetalTexture color, MetalTexture depth, MetalTexture dst, long reproject, float jitterX, float jitterY, float motionSign,
-		boolean reset) {
-		if (this.currentPass != null) throw new IllegalStateException("Cannot upscale inside a render pass");
-		this.trace("upscale", color, "->", dst, reset ? "(reset)" : "");
-		this.flushClear(color);
-		this.flushClear(depth);
-		dst.pendingColorClear = null;
-		this.pendingClears.remove(dst);
-		Native.fxUpscale(this.enc, fx, color.handle, depth.handle, dst.handle, reproject, jitterX, jitterY, motionSign, reset ? 1 : 0);
 	}
 
 	@Override
@@ -579,13 +728,15 @@ final class MetalEncoder implements CommandEncoderBackend {
 					if (timeoutNs == 0) return false;
 					throw new IllegalStateException("Cannot wait on a fence for the current submit");
 				}
-				long t0 = mcopt.metal.cpu.Cpu.FENCE_STATS && timeoutNs != 0 ? System.nanoTime() : 0;
+				boolean cpuStats = mcopt.metal.cpu.Cpu.FENCE_STATS && timeoutNs != 0;
+				long t0 = WaitStats.ON || cpuStats ? System.nanoTime() : 0;
 				while (MetalEncoder.this.completedIndex < index) {
 					Frame oldest = MetalEncoder.this.inFlight.peek();
 					if (timeoutNs == 0 && !Native.cmdDone(oldest.cmd)) return false;
-					MetalEncoder.this.retire(MetalEncoder.this.inFlight.poll());
+					MetalEncoder.this.retire(MetalEncoder.this.inFlight.poll(), WaitStats.FENCE);
 				}
-				if (t0 != 0) mcopt.metal.cpu.Cpu.fenceWaited(System.nanoTime() - t0);
+				if (WaitStats.ON) WaitStats.fenceCaller(System.nanoTime() - t0);
+				if (cpuStats) mcopt.metal.cpu.Cpu.fenceWaited(System.nanoTime() - t0);
 				return true;
 			}
 
@@ -604,6 +755,7 @@ final class MetalEncoder implements CommandEncoderBackend {
 		MetalEvents.Operation event = MetalEvents.begin("present", this.submitIndex, 0);
 		try {
 			this.trace("present", view);
+			this.presentedThisSubmit = true;
 			this.flushClear(view.texture());
 			if (Native.presentQueuedAcquire(this.enc, layer, ((MetalTexture.View) view).handle, GPU_TIMES && this.submitIndex < Integer.MAX_VALUE ? this.submitIndex : -1) == 0) return;
 			if (GPU_TIMES) GpuTimes.presentQueued(this.submitIndex);
@@ -617,6 +769,7 @@ final class MetalEncoder implements CommandEncoderBackend {
 		MetalEvents.Operation event = MetalEvents.begin("present", this.submitIndex, 0);
 		try {
 			this.trace("present", view);
+			this.presentedThisSubmit = true;
 			this.flushClear(view.texture());
 			if (PRESENT_QUEUE) {
 				// the frame's command buffer only fills a staging slot; the present goes out on a second queue after the commit

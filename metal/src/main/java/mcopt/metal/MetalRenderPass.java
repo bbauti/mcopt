@@ -144,6 +144,34 @@ final class MetalRenderPass implements RenderPassBackend {
 		this.recording = null;
 	}
 
+	/**
+	 * Someone outside the backend split this pass (ended its render encoder and reopened it on the same attachments, as our
+	 * own near terrain's occlusion does): the reopened encoder has no state, so everything the frontend set binds again
+	 * (uniforms at the next draw, the rest now).
+	 */
+	void restoreAfterSplit() {
+		Arrays.fill(this.bound, null);
+		for (int i = this.pending.length - 1; i >= 0; i--) {
+			if (this.pending[i] != null) {
+				this.dirtyUpTo = Math.max(this.dirtyUpTo, i + 1);
+				break;
+			}
+		}
+		Native.scissor(this.enc, this.scissor[0], this.scissor[1], this.scissor[2], this.scissor[3]);
+		for (int slot = 0; slot < this.vertexBuffers.length; slot++) {
+			GpuBufferSlice vb = this.vertexBuffers[slot];
+			if (vb != null) Native.vertexBuffer(this.enc, MetalConst.VERTEX_BUFFER_BASE + slot, this.encoder.use(vb.buffer()).handle, vb.offset());
+		}
+		if (this.indexHandle != 0) Native.index(this.enc, this.indexHandle, this.indexInt);
+		if (this.pushConstantsLength > 0) {
+			try (MemoryStack stack = MemoryStack.stackPush()) {
+				ByteBuffer bytes = stack.malloc(this.pushConstantsLength).put(this.pushConstants, 0, this.pushConstantsLength).flip();
+				Native.bytes(this.enc, MetalConst.PUSH_CONSTANTS_INDEX, MemoryUtil.memAddress(bytes), this.pushConstantsLength);
+			}
+		}
+		this.reapplyPipeline();
+	}
+
 	/** After MetalTerrain split the pass: the reopened encoder has none of the frontend's state, so bind it all again. */
 	private void rebind() {
 		Arrays.fill(this.bound, null);
@@ -186,7 +214,6 @@ final class MetalRenderPass implements RenderPassBackend {
 
 	@Override
 	public void pushConstants(ByteBuffer value) {
-		if (this.encoder.probe != null && value.remaining() >= 12) this.encoder.probe.pushConstants(MemoryUtil.memAddress(value));
 		if (this.recording != null) {
 			this.encoder.terrain.pushConstants(MemoryUtil.memAddress(value), value.remaining());
 			return;
@@ -232,6 +259,14 @@ final class MetalRenderPass implements RenderPassBackend {
 	private void bindUniforms(int drawCount) {
 		this.draws += drawCount;
 		if (this.dirtyUpTo == 0) return;
+		if (MetalEncoder.LAZY_CLEARS) {
+			// a texture still pending its deferred clear is about to be sampled: write the clear first (splits this pass, then everything binds again)
+			for (int i = 0; i < this.dirtyUpTo; i++) {
+				if (this.pending[i] instanceof TextureViewAndSampler ts && ts.view() instanceof MetalTexture.View v && v.metalTexture().hasPendingClear()) {
+					this.encoder.flushClearInPass(v.metalTexture());
+				}
+			}
+		}
 		List<BindGroupLayout.UniformDescription> uniforms = Objects.requireNonNull(this.pipeline).uniforms;
 		for (int i = 0; i < this.dirtyUpTo && i < uniforms.size(); i++) {
 			Object value = this.pending[i];
@@ -257,6 +292,7 @@ final class MetalRenderPass implements RenderPassBackend {
 			case COMBINED_IMAGE_SAMPLER -> {
 				TextureViewAndSampler ts = (TextureViewAndSampler) value;
 				Native.texture(this.enc, i, ((MetalTexture.View) ts.view()).handle, ((MetalSampler) ts.sampler()).handle());
+				if (this.encoder.encLogOn()) this.encoder.encBind(((MetalTexture.View) ts.view()).metalTexture());
 				if (this.delegate != null) this.delegate.texture(this.enc, i, ts.view());
 			}
 			case TEXEL_BUFFER -> {
@@ -315,33 +351,12 @@ final class MetalRenderPass implements RenderPassBackend {
 		if (!this.delegated()) return;
 		this.bindUniforms(drawCount);
 		if (this.encoder.tracing()) for (int i = 0; i < drawCount; i++) this.indices += indexCounts.get(indexCounts.position() + i);
-		if (this.encoder.probe != null) this.probe(indexCounts, vertexOffsets, drawCount);
 		if (this.recording != null) {
 			this.encoder.terrain.record(Objects.requireNonNull(this.vertexBuffer0), indexCounts, vertexOffsets, drawCount);
 			return;
 		}
 		Native.multiDrawIndexedSeparate(this.enc, MemoryUtil.memAddress(firstIndexOffsets), MemoryUtil.memAddress(indexCounts),
 			MemoryUtil.memAddress(vertexOffsets), drawCount);
-	}
-
-	/** Hands Sodium's terrain draws to the visibility probe; its compact vertex format is what mcprobe.m decodes. */
-	private void probe(IntBuffer indexCounts, IntBuffer vertexOffsets, int drawCount) {
-		MetalPipeline p = Objects.requireNonNull(this.pipeline);
-		if (!p.name.startsWith("sodium:") || !p.name.contains("terrain") || this.vertexBuffer0 == null) return;
-		GpuBufferSlice globals = null;
-		long atlas = 0, atlasSampler = 0;
-		for (int i = 0; i < p.uniforms.size(); i++) {
-			String name = p.uniforms.get(i).name();
-			if (name.equals("u_Globals")) globals = (GpuBufferSlice) this.bound[i];
-			if (name.equals("u_BlockTex")) {
-				TextureViewAndSampler ts = (TextureViewAndSampler) this.bound[i];
-				atlas = ((MetalTexture.View) ts.view()).handle;
-				atlasSampler = ((MetalSampler) ts.sampler()).handle();
-			}
-		}
-		if (globals == null) return;
-		this.encoder.probe.record(p, (MetalBuffer) this.vertexBuffer0.buffer(), this.vertexBuffer0.offset(), (MetalBuffer) globals.buffer(),
-			globals.offset(), atlas, atlasSampler, indexCounts, vertexOffsets, drawCount, this.areaWidth, this.areaHeight);
 	}
 
 	@Override

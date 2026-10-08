@@ -32,6 +32,15 @@ import static org.lwjgl.util.spvc.Spvc.*;
  * buffers from slot 27. Vertex Y is flipped so render targets keep the same row order as OpenGL and Vulkan.
  */
 final class MetalPipeline implements BackendRenderPipeline {
+	// -Dmcopt.metal.gpuCount[=PATH] (measurement only, mcmetal.m): pipelines are named for the per-pipeline counts
+	static final String GPU_COUNT_PATH = gpuCountPath();
+	static final boolean GPU_COUNT = GPU_COUNT_PATH != null;
+
+	private static String gpuCountPath() {
+		String p = System.getProperty("mcopt.metal.gpuCount");
+		return p == null || p.equals("false") ? null : p.isEmpty() || p.equals("true") ? "gpucount.jsonl" : p;
+	}
+
 	/** Metal bakes the depth attachment format into the pipeline, so like Vulkan there's one for passes with depth and one without. */
 	final long withDepth;
 	final long withoutDepth;
@@ -84,11 +93,6 @@ final class MetalPipeline implements BackendRenderPipeline {
 			Translated v = translate(vertex.module(), info.uniforms().size());
 			Translated f = translate(fragment.module(), info.uniforms().size());
 			if (DUMP_DIR != null) dump(info.name(), v, f);
-			String defines = BUILTIN_MSL ? SODIUM_TERRAIN.get(info.name()) : null;
-			if (defines != null) {
-				v = new Translated(resource("sodium_terrain.vs.metal"), v.entry);
-				f = new Translated(defines + resource("sodium_terrain.fs.metal"), f.entry);
-			}
 			if (OVERRIDE_DIR != null) {
 				v = override(info.name() + ".vs.metal", v);
 				f = override(info.name() + ".fs.metal", f);
@@ -105,22 +109,16 @@ final class MetalPipeline implements BackendRenderPipeline {
 			t2 = System.nanoTime();
 			long vname = MemoryUtil.memAddress(stack.UTF8(v.entry)), fname = MemoryUtil.memAddress(stack.UTF8(f.entry));
 			DepthStencilState depth = info.depthStencilState();
-			long withDepth = Native.pipelineNew(ctx, vlib, vname, flib, fname, describe(stack, info, true, true), err, 4096);
+			if (GPU_COUNT) Native.gpuCountLabel(info.name());  // -Dmcopt.metal.gpuCount: names the per-pipeline counts
+			long withDepth = pipelineNewCounted(ctx, vlib, vname, flib, fname, describe(stack, info, true, true), err, 4096);
 			if (withDepth == 0) throw new IllegalStateException(info.name() + ": " + MemoryUtil.memUTF8(err));
 			long withoutDepth = 0;
 			if (depth == null) {
-				withoutDepth = Native.pipelineNew(ctx, vlib, vname, flib, fname, describe(stack, info, false, true), err, 4096);
+				if (GPU_COUNT) Native.gpuCountLabel(info.name() + " (no depth)");
+				withoutDepth = pipelineNewCounted(ctx, vlib, vname, flib, fname, describe(stack, info, false, true), err, 4096);
 				if (withoutDepth == 0) throw new IllegalStateException(info.name() + ": " + MemoryUtil.memUTF8(err));
 			}
 			long pulled = 0;
-			if (defines != null && MetalTerrain.OCC && !info.name().contains("translucent")) {
-				// Translucent stays on Sodium's own draws: its quads are drawn in sorted index-buffer order.
-				String twin = "#define PULLED\n" + resource("sodium_terrain.vs.metal");
-				plib = Native.libraryNew(ctx, MemoryUtil.memAddress(stack.UTF8(twin)), err, 4096);
-				if (plib == 0) throw new IllegalStateException(info.name() + " pulled vertex: " + MemoryUtil.memUTF8(err));
-				pulled = Native.pipelineNew(ctx, plib, vname, flib, fname, describe(stack, info, true, false), err, 4096);
-				if (pulled == 0) throw new IllegalStateException(info.name() + " pulled: " + MemoryUtil.memUTF8(err));
-			}
 			int compare = depth == null ? 7 : MetalConst.compare(depth.depthTest());
 			long depthState = Native.depthStateNew(ctx, compare, depth != null && depth.writeDepth() ? 1 : 0);
 			MetalPipeline pipeline = new MetalPipeline(encoder, withDepth, withoutDepth, pulled, depthState, compare, info);
@@ -359,5 +357,11 @@ final class MetalPipeline implements BackendRenderPipeline {
 			if (this.pulled != 0) this.encoder.releaseLater(this.pulled);
 			this.encoder.releaseLater(this.depthState);
 		}
+	}
+
+	/** Native.pipelineNew, counted per frame by the frame log (-Dmcopt.own.int.frameLog). */
+	private static long pipelineNewCounted(long ctx, long vlib, long vname, long flib, long fname, long desc, long err, int errLength) {
+		if (FrameLog.ON) FrameLog.op(FrameLog.PIPELINES, 1);
+		return Native.pipelineNew(ctx, vlib, vname, flib, fname, desc, err, errLength);
 	}
 }

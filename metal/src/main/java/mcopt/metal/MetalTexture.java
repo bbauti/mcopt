@@ -10,6 +10,13 @@ import org.jspecify.annotations.Nullable;
 
 class MetalTexture extends BaseGpuTexture {
 	final long handle;
+	/** The encoder log: the submit this texture was last bound in (cold binds: not in the last 30). */
+	long encLastBind = -1000;
+	/** -Dmcopt.metal.residentAnim: in the animation frames' residency set (removed before release), and its bytes. */
+	boolean resident;
+	long residentBytes;
+	/** Created with ShaderWrite usage (a compute kernel may write it). */
+	boolean shaderWrite;
 	private final MetalEncoder encoder;
 	private boolean closed;
 
@@ -39,6 +46,10 @@ class MetalTexture extends BaseGpuTexture {
 	public void close() {
 		if (!this.closed) {
 			this.closed = true;
+			if (this.resident) {
+				Native.textureResident(this.encoder.ctx, this.handle, 0);
+				MetalDevice.residentReleased(this);
+			}
 			this.encoder.releaseLater(this.handle);
 		}
 	}

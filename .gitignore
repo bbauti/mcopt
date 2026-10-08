@@ -7,3 +7,5 @@ out/
 __pycache__/
 mcopt-pack-cache/
 dist/
+.replay-stamp
+.replay-lineage

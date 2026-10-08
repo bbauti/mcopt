@@ -65,6 +65,12 @@ final class MetalDevice implements GpuDeviceBackend {
 		// -Dmcopt.metal.cbdiag=MS: stall diagnostics on stderr (big buffer allocations, slow command buffers); see mcmetal.m.
 		String diag = System.getProperty("mcopt.metal.cbdiag");
 		if (diag != null) Native.diagEnable(Double.parseDouble(diag));
+		// -Dmcopt.metal.gpuCount[=PATH]: measurement only, per render encoder and debug group: samples passing depth (visibility
+		// counts), draws and primitives per pipeline, one JSON line each to PATH (true: gpucount.jsonl in the game dir); see mcmetal.m.
+		// -Dmcopt.metal.gpuCount.every=N: only every Nth frame (the frames between run as without the flag).
+		// -Dmcopt.metal.gpuCount.groups=false: one visibility slot per encoder (no new slot at debug groups).
+		if (MetalPipeline.GPU_COUNT) Native.gpuCountEnable(MetalPipeline.GPU_COUNT_PATH, Integer.getInteger("mcopt.metal.gpuCount.every", 1),
+			!"false".equals(System.getProperty("mcopt.metal.gpuCount.groups")));
 		if (mcopt.metal.cpu.Cpu.PASS || mcopt.metal.cpu.Cpu.CMD_AHEAD) Native.cpuFlags(mcopt.metal.cpu.Cpu.nativeFlags(mcopt.metal.cpu.Cpu.PASS)); // opt-in: see mc_cpu_flags
 	}
 
@@ -95,6 +101,14 @@ final class MetalDevice implements GpuDeviceBackend {
 		return MetalSampler.create(this.ctx, u, v, min, mag, maxAnisotropy, maxLod);
 	}
 
+	/**
+	 * -Dmcopt.metal.residentAnim: sprite animation frame textures kept in a residency set the queue carries. Each frame is a small texture
+	 * drawn into its atlas only on the ticks that need it; between those uses its pages go idle and the system compresses them, and the
+	 * first pass of the next tick that samples them waits while they come back (on the base chips ~0.4-0.6 ms of GPU in the blocks atlas's
+	 * mip-0 animation pass, the same draws ~10 us on the mips after it). Resident, they stay wired. Pure residency: nothing drawn changes.
+	 */
+	private static long residentBytes, residentCount;
+
 	@Override
 	public GpuTexture createTexture(@Nullable String label, @GpuTexture.Usage int usage, GpuFormat format, int width, int height, int layers, int mips) {
 		// MTLTextureUsage: ShaderRead 1, RenderTarget 4. Copies need no usage bit in Metal.
@@ -102,10 +116,21 @@ final class MetalDevice implements GpuDeviceBackend {
 		// Split-pass occlusion builds its hi-Z from the main pass's depth.
 		// Shaderpacks sample the game's depth (depthtex0) too.
 		if (MetalTerrain.OCC && format == GpuFormat.D32_FLOAT) mtlUsage |= 1;
+		if (mcopt.metal.own.AnimCopy.creatingAnimatedAtlas) mtlUsage |= 2;  // ShaderWrite (-Dmcopt.own.int.atlasWrite)
 		boolean cube = (usage & GpuTexture.USAGE_CUBEMAP_COMPATIBLE) != 0;
 		long handle = Native.textureNew(this.ctx, MetalConst.pixelFormat(format), width, height, layers, mips, Math.max(1, mtlUsage), cube ? 1 : 0);
 		if (handle == 0) throw new IllegalStateException("Couldn't create " + width + "x" + height + " " + format + " texture " + label);
-		return new MetalTexture(this.encoder, handle, usage, label == null ? "" : label, format, width, height, layers, mips);
+		MetalTexture texture = new MetalTexture(this.encoder, handle, usage, label == null ? "" : label, format, width, height, layers, mips);
+		texture.shaderWrite = (mtlUsage & 2) != 0;
+		if (ResidentAnim.creating && Native.textureResident(this.ctx, handle, 1)) {
+			texture.resident = true;
+			long bytes = 0;
+			for (int m = 0; m < mips; m++) bytes += (long) Math.max(1, width >> m) * Math.max(1, height >> m) * format.blockSize() * Math.max(1, layers);
+			texture.residentBytes = bytes;
+			residentBytes += bytes;
+			if (++residentCount % 100 == 0) System.out.println("mcopt-metal: " + residentCount + " animation frame textures resident, " + residentBytes / 1024 + " KB");
+		}
+		return texture;
 	}
 
 	@Override
@@ -204,5 +229,15 @@ final class MetalDevice implements GpuDeviceBackend {
 	@Override
 	public DeviceInfo getDeviceInfo() {
 		return this.info;
+	}
+
+	static void residentReleased(MetalTexture t) {
+		residentBytes -= t.residentBytes;
+		residentCount--;
+	}
+
+	/** The animation frame textures kept resident so far (count, bytes). */
+	public static long[] residentAnimation() {
+		return new long[] {residentCount, residentBytes};
 	}
 }

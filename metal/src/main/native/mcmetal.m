@@ -4,7 +4,6 @@
 #include <stdatomic.h>
 #import "mcmetal.h"
 #import <CoreVideo/CoreVideo.h>
-#import <MetalFX/MetalFX.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <QuartzCore/CABase.h>
 #include <mach/mach_time.h>
@@ -39,18 +38,7 @@ static NSString *presentSource = @
 	"  float2 p = float2((id << 1) & 2, id & 2);\n"
 	"  return float4(p * 2.0 - 1.0, c.depth, 1.0);\n"
 	"}\n"
-	"fragment float4 clear_fs(constant Clear &c [[buffer(0)]]) { return c.color; }\n"
-	// Camera-only motion for the temporal upscaler: each pixel's depth, reprojected into last frame. Texture row r holds
-	// NDC y = (r + 0.5) / h * 2 - 1 (vertex Y is flipped), so uv and NDC line up without a flip here.
-	"struct Reproject { float4x4 m; float2 size; };\n"
-	"kernel void motion_cs(texture2d<float, access::read> depth [[texture(0)]], texture2d<half, access::write> motion [[texture(1)]],\n"
-	"                      constant Reproject &r [[buffer(0)]], uint2 id [[thread_position_in_grid]]) {\n"
-	"  if (id.x >= uint(r.size.x) || id.y >= uint(r.size.y)) return;\n"
-	"  float2 uv = (float2(id) + 0.5) / r.size;\n"
-	"  float4 prev = r.m * float4(uv * 2.0 - 1.0, depth.read(id).r, 1.0);\n"
-	"  float2 prevUv = prev.w > 0.0 ? prev.xy / prev.w * 0.5 + 0.5 : uv;\n"
-	"  motion.write(half4(half2(prevUv - uv), 0.0h, 0.0h), id);\n"
-	"}\n";
+	"fragment float4 clear_fs(constant Clear &c [[buffer(0)]]) { return c.color; }\n";
 
 Ctx *mc_create(char *name, int nameCap, char *err, int errCap) {
 	@autoreleasepool {
@@ -87,8 +75,6 @@ Ctx *mc_create(char *name, int nameCap, char *err, int errCap) {
 			fan[k * 3 + 1] = k + 1;
 			fan[k * 3 + 2] = k + 2;
 		}
-		ctx->motion = [device newComputePipelineStateWithFunction:[[lib newFunctionWithName:@"motion_cs"] autorelease] error:&e];
-		if (!ctx->motion) { copyError(e, err, errCap); return NULL; }
 		strlcpy(name, device.name.UTF8String, nameCap);
 		return ctx;
 	}
@@ -107,6 +93,8 @@ void mc_release(id obj) {
 // than MS, that started more than MS after its kernel scheduling ended, or that was committed in a submit with a big (>= 16 MiB)
 // allocation. Times are host-clock ms relative to the commit; "at" is wall-clock seconds, to line up with report.json and gc.log.
 static int diagOn;
+static int gcOn;  // -Dmcopt.metal.gpuCount (GPU counting, measurement only: see 'GPU counting' below)
+static char gcLabel[256];  // the next pipeline's name while counting (mc_gpucount_label), used once
 static double diagMs, diagWallMinusHost;
 static uint64_t diagBigBytes, diagPreBytes, diagMainBytes;
 static long diagSubmit;
@@ -233,6 +221,28 @@ id<MTLBuffer> mc_pool_take(uint64_t minLength, uint64_t maxLength) {
 	return b;
 }
 
+// -Dmcopt.metal.residentAnim: sprite animation frame textures in a residency set of their own that the queue carries, so they stay wired
+// between the ticks that sample them (else their idle pages get compressed and the next tick's first pass waits for them). add 1 adds,
+// 0 removes (before the texture's release). Returns 0 if residency sets aren't available.
+static id<MTLResidencySet> animSet;
+int mc_texture_resident(Ctx *ctx, id<MTLTexture> texture, int add) {
+	static dispatch_once_t once;
+	dispatch_once(&once, ^{
+		@autoreleasepool {
+			MTLResidencySetDescriptor *d = [[MTLResidencySetDescriptor new] autorelease];
+			d.label = @"mcopt animation frames";
+			animSet = [ctx->device newResidencySetWithDescriptor:d error:nil];
+		}
+		if (animSet) [ctx->queue addResidencySet:animSet];
+	});
+	if (!animSet || !texture) return 0;
+	if (add) [animSet addAllocation:texture];
+	else [animSet removeAllocation:texture];
+	[animSet commit];
+	if (add) [animSet requestResidency];
+	return 1;
+}
+
 // A provisioned buffer (pooled or handed out) leaves the residency set, which unwires it, before it's released: on the
 // provisioning queue, as its commit can take a while. Every release of a buffer handle goes through mc_release, so this
 // catches them all. Returns 0 (and does nothing) for anything else.
@@ -259,6 +269,9 @@ static int poolRelease(id obj) {
 uint64_t mc_buffer_length(id<MTLBuffer> buffer) { return buffer.length; }
 
 id<MTLBuffer> mc_buffer_new(Ctx *ctx, uint64_t size) {
+	// Whole-buffer uniform bindings read the MSL struct's 16-byte-aligned size: allocate a multiple of 16 (zeros past the
+	// caller's size, which the Java side keeps as the buffer's logical size).
+	size = (size + 15) & ~(uint64_t) 15;
 	// A provisioned buffer at most a quarter bigger (see mc_pool_add) is ready to use; it holds zeros, like a new one.
 	if (size >= (1u << 20)) {
 		id<MTLBuffer> b = mc_pool_take(size, size + size / 4);
@@ -367,6 +380,10 @@ id<MTLRenderPipelineState> mc_pipeline_new(Ctx *ctx, id<MTLLibrary> vlib, const 
 		MTLRenderPipelineDescriptor *pd = [[MTLRenderPipelineDescriptor new] autorelease];
 		pd.vertexFunction = [[vlib newFunctionWithName:[NSString stringWithUTF8String:vname]] autorelease];
 		pd.fragmentFunction = [[flib newFunctionWithName:[NSString stringWithUTF8String:fname]] autorelease];
+		if (gcOn) {  // -Dmcopt.metal.gpuCount: the game's pipeline name (mc_gpucount_label) names the per-pipeline counts
+			pd.label = gcLabel[0] ? [NSString stringWithUTF8String:gcLabel] : [NSString stringWithFormat:@"%s|%s", vname, fname];
+			gcLabel[0] = 0;
+		}
 		MTLVertexDescriptor *vd = [MTLVertexDescriptor vertexDescriptor];
 		int i = 0;
 		int buffers = desc[i++];
@@ -413,6 +430,7 @@ id<MTLDepthStencilState> mc_depth_state_new(Ctx *ctx, int compare, int write) {
 		MTLDepthStencilDescriptor *d = [[MTLDepthStencilDescriptor new] autorelease];
 		d.depthCompareFunction = (MTLCompareFunction) compare;
 		d.depthWriteEnabled = write != 0;
+		if (write) d.label = @"w";  // (mc_r_pipeline marks the open encoder's depth written: mc_tl_restart)
 		return [ctx->device newDepthStencilStateWithDescriptor:d];
 	}
 }
@@ -427,6 +445,15 @@ Enc *mc_enc_new(Ctx *ctx) {
 	return enc;
 }
 
+// The encoder log: main command buffers, pre command buffers and blit encoders opened since the last read (mc_enc_counters).
+static int encCounters[3];
+void mc_enc_counters(int *out) {
+	for (int i = 0; i < 3; i++) {
+		out[i] = encCounters[i];
+		encCounters[i] = 0;
+	}
+}
+
 static id<MTLCommandBuffer> cmd(Enc *enc) {
 	if (!enc->cmd && enc->cpuNextPending) {  // opt-in (cmdAhead): the buffer made after the last commit
 		dispatch_semaphore_wait(enc->cpuNextReady, DISPATCH_TIME_FOREVER);
@@ -437,6 +464,7 @@ static id<MTLCommandBuffer> cmd(Enc *enc) {
 	if (!enc->cmd) {
 		@autoreleasepool {
 			enc->cmd = [[enc->ctx->queue commandBuffer] retain];
+			encCounters[0]++;
 		}
 	}
 	return enc->cmd;
@@ -452,15 +480,329 @@ static void endBlit(Enc *enc) {
 
 #define DEAD_DEPTH (1u << 8)
 
+// Measurement (-Dmcopt.metal.trace=N's frame only): every render encoder's attachments with their load action when it opens and
+// the store action endRender picks when it closes (MetalEncoder switches this on for the traced submit).
+static int rpLog = 0;
+void mc_set_rp_log(int on) { rpLog = on; }
+static const char *rpLoad(MTLLoadAction a) { return a == MTLLoadActionLoad ? "load" : a == MTLLoadActionClear ? "clear" : "dontCare"; }
+static void rpLogTex(const char *what, int i, id<MTLTexture> t, const char *action) {
+	printf("mcopt-metal rp   %s%d %s %lux%lu fmt %lu %s %s\n", what, i, t.label ? t.label.UTF8String : "?", (unsigned long) t.width,
+		(unsigned long) t.height, (unsigned long) t.pixelFormat, t.storageMode == MTLStorageModeMemoryless ? "memoryless" : "memory", action);
+}
+
+// ---- GPU counting, measurement only (-Dmcopt.metal.gpuCount[=PATH]) ----------------------------------
+// Per render encoder, and per debug group inside one: the samples that pass the depth/stencil test as the draws are submitted
+// (a visibility-result counter in counting mode: depth-test traffic in submission order, an upper bound; NOT fragment shader
+// invocations, helper lanes, unique pixels or cycles: these TBDR GPUs' hidden surface removal shades less, and the query may
+// itself constrain it), and draws and primitives per pipeline. Direct draws count from their
+// arguments; indirect draws from their GPU-written arguments, copied back by a blit right after the encoder ends. Both arms
+// draw through this encoder, whatever encodes the draws (here, the own renderer, the alpha's terrain): while counting,
+// enc->render is a proxy that counts each draw and forwards everything to the real encoder. One JSON line per segment
+// (encoder + debug group) per frame goes to PATH (default gpucount.jsonl in the working directory, the game dir).
+// Off (no flag): none of this runs; enc->render is the plain encoder and pass descriptors and pipelines are as before.
+#include <objc/runtime.h>
+static FILE *gcOut;
+static long gcFrame, gcEvery = 1;
+static int gcGroups = 1;  // a new visibility slot at each debug group push/pop (-Dmcopt.metal.gpuCount.groups=false: one per encoder)
+static os_unfair_lock gcLock = OS_UNFAIR_LOCK_INIT;
+#define GC_SLOTS 2048
+
+typedef struct { id pso; long draws; double prims; } GcPso;
+typedef struct { id buf; uint64_t off; int indexed, pso; MTLPrimitiveType type; } GcInd;
+
+static double gcPrims(MTLPrimitiveType t, double n) {
+	switch (t) {
+	case MTLPrimitiveTypeTriangle: return floor(n / 3);
+	case MTLPrimitiveTypeTriangleStrip: return n >= 3 ? n - 2 : 0;
+	case MTLPrimitiveTypeLine: return floor(n / 2);
+	case MTLPrimitiveTypeLineStrip: return n >= 2 ? n - 1 : 0;
+	default: return n;
+	}
+}
+
+@interface McGcSeg : NSObject {
+@public
+	int enc, seg, slot, w, h;
+	NSString *group;
+	long draws, indirect, icb;
+	double prims;
+	GcPso *pso; int npso, cpso;
+	GcInd *ind; int nind, cind;
+	id<MTLBuffer> args;  // the indirect draws' arguments, copied back (20 bytes each)
+}
+@end
+@implementation McGcSeg
+- (void)dealloc {
+	for (int i = 0; i < npso; i++) [pso[i].pso release];
+	for (int i = 0; i < nind; i++) [ind[i].buf release];
+	free(pso); free(ind);
+	[group release]; [args release];
+	[super dealloc];
+}
+@end
+
+@interface McGcCB : NSObject {  // one per command buffer that has counted encoders
+@public
+	id<MTLCommandBuffer> cmd;  // retained while this is the current record, so its address can't come back as another's
+	id<MTLBuffer> vis;  // GC_SLOTS visibility counts
+	int slots, encoders, conflict;
+	long frame;
+	NSMutableArray *segs;
+}
+@end
+@implementation McGcCB
+- (void)dealloc { [cmd release]; [vis release]; [segs release]; [super dealloc]; }
+@end
+
+@interface McGcEnc : NSProxy {  // the counting stand-in for enc->render
+@public
+	id<MTLRenderCommandEncoder> real;
+	id<MTLCommandBuffer> cmd;  // not retained: only used while encoding, before the commit
+	McGcCB *cb;
+	McGcSeg *seg;
+	id pso;  // the current pipeline (retained by the encoder anyway)
+	NSMutableArray *groups;
+	int enc, segs, w, h;
+}
+@end
+
+static McGcSeg *gcSegment(McGcEnc *p) {
+	McGcSeg *s = [McGcSeg new];
+	s->enc = p->enc;
+	s->seg = p->segs++;
+	s->w = p->w;
+	s->h = p->h;
+	s->group = [[p->groups componentsJoinedByString:@"/"] retain];
+	s->slot = p->cb->slots < GC_SLOTS ? p->cb->slots++ : -1;
+	[p->real setVisibilityResultMode:s->slot >= 0 ? MTLVisibilityResultModeCounting : MTLVisibilityResultModeDisabled
+		offset:s->slot >= 0 ? (NSUInteger) s->slot * 8 : 0];
+	[p->cb->segs addObject:s];
+	[s release];  // the cb's list keeps it
+	return s;
+}
+
+static int gcPsoIndex(McGcSeg *s, id pso) {
+	for (int i = 0; i < s->npso; i++) if (s->pso[i].pso == pso) return i;
+	if (s->npso == s->cpso) {
+		s->cpso = s->cpso ? s->cpso * 2 : 8;
+		s->pso = realloc(s->pso, sizeof(GcPso) * s->cpso);
+	}
+	s->pso[s->npso] = (GcPso) {[pso retain], 0, 0};
+	return s->npso++;
+}
+
+static void gcDraw(McGcEnc *p, MTLPrimitiveType t, NSUInteger count, NSUInteger instances) {
+	McGcSeg *s = p->seg;
+	double n = gcPrims(t, (double) count) * (double) instances;
+	int i = gcPsoIndex(s, p->pso);
+	s->draws++; s->prims += n;
+	s->pso[i].draws++; s->pso[i].prims += n;
+}
+
+static void gcIndirect(McGcEnc *p, MTLPrimitiveType t, id<MTLBuffer> buf, NSUInteger off, int indexed) {
+	McGcSeg *s = p->seg;
+	if (s->nind == s->cind) {
+		s->cind = s->cind ? s->cind * 2 : 16;
+		s->ind = realloc(s->ind, sizeof(GcInd) * s->cind);
+	}
+	s->ind[s->nind++] = (GcInd) {[buf retain], off, indexed, gcPsoIndex(s, p->pso), t};
+	s->draws++; s->indirect++;
+}
+
+@implementation McGcEnc
+- (id)forwardingTargetForSelector:(SEL)sel { return real; }
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { return [(NSObject *) real methodSignatureForSelector:sel]; }
+- (void)forwardInvocation:(NSInvocation *)inv { [inv invokeWithTarget:real]; }
+- (BOOL)respondsToSelector:(SEL)sel { return [real respondsToSelector:sel]; }
+- (BOOL)conformsToProtocol:(Protocol *)proto { return [real conformsToProtocol:proto]; }
+- (void)dealloc { [real release]; [cb release]; [groups release]; [super dealloc]; }
+- (void)setRenderPipelineState:(id<MTLRenderPipelineState>)state { pso = state; [real setRenderPipelineState:state]; }
+- (void)drawPrimitives:(MTLPrimitiveType)t vertexStart:(NSUInteger)s vertexCount:(NSUInteger)n {
+	gcDraw(self, t, n, 1);
+	[real drawPrimitives:t vertexStart:s vertexCount:n];
+}
+- (void)drawPrimitives:(MTLPrimitiveType)t vertexStart:(NSUInteger)s vertexCount:(NSUInteger)n instanceCount:(NSUInteger)k {
+	gcDraw(self, t, n, k);
+	[real drawPrimitives:t vertexStart:s vertexCount:n instanceCount:k];
+}
+- (void)drawPrimitives:(MTLPrimitiveType)t vertexStart:(NSUInteger)s vertexCount:(NSUInteger)n instanceCount:(NSUInteger)k baseInstance:(NSUInteger)b {
+	gcDraw(self, t, n, k);
+	[real drawPrimitives:t vertexStart:s vertexCount:n instanceCount:k baseInstance:b];
+}
+- (void)drawIndexedPrimitives:(MTLPrimitiveType)t indexCount:(NSUInteger)n indexType:(MTLIndexType)it indexBuffer:(id<MTLBuffer>)ib indexBufferOffset:(NSUInteger)io {
+	gcDraw(self, t, n, 1);
+	[real drawIndexedPrimitives:t indexCount:n indexType:it indexBuffer:ib indexBufferOffset:io];
+}
+- (void)drawIndexedPrimitives:(MTLPrimitiveType)t indexCount:(NSUInteger)n indexType:(MTLIndexType)it indexBuffer:(id<MTLBuffer>)ib indexBufferOffset:(NSUInteger)io
+	instanceCount:(NSUInteger)k {
+	gcDraw(self, t, n, k);
+	[real drawIndexedPrimitives:t indexCount:n indexType:it indexBuffer:ib indexBufferOffset:io instanceCount:k];
+}
+- (void)drawIndexedPrimitives:(MTLPrimitiveType)t indexCount:(NSUInteger)n indexType:(MTLIndexType)it indexBuffer:(id<MTLBuffer>)ib indexBufferOffset:(NSUInteger)io
+	instanceCount:(NSUInteger)k baseVertex:(NSInteger)bv baseInstance:(NSUInteger)bi {
+	gcDraw(self, t, n, k);
+	[real drawIndexedPrimitives:t indexCount:n indexType:it indexBuffer:ib indexBufferOffset:io instanceCount:k baseVertex:bv baseInstance:bi];
+}
+- (void)drawPrimitives:(MTLPrimitiveType)t indirectBuffer:(id<MTLBuffer>)b indirectBufferOffset:(NSUInteger)o {
+	gcIndirect(self, t, b, o, 0);
+	[real drawPrimitives:t indirectBuffer:b indirectBufferOffset:o];
+}
+- (void)drawIndexedPrimitives:(MTLPrimitiveType)t indexType:(MTLIndexType)it indexBuffer:(id<MTLBuffer>)ib indexBufferOffset:(NSUInteger)io
+	indirectBuffer:(id<MTLBuffer>)b indirectBufferOffset:(NSUInteger)o {
+	gcIndirect(self, t, b, o, 1);
+	[real drawIndexedPrimitives:t indexType:it indexBuffer:ib indexBufferOffset:io indirectBuffer:b indirectBufferOffset:o];
+}
+- (void)executeCommandsInBuffer:(id<MTLIndirectCommandBuffer>)icb withRange:(NSRange)r {
+	seg->icb += r.length;  // counts unknown on the CPU: reported as icb draws
+	[real executeCommandsInBuffer:icb withRange:r];
+}
+- (void)pushDebugGroup:(NSString *)g {
+	[real pushDebugGroup:g];
+	if (!gcGroups) return;  // one segment (one visibility slot) per encoder
+	[groups addObject:g ? g : @"?"];
+	seg = gcSegment(self);
+}
+- (void)popDebugGroup {
+	[real popDebugGroup];
+	if (!gcGroups) return;
+	if (groups.count) [groups removeLastObject];
+	seg = gcSegment(self);
+}
+- (void)setVisibilityResultMode:(MTLVisibilityResultMode)m offset:(NSUInteger)o {
+	cb->conflict = 1;  // someone else uses visibility results in this encoder: its counts would mix with ours
+	[real setVisibilityResultMode:m offset:o];
+}
+@end
+
+static void gcEscape(char *out, size_t cap, NSString *s) {
+	const char *c = s ? s.UTF8String : "";
+	size_t j = 0;
+	for (; *c && j + 2 < cap; c++) {
+		if (*c == '"' || *c == '\\') out[j++] = '\\';
+		out[j++] = (unsigned char) *c < 0x20 ? ' ' : *c;
+	}
+	out[j] = 0;
+}
+
+static void gcReport(McGcCB *g, id<MTLCommandBuffer> done) {
+	const uint64_t *vis = g->vis.contents;
+	double ms = (CFAbsoluteTimeGetCurrent() + kCFAbsoluteTimeIntervalSince1970) * 1000;
+	double gpuMs = (done.GPUEndTime - done.GPUStartTime) * 1000;
+	os_unfair_lock_lock(&gcLock);
+	for (McGcSeg *s in g->segs) {
+		if (s->args) {  // the indirect draws' GPU-written arguments
+			const uint32_t *a = s->args.contents;
+			for (int i = 0; i < s->nind; i++) {
+				const uint32_t *r = a + i * 5;
+				double n = gcPrims(s->ind[i].type, (double) r[0]) * (double) r[1];
+				s->prims += n;
+				s->pso[s->ind[i].pso].prims += n;
+				s->pso[s->ind[i].pso].draws++;
+			}
+		}
+		char group[512], pso[256];
+		gcEscape(group, sizeof group, s->group);
+		fprintf(gcOut, "{\"frame\":%ld,\"t\":%.1f,\"gpuMs\":%.3f,\"enc\":%d,\"seg\":%d,\"group\":\"%s\",\"w\":%d,\"h\":%d,\"samples\":%lld,"
+			"\"draws\":%ld,\"indirect\":%ld,\"icb\":%ld,\"prims\":%.0f%s,\"pso\":[", g->frame, ms, gpuMs, s->enc, s->seg, group, s->w, s->h,
+			s->slot >= 0 ? (long long) vis[s->slot] : -1LL, s->draws, s->indirect, s->icb, s->prims, g->conflict ? ",\"conflict\":1" : "");
+		for (int i = 0; i < s->npso; i++) {
+			id<MTLRenderPipelineState> p = s->pso[i].pso;
+			gcEscape(pso, sizeof pso, p ? (p.label ? p.label : [NSString stringWithFormat:@"pso@%p", p]) : @"none");
+			fprintf(gcOut, "%s[\"%s\",%ld,%.0f,\"%p\"]", i ? "," : "", pso, s->pso[i].draws, s->pso[i].prims, (void *) p);
+		}
+		fprintf(gcOut, "]}\n");
+	}
+	fflush(gcOut);
+	os_unfair_lock_unlock(&gcLock);
+}
+
+// Opening a render encoder while counting: the pass gets this command buffer's visibility buffer (rp), and the new encoder
+// is wrapped (returned retained, the plain one released). gcCurrent (retained) is the record of the command buffer being
+// encoded (render thread only); mc_enc_commit drops it, and the completion handler's block keeps it until the report.
+static McGcCB *gcCurrent;
+static void gcBeforeOpen(Enc *enc, MTLRenderPassDescriptor *rp, id<MTLCommandBuffer> c) {
+	if (!gcCurrent || gcCurrent->cmd != c) {
+		[gcCurrent release];
+		McGcCB *g = [McGcCB new];
+		g->cmd = [c retain];
+		g->vis = [enc->ctx->device newBufferWithLength:GC_SLOTS * 8 options:MTLResourceStorageModeShared];
+		memset(g->vis.contents, 0, GC_SLOTS * 8);
+		g->segs = [NSMutableArray new];
+		g->frame = gcFrame;
+		[c addCompletedHandler:^(id<MTLCommandBuffer> done) { gcReport(g, done); }];  // the copied block retains g (MRC)
+		gcCurrent = g;
+	}
+	rp.visibilityResultBuffer = gcCurrent->vis;
+}
+
+static id<MTLRenderCommandEncoder> gcWrap(Enc *enc, id<MTLRenderCommandEncoder> real, id<MTLCommandBuffer> c) {
+	McGcEnc *p = [McGcEnc alloc];  // NSProxy: no -init
+	p->real = real;  // takes over the caller's retain
+	p->cmd = c;
+	p->cb = [gcCurrent retain];
+	p->groups = [NSMutableArray new];
+	p->enc = gcCurrent->encoders++;
+	p->w = enc->width;
+	p->h = enc->height;
+	p->pso = nil;
+	p->segs = 0;
+	p->seg = gcSegment(p);
+	return (id<MTLRenderCommandEncoder>) p;
+}
+
+// After the counted encoder ended: copy each indirect draw's arguments into a shared buffer, read when the command buffer is done.
+static void gcAfterEnd(id<MTLRenderCommandEncoder> render) {
+	if (object_getClass(render) != [McGcEnc class]) return;
+	McGcEnc *p = (McGcEnc *) render;
+	id<MTLBlitCommandEncoder> b = nil;
+	for (McGcSeg *s in p->cb->segs) {
+		if (s->enc != p->enc || !s->nind || s->args) continue;
+		s->args = [[p->real device] newBufferWithLength:(NSUInteger) s->nind * 20 options:MTLResourceStorageModeShared];
+		memset(s->args.contents, 0, (size_t) s->nind * 20);
+		if (!b) b = [p->cmd blitCommandEncoder];
+		for (int i = 0; i < s->nind; i++)
+			[b copyFromBuffer:s->ind[i].buf sourceOffset:s->ind[i].off toBuffer:s->args destinationOffset:(NSUInteger) i * 20
+				size:s->ind[i].indexed ? 20 : 16];
+	}
+	[b endEncoding];
+}
+
+void mc_gpucount_label(const char *name) { snprintf(gcLabel, sizeof gcLabel, "%s", name ? name : ""); }
+
+void mc_gpucount_enable(const char *path, int every, int groups) {
+	if (gcOn) return;
+	gcEvery = every > 0 ? every : 1;
+	gcGroups = groups;
+	gcOut = fopen(path && *path ? path : "gpucount.jsonl", "a");
+	if (!gcOut) { fprintf(stderr, "mcopt-metal: gpuCount: can't open %s\n", path ? path : "gpucount.jsonl"); return; }
+	gcOn = 1;
+	fprintf(stderr, "mcopt-metal: gpuCount on (depth-passing samples + draws/primitives per pipeline, per render encoder%s, every %ld frame(s)): %s\n",
+		gcGroups ? " and debug group" : "", gcEvery, path && *path ? path : "gpucount.jsonl");
+}
+// ---- end of GPU counting ---------------------------------------------------------------------------------------------------
+
 static void endRender(Enc *enc) {
 	if (!enc->render) return;
+	if (rpLog) {
+		printf("mcopt-metal rp end #%d\n", enc->renderSerial);
+		for (int i = 0; i < enc->colorCount; i++)
+			if (enc->colors[i]) rpLogTex("color", i, enc->colors[i], (enc->dead >> i & 1) || enc->colors[i].storageMode == MTLStorageModeMemoryless ? "store dontCare" : "store");
+		if (enc->depth) rpLogTex("depth", 0, enc->depth, (enc->dead & DEAD_DEPTH) ? "store dontCare" : "store");
+		fflush(stdout);
+	}
 	for (int i = 0; i < enc->colorCount; i++) {
 		// Memoryless attachments (the native shading pipeline's G-buffer) have nothing to store.
 		if (enc->colors[i]) [enc->render setColorStoreAction:(enc->dead >> i & 1) || enc->colors[i].storageMode == MTLStorageModeMemoryless
 			? MTLStoreActionDontCare : MTLStoreActionStore atIndex:i];
 	}
 	if (enc->depth) [enc->render setDepthStoreAction:(enc->dead & DEAD_DEPTH) ? MTLStoreActionDontCare : MTLStoreActionStore];
+	if (enc->renderGroup >= 0 && enc->renderGroup < 512 && enc->sampleInfo[enc->renderGroup][0]) {
+		size_t len = strlen(enc->sampleInfo[enc->renderGroup]);
+		snprintf(enc->sampleInfo[enc->renderGroup] + len, 48 - len, " S%d]", enc->colors[0] ? ((enc->dead & 1) ? 0 : 1) : 1);
+	}
+	enc->renderGroup = -1;
 	[enc->render endEncoding];
+	if (gcOn) gcAfterEnd(enc->render);  // -Dmcopt.metal.gpuCount: the indirect draws' arguments, copied back
 	[enc->render release];
 	enc->render = nil;
 	enc->dead = 0;
@@ -477,6 +819,7 @@ void mc_discard(Enc *enc, id<MTLTexture> texture) {
 
 static id<MTLBlitCommandEncoder> blit(Enc *enc) {
 	if (!enc->blit) {
+		encCounters[2]++;
 		endRender(enc);
 		@autoreleasepool {
 			enc->blit = [[cmd(enc) blitCommandEncoder] retain];
@@ -510,10 +853,62 @@ void mc_pre_end_encoders(Enc *enc) {
 	}
 }
 
+static int lastComputeGroup = -1;
+
+int mc_last_compute_group(void) {
+	return lastComputeGroup;
+}
+
+id<MTLComputeCommandEncoder> mc_profiled_compute(Enc *enc, id<MTLCommandBuffer> c, MTLDispatchType type) {
+	@autoreleasepool {
+		lastComputeGroup = -1;
+		if (enc->samples && enc->sampleCount + 4 <= (int) enc->samples.sampleCount) {
+			// (as mcs_compute_begin: start and end in the "vertex" slots of the encoder's group of 4)
+			MTLComputePassDescriptor *d = [MTLComputePassDescriptor computePassDescriptor];
+			d.dispatchType = type;
+			d.sampleBufferAttachments[0].sampleBuffer = enc->samples;
+			d.sampleBufferAttachments[0].startOfEncoderSampleIndex = enc->sampleCount;
+			d.sampleBufferAttachments[0].endOfEncoderSampleIndex = enc->sampleCount + 1;
+			lastComputeGroup = enc->sampleCount / 4;
+			int group = enc->sampleCount / 4;
+			enc->sampleCount += 4;
+			id<MTLComputeCommandEncoder> ce = [[c computeCommandEncoderWithDescriptor:d] retain];
+			if (group < 512) {
+				enc->sampleEnc[group] = [ce retain];
+				enc->sampleKind[group] = c == enc->pre ? 'P' : 'C';
+			}
+			return ce;
+		}
+		return [[c computeCommandEncoderWithDispatchType:type] retain];
+	}
+}
+
+// A blit encoder on c, timestamped like mc_profiled_compute when the encoder log is on (kind 'B'). Retained: the caller releases it.
+id<MTLBlitCommandEncoder> mc_profiled_blit(Enc *enc, id<MTLCommandBuffer> c) {
+	@autoreleasepool {
+		if (enc->samples && enc->sampleCount + 4 <= (int) enc->samples.sampleCount) {
+			MTLBlitPassDescriptor *d = [MTLBlitPassDescriptor blitPassDescriptor];
+			d.sampleBufferAttachments[0].sampleBuffer = enc->samples;
+			d.sampleBufferAttachments[0].startOfEncoderSampleIndex = enc->sampleCount;
+			d.sampleBufferAttachments[0].endOfEncoderSampleIndex = enc->sampleCount + 1;
+			int group = enc->sampleCount / 4;
+			enc->sampleCount += 4;
+			id<MTLBlitCommandEncoder> be = [[c blitCommandEncoderWithDescriptor:d] retain];
+			if (group < 512) {
+				enc->sampleEnc[group] = [be retain];
+				enc->sampleKind[group] = 'B';
+			}
+			return be;
+		}
+		return [[c blitCommandEncoder] retain];
+	}
+}
+
 id<MTLCommandBuffer> mc_pre(Enc *enc) {
 	if (!enc->pre) {
 		@autoreleasepool {
 			enc->pre = [[enc->ctx->queue commandBuffer] retain];
+			encCounters[1]++;
 		}
 	}
 	return enc->pre;
@@ -522,9 +917,7 @@ id<MTLCommandBuffer> mc_pre(Enc *enc) {
 id<MTLComputeCommandEncoder> mc_pre_compute(Enc *enc) {
 	if (!enc->preCompute) {
 		mc_pre_end_encoders(enc);
-		@autoreleasepool {
-			enc->preCompute = [[mc_pre(enc) computeCommandEncoder] retain];
-		}
+		enc->preCompute = mc_profiled_compute(enc, mc_pre(enc), MTLDispatchTypeSerial);
 	}
 	return enc->preCompute;
 }
@@ -577,6 +970,11 @@ id<MTLCommandBuffer> mc_enc_commit(Enc *enc) {
 	id<MTLCommandBuffer> c = cmd(enc);
 	if (diagOn) [c addCompletedHandler:^(id<MTLCommandBuffer> cb) { diagReport("main", n, t, big, mainBytes, cb); }];
 	[c commit];
+	if (gcOn) {  // -Dmcopt.metal.gpuCount: the next frame's encoders get a new record and frame index
+		gcFrame++;
+		[gcCurrent release];
+		gcCurrent = nil;
+	}
 	enc->cmd = nil;
 	if (cpuAhead && !enc->cpuNextPending) {  // opt-in: queue order is commit order, not creation order
 		if (!enc->cpuNextReady) enc->cpuNextReady = dispatch_semaphore_create(0);
@@ -631,7 +1029,9 @@ int mc_profile_begin(Enc *enc, int maxEncoders) {
 			d.sampleCount = maxEncoders * 4;
 			enc->samples = [device newCounterSampleBufferWithDescriptor:d error:nil];
 			enc->sampleCount = 0;
-			[device sampleTimestamps:&profileCpu0 gpuTimestamp:&profileGpu0];
+			// calibrated once: the rate in mc_profile_read only gets better with a longer baseline, and the encoder log's absolute times
+			// (mc_profile_read_abs) stay comparable across submits
+			if (profileGpu0 == 0) [device sampleTimestamps:&profileCpu0 gpuTimestamp:&profileGpu0];
 			return enc->samples != nil;
 		}
 	}
@@ -663,6 +1063,44 @@ void mc_profile_read(Ctx *ctx, id<MTLCounterSampleBuffer> s, int count, double *
 		}
 	}
 	[s release];
+}
+
+// The encoder log (-Dmcopt.own.int.encLog): samples in µs since the first profiled submit's calibration (-1 = didn't run), so encoders of
+// different submits compare; releases s.
+void mc_profile_read_abs(Ctx *ctx, id<MTLCounterSampleBuffer> s, int count, double *out) {
+	MTLTimestamp cpu1, gpu1;
+	[ctx->device sampleTimestamps:&cpu1 gpuTimestamp:&gpu1];
+	double usPerTick = (double) (cpu1 - profileCpu0) / (double) (gpu1 - profileGpu0) / 1000.0;
+	@autoreleasepool {
+		const MTLCounterResultTimestamp *ts = [s resolveCounterRange:NSMakeRange(0, count)].bytes;
+		for (int i = 0; i < count; i++) {
+			out[i] = ts[i].timestamp == MTLCounterErrorValue || ts[i].timestamp == 0 ? -1 : (double) (int64_t) (ts[i].timestamp - profileGpu0) * usPerTick;
+		}
+	}
+	[s release];
+}
+
+// Metal memory the device has allocated (bytes): -Dmcopt.metal.atlasDouble logs it around making the second atlas copy.
+uint64_t mc_device_allocated(Ctx *ctx) { return ctx->device.currentAllocatedSize; }
+
+int mc_profile_count(Enc *enc) { return enc->samples ? enc->sampleCount : -1; }
+
+// The encoder log: each profiled group's kind (R render, C compute, P compute in the pre buffer) and Metal label into out (stride bytes
+// a group, "K:label"), then lets the encoders go. Call before mc_profile_end.
+void mc_profile_labels(Enc *enc, char *out, int stride, int max) {
+	int n = enc->sampleCount / 4;
+	for (int g = 0; g < n && g < 512; g++) {
+		id e = enc->sampleEnc[g];
+		if (g < max) {
+			NSString *label = e ? [(id<MTLCommandEncoder>) e label] : nil;
+			snprintf(out + (size_t) g * stride, (size_t) stride, "%c:%s%s", enc->sampleKind[g] ? enc->sampleKind[g] : '?', label ? label.UTF8String : "",
+				enc->sampleInfo[g]);
+		}
+		if (e) [e release];
+		enc->sampleEnc[g] = nil;
+		enc->sampleKind[g] = 0;
+		enc->sampleInfo[g][0] = 0;
+	}
 }
 
 void mc_blit_buffer(Enc *enc, id<MTLBuffer> src, uint64_t srcOffset, id<MTLBuffer> dst, uint64_t dstOffset, uint64_t size) {
@@ -748,6 +1186,7 @@ static void foldKeep(Enc *enc, id<MTLRenderPipelineState> pso) {
 // which would store every attachment and load them all back for the next pass.
 static void foldDepthClear(Enc *enc, float depthValue, int width, int height) {
 	Ctx *ctx = enc->ctx;
+	enc->tlDepthWritten = 1;
 	@autoreleasepool {
 		id<MTLRenderPipelineState> pso = cpuPass ? foldFind(enc) : nil;  // opt-in
 		if (!pso) {
@@ -793,10 +1232,87 @@ static void openRender(Enc *enc, MTLRenderPassDescriptor *rp) {
 		s.endOfFragmentSampleIndex = enc->sampleCount + 3;
 		enc->sampleCount += 4;
 	}
+	int renderGroup = enc->samples && rp.sampleBufferAttachments[0].sampleBuffer == enc->samples ? enc->sampleCount / 4 - 1 : -1;
+	int counted = gcOn && gcFrame % gcEvery == 0;  // -Dmcopt.metal.gpuCount: see GPU counting above; nothing without the flag
+	if (counted) gcBeforeOpen(enc, rp, cmd(enc));
+	else if (gcOn) rp.visibilityResultBuffer = nil;  // a frame between counted ones (a kept descriptor may still name the buffer)
 	enc->render = [[cmd(enc) renderCommandEncoderWithDescriptor:rp] retain];
+	if (renderGroup >= 0 && renderGroup < 512) {
+		enc->sampleEnc[renderGroup] = [enc->render retain];  // (the encoder itself, before any counting wrapper)
+		enc->sampleKind[renderGroup] = 'R';
+		id<MTLTexture> t0 = rp.colorAttachments[0].texture ?: rp.depthAttachment.texture;
+		snprintf(enc->sampleInfo[renderGroup], 48, " [%dx%d L%d%s", t0 ? (int) t0.width : 0, t0 ? (int) t0.height : 0,
+			(int) (rp.colorAttachments[0].texture ? rp.colorAttachments[0].loadAction : rp.depthAttachment.loadAction), rp.depthAttachment.texture ? " +depth" : "");
+	}
+	if (counted) enc->render = gcWrap(enc, enc->render, cmd(enc));
+	enc->renderGroup = renderGroup;
 	enc->renderSerial++;
+	if (rpLog) {
+		printf("mcopt-metal rp open #%d\n", enc->renderSerial);
+		for (int i = 0; i < 8; i++)
+			if (rp.colorAttachments[i].texture) rpLogTex("color", i, rp.colorAttachments[i].texture, rpLoad(rp.colorAttachments[i].loadAction));
+		if (rp.depthAttachment.texture) rpLogTex("depth", 0, rp.depthAttachment.texture, rpLoad(rp.depthAttachment.loadAction));
+		fflush(stdout);
+	}
 	[enc->render setViewport:(MTLViewport) {0, 0, enc->width, enc->height, 0, 1}];
 	[enc->render setFrontFacingWinding:MTLWindingClockwise];  // vertex Y is flipped to keep GL/Vulkan row order, which mirrors winding too
+	enc->tlDepthCleared = rp.depthAttachment.texture && rp.depthAttachment.loadAction == MTLLoadActionClear;
+	enc->tlDepthClearValue = (float) rp.depthAttachment.clearDepth;
+	enc->tlDepthWritten = 0;
+}
+
+// mc_tl_restart's attachment guard: 0 when the open render encoder is the standard pass a restart is known to keep exact (every colour a
+// memory-backed single-sample 2D texture, depth a memory-backed single-sample Depth32Float, nothing marked dead: a pending discard would
+// store don't-care and the reopened encoder would load garbage); else why not: 1 nothing open, 2 no colour, 3 a colour memoryless,
+// 4 a colour multisampled or not 2D, 5 no depth, 6 depth not Depth32Float, 7 depth memoryless or multisampled, 8 a pending discard.
+// (The backend binds no resolve or stencil attachments.)
+int mc_tl_restart_ok(Enc *enc) {
+	if (!enc->render) return 1;
+	int colours = 0;
+	for (int i = 0; i < enc->colorCount; i++) {
+		id<MTLTexture> t = enc->colors[i];
+		if (!t) continue;
+		colours++;
+		if (t.storageMode == MTLStorageModeMemoryless) return 3;
+		if (t.sampleCount != 1 || t.textureType != MTLTextureType2D) return 4;
+	}
+	if (!colours) return 2;
+	if (!enc->depth) return 5;
+	if (enc->depth.pixelFormat != MTLPixelFormatDepth32Float) return 6;
+	if (enc->depth.storageMode == MTLStorageModeMemoryless || enc->depth.sampleCount != 1) return 7;
+	if (enc->dead) return 8;
+	return 0;
+}
+
+// mc_tl_restart: the open render encoder ended and reopened on the same attachments, colours loaded back, so the draws before and
+// after are passes of their own (a pass's fragments start after all its vertex work; -Dmcopt.own.tl.a1Split splits phase A's first
+// part this way). mode 2: when the encoder opened with its depth cleared and nothing in it wrote depth since, the depth still holds
+// that clear value: it isn't stored and the new encoder clears it to the same value. Otherwise (mode 1) depth is stored and loaded.
+// Returns 0 nothing open, 1 reopened (depth kept), 2 reopened (depth cleared again).
+int mc_tl_restart(Enc *enc, int mode) {
+	if (!enc->render || mc_tl_restart_ok(enc) != 0) return 0;  // (not a supported pass: the caller's draws stay in this encoder)
+	int dead = mode == 2 && enc->depth && enc->tlDepthCleared && !enc->tlDepthWritten;
+	float v = enc->tlDepthClearValue;
+	if (dead) enc->dead |= DEAD_DEPTH;
+	endRender(enc);
+	endBlit(enc);
+	@autoreleasepool {
+		MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+		for (int i = 0; i < enc->colorCount; i++) {
+			if (!enc->colors[i]) continue;
+			rp.colorAttachments[i].texture = enc->colors[i];
+			rp.colorAttachments[i].loadAction = enc->colors[i].storageMode == MTLStorageModeMemoryless ? MTLLoadActionDontCare : MTLLoadActionLoad;
+			rp.colorAttachments[i].storeAction = MTLStoreActionUnknown;
+		}
+		if (enc->depth) {
+			rp.depthAttachment.texture = enc->depth;
+			rp.depthAttachment.loadAction = dead ? MTLLoadActionClear : MTLLoadActionLoad;
+			rp.depthAttachment.clearDepth = v;
+			rp.depthAttachment.storeAction = MTLStoreActionUnknown;
+		}
+		openRender(enc, rp);
+	}
+	return 1 + dead;
 }
 
 // opt-in (cpuPass): enc's kept pass descriptor with every field mc_render_begin or openRender may have set on it
@@ -884,16 +1400,85 @@ int mc_render_begin(Enc *enc, int count, id<MTLTexture> const *colors, const flo
 	return 0;
 }
 
+// -Dmcopt.metal.passTest=N,MODE (measurement only): N empty render passes at the head of the frame (every 20th), profiled like the frame's
+// own (encoder log). MODE bits: 1 a depth attachment too, 2 each pass in its own command buffer (committed at once), 4 the passes target
+// mips 0..N-1 of one texture (else N separate 256x32 textures), 8 load instead of clear, 16 the test textures untracked (no hazard tracking).
+static id<MTLTexture> ptColor[16], ptDepth[16], ptMipColor, ptMipDepth;
+static int ptMode = -1;
+static id<MTLTexture> ptTexture(Ctx *ctx, MTLPixelFormat format, int w, int h, int mips, int untracked) {
+	MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:w height:h mipmapped:mips > 1];
+	if (mips > 1) d.mipmapLevelCount = mips;
+	d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	d.storageMode = MTLStorageModePrivate;
+	if (untracked) d.hazardTrackingMode = MTLHazardTrackingModeUntracked;
+	return [ctx->device newTextureWithDescriptor:d];
+}
+void mc_pass_test(Enc *enc, int n, int mode) {
+	if (n <= 0) return;
+	if (n > 8) n = 8;
+	Ctx *ctx = enc->ctx;
+	@autoreleasepool {
+		if (ptMode != mode) {
+			int un = (mode & 16) != 0;
+			for (int i = 0; i < 16; i++) {
+				[ptColor[i] release]; [ptDepth[i] release];
+				ptColor[i] = ptTexture(ctx, MTLPixelFormatRGBA8Unorm, 256, 32, 1, un);
+				ptDepth[i] = ptTexture(ctx, MTLPixelFormatDepth32Float, 256, 32, 1, un);
+			}
+			[ptMipColor release]; [ptMipDepth release];
+			ptMipColor = ptTexture(ctx, MTLPixelFormatRGBA8Unorm, 2048, 2048, 9, un);
+			ptMipDepth = nil;
+			ptMode = mode;
+		}
+		endRender(enc);
+		endBlit(enc);
+		for (int i = 0; i < n; i++) {
+			MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+			id<MTLTexture> c = (mode & 4) ? ptMipColor : ptColor[i];
+			rp.colorAttachments[0].texture = c;
+			if (mode & 4) rp.colorAttachments[0].level = i;
+			rp.colorAttachments[0].loadAction = (mode & 8) ? MTLLoadActionLoad : MTLLoadActionClear;
+			rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+			if ((mode & 1) && !(mode & 4)) {
+				rp.depthAttachment.texture = ptDepth[i];
+				rp.depthAttachment.loadAction = MTLLoadActionClear;
+				rp.depthAttachment.storeAction = MTLStoreActionStore;
+			}
+			int group = -1;
+			if (enc->samples && enc->sampleCount + 4 <= (int) enc->samples.sampleCount) {
+				MTLRenderPassSampleBufferAttachmentDescriptor *sd = rp.sampleBufferAttachments[0];
+				sd.sampleBuffer = enc->samples;
+				sd.startOfVertexSampleIndex = enc->sampleCount;
+				sd.endOfVertexSampleIndex = enc->sampleCount + 1;
+				sd.startOfFragmentSampleIndex = enc->sampleCount + 2;
+				sd.endOfFragmentSampleIndex = enc->sampleCount + 3;
+				group = enc->sampleCount / 4;
+				enc->sampleCount += 4;
+			}
+			id<MTLCommandBuffer> cb = (mode & 2) ? [ctx->queue commandBuffer] : cmd(enc);
+			id<MTLRenderCommandEncoder> re = [cb renderCommandEncoderWithDescriptor:rp];
+			re.label = @"passtest";
+			if (group >= 0 && group < 512) {
+				enc->sampleEnc[group] = [re retain];
+				enc->sampleKind[group] = 'R';
+				snprintf(enc->sampleInfo[group], 48, " [%dx%d m%d L%d%s S1]", (int) c.width >> ((mode & 4) ? i : 0), (int) c.height >> ((mode & 4) ? i : 0),
+					(mode & 4) ? i : 0, (mode & 8) ? 1 : 2, rp.depthAttachment.texture ? " +depth" : "");
+			}
+			[re endEncoding];
+			if (mode & 2) [cb commit];
+		}
+	}
+}
+
 // Terrain occlusion (mcterrain.m) only: ends the open render encoder with every live attachment stored and returns a
 // concurrent compute encoder (dispatches overlap unless a barrier orders them) for work that reads them; mc_render_resume
 // then reopens the pass on the same attachments with their contents loaded back. The reopened encoder has no state but the
 // viewport and winding: the caller rebinds the rest.
 id<MTLComputeCommandEncoder> mc_render_suspend(Enc *enc) {
+	if (rpLog) printf("mcopt-metal rp suspend (a split: compute between the pass's encoders)\n");
 	endRender(enc);
 	endBlit(enc);  // MetalTerrain's held arena copies, recorded just before
-	@autoreleasepool {
-		return [[cmd(enc) computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent] retain];
-	}
+	return mc_profiled_compute(enc, cmd(enc), MTLDispatchTypeConcurrent);
 }
 
 void mc_render_resume(Enc *enc, id<MTLComputeCommandEncoder> compute) {
@@ -921,6 +1506,7 @@ void mc_r_pipeline(Enc *enc, id<MTLRenderPipelineState> pso, id<MTLDepthStencilS
 	id<MTLRenderCommandEncoder> r = enc->render;
 	[r setRenderPipelineState:pso];
 	if (depth) [r setDepthStencilState:depth];
+	if (depth && depth.label.length) enc->tlDepthWritten = 1;  // (a writing depth state: mc_depth_state_new labels it)
 	[r setCullMode:cull ? MTLCullModeBack : MTLCullModeNone];
 	[r setTriangleFillMode:wireframe ? MTLTriangleFillModeLines : MTLTriangleFillModeFill];
 	[r setDepthBias:biasConstant slopeScale:biasSlope clamp:0];
@@ -937,6 +1523,17 @@ void mc_r_vertex_buffer(Enc *enc, int index, id<MTLBuffer> buffer, uint64_t offs
 }
 
 void mc_r_bytes(Enc *enc, int index, const void *bytes, int length) {
+	// A uniform block's std140 size isn't always a multiple of 16, but the translated MSL struct is (its alignment): bind the
+	// struct's size, zero-padded. Every member keeps its bytes; only the struct's tail padding was outside (Metal API validation:
+	// "has space for N bytes, but argument has a length(N+4..8)").
+	int padded = (length + 15) & ~15;
+	uint8_t tmp[4096];
+	if (padded != length && padded <= (int) sizeof tmp) {
+		memcpy(tmp, bytes, length);
+		memset(tmp + length, 0, padded - length);
+		bytes = tmp;
+		length = padded;
+	}
 	[enc->render setVertexBytes:bytes length:length atIndex:index];
 	[enc->render setFragmentBytes:bytes length:length atIndex:index];
 }
@@ -1382,86 +1979,3 @@ static void pqSubmit(void) {
 }
 
 long mc_present_skipped(void) { return atomic_load(&pqSkipped); }
-
-// ---- MetalFX temporal upscaling ----
-
-typedef struct {
-	id<MTLFXTemporalScaler> scaler;
-	id<MTLTexture> motion;  // input size, RG16Float, written by motion_cs
-	id<MTLTexture> output;  // output size, what the scaler writes; copied into the game's full-size target
-} Fx;
-
-Fx *mc_fx_new(Ctx *ctx, int inW, int inH, int outW, int outH, int colorFormat, int depthFormat, char *err, int errCap) {
-	@autoreleasepool {
-		if (![MTLFXTemporalScalerDescriptor supportsDevice:ctx->device]) {
-			strlcpy(err, "MetalFX temporal scaling isn't supported on this GPU", errCap);
-			return NULL;
-		}
-		MTLFXTemporalScalerDescriptor *d = [[MTLFXTemporalScalerDescriptor new] autorelease];
-		d.colorTextureFormat = d.outputTextureFormat = (MTLPixelFormat) colorFormat;
-		d.depthTextureFormat = (MTLPixelFormat) depthFormat;
-		d.motionTextureFormat = MTLPixelFormatRG16Float;
-		d.inputWidth = inW;
-		d.inputHeight = inH;
-		d.outputWidth = outW;
-		d.outputHeight = outH;
-		id<MTLFXTemporalScaler> scaler = [d newTemporalScalerWithDevice:ctx->device];
-		if (!scaler) {
-			snprintf(err, errCap, "MetalFX refused %dx%d -> %dx%d, color format %d, depth format %d", inW, inH, outW, outH, colorFormat, depthFormat);
-			return NULL;
-		}
-		MTLTextureDescriptor *t = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRG16Float width:inW height:inH mipmapped:NO];
-		t.storageMode = MTLStorageModePrivate;
-		t.usage = MTLTextureUsageShaderWrite | scaler.motionTextureUsage;
-		Fx *fx = calloc(1, sizeof(Fx));
-		fx->scaler = scaler;
-		fx->motion = [ctx->device newTextureWithDescriptor:t];
-		t = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:(MTLPixelFormat) colorFormat width:outW height:outH mipmapped:NO];
-		t.storageMode = MTLStorageModePrivate;
-		t.usage = scaler.outputTextureUsage;
-		fx->output = [ctx->device newTextureWithDescriptor:t];
-		return fx;
-	}
-}
-
-void mc_fx_free(Fx *fx) {
-	[fx->scaler release];
-	[fx->motion release];
-	[fx->output release];
-	free(fx);
-}
-
-// reproject: column-major 4x4 taking this frame's unjittered clip space to last frame's. Jitter is in input pixels;
-// motionSign flips the motion vectors' direction (they're written as last frame's position minus this frame's).
-void mc_fx_upscale(Enc *enc, Fx *fx, id<MTLTexture> color, id<MTLTexture> depth, id<MTLTexture> dst, const float *reproject,
-	float jitterX, float jitterY, float motionSign, int reset) {
-	endBlit(enc);
-	endRender(enc);
-	id<MTLFXTemporalScaler> s = fx->scaler;
-	struct { simd_float4x4 m; simd_float2 size; } r;
-	memcpy(&r.m, reproject, sizeof r.m);
-	r.size = simd_make_float2(s.inputWidth, s.inputHeight);
-	@autoreleasepool {
-		id<MTLComputeCommandEncoder> c = [cmd(enc) computeCommandEncoder];
-		[c setComputePipelineState:enc->ctx->motion];
-		[c setTexture:depth atIndex:0];
-		[c setTexture:fx->motion atIndex:1];
-		[c setBytes:&r length:sizeof r atIndex:0];
-		[c dispatchThreads:MTLSizeMake(s.inputWidth, s.inputHeight, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
-		[c endEncoding];
-	}
-	s.colorTexture = color;
-	s.depthTexture = depth;
-	s.motionTexture = fx->motion;
-	s.outputTexture = fx->output;
-	s.inputContentWidth = s.inputWidth;
-	s.inputContentHeight = s.inputHeight;
-	s.jitterOffsetX = jitterX;
-	s.jitterOffsetY = jitterY;
-	s.motionVectorScaleX = motionSign * s.inputWidth;
-	s.motionVectorScaleY = motionSign * s.inputHeight;
-	s.depthReversed = YES;
-	s.reset = reset != 0;
-	[s encodeToCommandBuffer:cmd(enc)];
-	[blit(enc) copyFromTexture:fx->output toTexture:dst];
-}

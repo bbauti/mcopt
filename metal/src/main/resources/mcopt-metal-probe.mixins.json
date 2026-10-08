@@ -1,8 +1,0 @@
-{
-	"required": true,
-	"package": "mcopt.metal.mixin.probe",
-	"plugin": "mcopt.metal.mixin.probe.ProbeMixinPlugin",
-	"compatibilityLevel": "JAVA_25",
-	"client": ["PollProbeMixin"],
-	"injectors": { "defaultRequire": 1 }
-}

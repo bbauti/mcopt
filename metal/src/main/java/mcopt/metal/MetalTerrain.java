@@ -28,7 +28,7 @@ import org.lwjgl.system.MemoryUtil;
 final class MetalTerrain {
 	private static final String MODE = System.getProperty("mcopt.metal.occ", "auto");
 	/** The split's machinery is built: its pipelines, arena tracking and pre command buffer. */
-	static final boolean OCC = !MODE.equals("false");
+	static final boolean OCC = false; // terrain occlusion culls Sodium's terrain: not in this build
 	/** Buffer slots of the pulled vertex shader, above any pipeline's uniforms. */
 	static final int QUADS_SLOT = 20, REGIONS_SLOT = 21, ARENAS_SLOT = 22;
 	private static final int CHUNK_QUADS = 64, MAX_ARENAS = 8, REGION_BYTES = 20, CHUNK_BYTES = 8, VERTEX_BYTES = 20;
@@ -132,7 +132,9 @@ final class MetalTerrain {
 		for (int q = 0, i = 0; q < CHUNK_QUADS; q++) {
 			for (int corner : new int[] {0, 1, 2, 2, 3, 0}) MemoryUtil.memPutShort(address + 2L * i++, (short) (q * 4 + corner));
 		}
-		this.indices = new MetalBuffer(encoder, Native.bufferPrivate(encoder.ctx, shared, size), GpuBuffer.USAGE_INDEX, size);
+		// private storage has no CPU mapping: no contents() call (Metal API validation aborts on it; without validation it returns
+		// null, and the buffer is only ever bound as an index buffer, never mapped)
+		this.indices = new MetalBuffer(encoder, Native.bufferPrivate(encoder.ctx, shared, size), GpuBuffer.USAGE_INDEX, size, 0L);
 		Native.release(shared);
 		if (!OCC) {
 			this.handle = 0;
@@ -140,7 +142,7 @@ final class MetalTerrain {
 		}
 		try (MemoryStack stack = MemoryStack.stackPush()) {
 			long err = stack.nmalloc(1, 1024);
-			this.handle = Native.terrainNew(encoder.ctx, err, 1024);
+			this.handle = unavailable();
 			if (this.handle == 0) throw new IllegalStateException("terrain culling: " + MemoryUtil.memUTF8(err));
 		}
 	}
@@ -360,12 +362,10 @@ final class MetalTerrain {
 		MetalBuffer work = this.workBuffer(second.size, first.args);
 		this.secondArgs[this.frame][this.flushes - 1] = second.args;
 		try (MemoryStack stack = MemoryStack.stackPush()) {
-			Native.occLast(enc, this.handle, chunkBuffer.handle, chunkSlice.offset(), this.chunkCount, regionBuffer.handle, regionSlice.offset(), addresses, handles,
-				this.arenas.size(), frame, work.handle, first.offsets(stack));
+			unavailable();
 		}
 		List<MetalBuffer> arenas = List.copyOf(this.arenas);
 		this.drawPulled(enc, p, arenas, addresses, work, first.quads, first.args, regionBuffer, regionSlice.offset());
-		if (this.encoder.probe != null) this.drawnForProbe.add(new Drawn(work, first.quads, first.args, arenas.toArray(MetalBuffer[]::new)));
 		this.waiting.add(new Waiting(p, restore, chunkBuffer, chunkSlice.offset(), this.chunkCount, regionBuffer, regionSlice.offset(), arenas, addresses, work,
 			second));
 	}
@@ -379,12 +379,11 @@ final class MetalTerrain {
 	void split(long enc, Runnable rebind) {
 		if (this.waiting.isEmpty()) return;
 		this.releaseHeld(false);
-		long compute = Native.occSuspend(enc, this.handle);
+		long compute = unavailable();
 		try (MemoryStack stack = MemoryStack.stackPush()) {
 			for (int step = 0; step < 4; step++) {
 				for (Waiting w : this.waiting) {
-					Native.occCull(compute, this.handle, step, w == this.waiting.getFirst(), w.chunks.handle, w.chunksOffset, w.chunkCount, w.regions.handle,
-						w.regionsOffset, w.tables, w.tables + TABLES_BYTES / 2, w.arenas.size(), w.tables + TABLES_BYTES, w.work.handle, w.second.offsets(stack));
+					unavailable();
 				}
 			}
 		}
@@ -392,7 +391,6 @@ final class MetalTerrain {
 		for (Waiting w : this.waiting) {
 			w.restore.run();
 			this.drawPulled(enc, w.p, w.arenas, w.tables, w.work, w.second.quads, w.second.args, w.regions, w.regionsOffset);
-			if (this.encoder.probe != null) this.drawnForProbe.add(new Drawn(w.work, w.second.quads, w.second.args, w.arenas.toArray(MetalBuffer[]::new)));
 		}
 		this.waiting.clear();
 		rebind.run();
@@ -443,9 +441,7 @@ final class MetalTerrain {
 			out = new MetalBuffer(this.encoder, Native.bufferNew(this.encoder.ctx, size + size / 2), 0, size + size / 2);
 			this.clouds[this.frame] = out;
 		}
-		Native.cloudsCull(this.encoder.enc, this.handle, this.encoder.use(faces.buffer()).handle, faces.offset(), count, this.encoder.use(modelView.buffer()).handle,
-			modelView.offset(), this.encoder.use(projection.buffer()).handle, projection.offset(), this.encoder.use(info.buffer()).handle, info.offset(),
-			this.encoder.use(out).handle, CLOUD_FACES);
+		unavailable();
 		return out;
 	}
 
@@ -524,5 +520,10 @@ final class MetalTerrain {
 		private static long align(long x) {
 			return (x + 15) & ~15L;
 		}
+	}
+
+	/** The terrain occlusion kernels are not part of this build (OCC is false, so nothing reaches here). */
+	private static long unavailable() {
+		throw new IllegalStateException("terrain occlusion is not part of this build");
 	}
 }

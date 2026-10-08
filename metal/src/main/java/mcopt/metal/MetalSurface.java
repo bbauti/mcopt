@@ -47,10 +47,9 @@ final class MetalSurface implements GpuSurfaceBackend {
 	@Override
 	public void configure(GpuSurface.Configuration config) {
 		boolean vsync = config.presentMode() == GpuSurface.PresentMode.FIFO;
-		// Frame generation schedules every present on the display's refresh grid, which needs vsync (FrameGen).
-		this.paced = !vsync && PACE && !FrameGen.ENABLED;
+		this.paced = !vsync && PACE;
 		if (PACE_ADAPT) Native.paceAdapt(this.paced ? 1 : 0);
-		Native.layerConfigure(this.ctx, this.layer, config.width(), config.height(), (vsync || FrameGen.ENABLED || PACE_SYNC && this.paced ? 1 : 0) | DRAWABLES << 8);
+		Native.layerConfigure(this.ctx, this.layer, config.width(), config.height(), (vsync || PACE_SYNC && this.paced ? 1 : 0) | DRAWABLES << 8);
 	}
 
 	@Override
@@ -66,12 +65,13 @@ final class MetalSurface implements GpuSurfaceBackend {
 	public void blitFromTexture(CommandEncoderBackend commandEncoder, GpuTextureView textureView) {
 		// mcopt.rec hook: the opt-in recorder (-Dmcopt.rec, mcopt.metal.rec) takes the finished frame, GUI included. Rec.ON is a constant false without it.
 		if (mcopt.metal.rec.Rec.ON) mcopt.metal.rec.Rec.frame(this.encoder, textureView);
-		FrameGen frameGen = FrameGen.ENABLED ? FrameGen.get(this.encoder) : null;
-		if (frameGen != null) {
-			frameGen.frame(textureView, this.layer);
+		long t0 = WaitStats.ON ? System.nanoTime() : 0;
+		if (this.paced && !Native.pace(PACE_MARGIN_S)) {
+			if (WaitStats.ON) WaitStats.wait(WaitStats.PACE, System.nanoTime() - t0, 0);
 			return;
 		}
-		if (this.paced && !Native.pace(PACE_MARGIN_S)) return;
+		long t1 = WaitStats.ON ? System.nanoTime() : 0;
+		if (WaitStats.ON && this.paced) WaitStats.wait(WaitStats.PACE, t1 - t0, 0);
 		if (MetalEncoder.PRESENT_ACQUIRE) {
 			this.encoder.presentAcquire(this.layer, textureView); // no nextDrawable here: the present side acquires it
 			return;
@@ -83,6 +83,7 @@ final class MetalSurface implements GpuSurfaceBackend {
 		} finally {
 			MetalEvents.end(event);
 		}
+		if (WaitStats.ON) WaitStats.wait(WaitStats.DRAWABLE, System.nanoTime() - t1, 0);
 		if (drawable == 0) return; // no drawable (window hidden): skip the frame's present
 		this.encoder.presentTexture(drawable, textureView);
 		this.encoder.afterGpuFinishes(() -> Native.release(drawable));
@@ -91,9 +92,6 @@ final class MetalSurface implements GpuSurfaceBackend {
 	@Override
 	public void present() {
 		// The present was scheduled on the frame's command buffer in blitFromTexture and happens when it's committed.
-		// Frame generation shows the frame once its GPU work is done; here the game waits for its next frame's turn (FrameGen).
-		FrameGen frameGen = FrameGen.ENABLED ? FrameGen.get(this.encoder) : null;
-		if (frameGen != null) frameGen.afterSubmit();
 	}
 
 	@Override
@@ -103,8 +101,6 @@ final class MetalSurface implements GpuSurfaceBackend {
 
 	@Override
 	public void close() {
-		FrameGen frameGen = FrameGen.ENABLED ? FrameGen.get(this.encoder) : null;
-		if (frameGen != null) frameGen.close();
 		SDLMetal.SDL_Metal_DestroyView(this.view);
 	}
 }

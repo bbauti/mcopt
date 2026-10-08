@@ -12,6 +12,8 @@ public final class GpuTimes {
 	private static final int CAPACITY = 1 << 20;
 	private static final long[] submitNs = new long[CAPACITY], startNs = new long[CAPACITY], endNs = new long[CAPACITY];
 	private static final boolean[] presenting = new boolean[CAPACITY];
+	/** Render encoders the frame opened (vanilla's texture-animation tick frames open one per atlas mip). */
+	private static final int[] passes = new int[CAPACITY];
 	private static final long[] pollNs = Latency.ON ? new long[CAPACITY] : null;
 	private static final long[] calibration = calibrate();
 	private static int retired;
@@ -35,8 +37,31 @@ public final class GpuTimes {
 		return new long[] {offset, best, midpoint};
 	}
 
-	static void submit(long index) {
-		if (index < CAPACITY) submitNs[(int) index] = System.nanoTime();
+	static void submit(long index, int renderPasses) {
+		if (index >= CAPACITY) return;
+		submitNs[(int) index] = System.nanoTime();
+		passes[(int) index] = renderPasses;
+		if (probeNames != null) {
+			probeModeOf[(int) index] = probeMode;
+			probeWindowOf[(int) index] = probeWindow;
+		}
+	}
+
+	/** The in-run probe (OwnTerrain, -Dmcopt.own.probe): its current mode and window, tagged on each submit from now on. */
+	private static volatile int probeMode = -1, probeWindow = -1;
+	private static volatile String[] probeNames;
+	private static int[] probeModeOf, probeWindowOf;
+
+	public static void probeTag(int mode, int window, String[] names) {
+		if (probeNames == null) {
+			probeModeOf = new int[CAPACITY];
+			probeWindowOf = new int[CAPACITY];
+			java.util.Arrays.fill(probeModeOf, -1);
+			java.util.Arrays.fill(probeWindowOf, -1);
+		}
+		probeMode = mode;
+		probeWindow = window;
+		probeNames = names;
 	}
 	static void present(long index, long drawable) {
 		if (index >= CAPACITY) return;
@@ -65,42 +90,62 @@ public final class GpuTimes {
 	 */
 	public static Map<String, Object> snapshot(Map<String, Map<String, Object>> phases) {
 		Map<String, Object> out = new LinkedHashMap<>();
+		// A warm report is its own index space: retain only this request, never relabel/export earlier requests.
+		// Native callback slots remain global (not safe to recycle with outstanding command buffers).
+		int first = 0;
+		if (Boolean.getBoolean("mcopt.bench.warm")) {
+			long begin = Long.MAX_VALUE;
+			for (Map<String, Object> p : phases.values()) {
+				if (p.get("nanoRange") instanceof long[] r) begin = Math.min(begin, r[0]);
+			}
+			while (first < retired && endNs[first] < begin) first++;
+			out.put("sessionSubmitOffset", first);
+			out.put("sessionRetired", retired);
+		}
 		out.put("signal", "command-buffer GPU completion; handler timestamps are callback delivery, not scanout");
 		out.put("clockCalibrationStart", calibration);
 		out.put("clockCalibrationEnd", calibrate());
 		out.put("capacity", CAPACITY);
 		out.put("dropped", dropped);
 		out.put("inFlight", Integer.getInteger("mcopt.metal.inFlight", 2));
-		out.put("submitIndex", java.util.stream.LongStream.range(0, retired).toArray());
-		out.put("submitNs", Arrays.copyOf(submitNs, retired));
-		out.put("gpuStartNs", Arrays.copyOf(startNs, retired));
-		out.put("gpuEndNs", Arrays.copyOf(endNs, retired));
-		out.put("presenting", Arrays.copyOf(presenting, retired));
-		if (pollNs != null) out.put("pollNs", Arrays.copyOf(pollNs, retired));
+		out.put("submitIndex", java.util.stream.LongStream.range(0, retired - first).toArray());
+		out.put("submitNs", Arrays.copyOfRange(submitNs, first, retired));
+		out.put("gpuStartNs", Arrays.copyOfRange(startNs, first, retired));
+		out.put("gpuEndNs", Arrays.copyOfRange(endNs, first, retired));
+		out.put("presenting", Arrays.copyOfRange(presenting, first, retired));
+		if (probeNames != null) {
+			out.put("probeModes", probeNames);
+			out.put("probeMode", Arrays.copyOfRange(probeModeOf, first, retired));
+			out.put("probeWindow", Arrays.copyOfRange(probeWindowOf, first, retired));
+		}
+		out.put("renderPasses", Arrays.copyOfRange(passes, first, retired));
+		if (pollNs != null) out.put("pollNs", Arrays.copyOfRange(pollNs, first, retired));
 		long[] handlers = new long[retired], presented = new long[retired];
-		for (int i = 0; i < retired; i++) {
+		for (int i = first; i < retired; i++) {
 			long h = Native.cadenceHandler(i), p = Native.cadencePresented(i);
 			handlers[i] = h == 0 ? 0 : h + calibration[0];
 			presented[i] = p == 0 ? 0 : p + calibration[0];
 		}
-		out.put("presentedHandlerNs", handlers);
-		out.put("presentedTimeNs", presented);
+		out.put("presentedHandlerNs", Arrays.copyOfRange(handlers, first, retired));
+		out.put("presentedTimeNs", Arrays.copyOfRange(presented, first, retired));
 		for (Map<String, Object> phase : phases.values()) {
 			long[] range = (long[]) phase.get("nanoRange");
 			if (range == null) continue;
 			int count = 0;
-			for (int i = 0; i < retired; i++)
+			for (int i = first; i < retired; i++)
 				if (endNs[i] >= range[0] && endNs[i] < range[1]) count++;
 			long[] indices = new long[count], submits = new long[count], starts = new long[count], allEnds = new long[count];
+			int[] framePasses = new int[count];
 			long[] callback = new long[count], scanout = new long[count], ends = new long[count], polls = new long[count];
 			boolean[] presents = new boolean[count];
 			int n = 0, row = 0;
-			for (int i = 0; i < retired; i++) {
+			for (int i = first; i < retired; i++) {
 				if (endNs[i] < range[0] || endNs[i] >= range[1]) continue;
-				indices[row] = i;
+				indices[row] = i - first;
 				submits[row] = submitNs[i];
 				starts[row] = startNs[i];
 				allEnds[row] = endNs[i];
+				framePasses[row] = passes[i];
 				presents[row] = presenting[i];
 				callback[row] = handlers[i];
 				if (pollNs != null) polls[row] = pollNs[i];
@@ -112,6 +157,7 @@ public final class GpuTimes {
 			gpuFrames.put("submitNs", submits);
 			gpuFrames.put("gpuStartNs", starts);
 			gpuFrames.put("gpuEndNs", allEnds);
+			gpuFrames.put("renderPasses", framePasses);
 			gpuFrames.put("presenting", presents);
 			gpuFrames.put("presentedHandlerNs", callback);
 			gpuFrames.put("presentedTimeNs", scanout);

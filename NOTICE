@@ -4,25 +4,4 @@ Copyright 2026 Noah Dunnagan
 mcopt, a Minecraft mod, was created by Noah Dunnagan. If you use or redistribute this code, keep this NOTICE with it
 and credit mcopt (https://github.com/noahdunnagan/mcopt).
 
-mcopt is licensed under the Apache License, Version 2.0 (LICENSE), except for the files below, which keep the licence
-of the project they come from. Each of them says so in its header.
-
-Sodium (https://github.com/CaffeineMC/sodium)
-  Copyright JellySquid (jellysquid3) and contributors.
-  Licensed under the PolyForm Shield License 1.0.0: LICENSES/PolyForm-Shield-1.0.0.md
-  (https://polyformproject.org/licenses/shield/1.0.0).
-  Required Notice lines: Sodium provides none (checked: every file in sodium-mc26.3-0.9.3-alpha.1-fabric.jar, and
-  LICENSE.md in Sodium's repository). Sodium is not included in mcopt; install it separately.
-
-  Copied or adapted from Sodium (the whole file is under PolyForm Shield 1.0.0):
-    metal/src/main/java/mcopt/metal/mixin/chunk/LevelSliceAirMixin.java
-    metal/src/main/java/mcopt/metal/mixin/chunk/BlockRendererMixin.java
-    metal/src/main/java/mcopt/metal/mixin/chunk/LevelBiomeSliceMixin.java
-    metal/src/main/java/mcopt/metal/mixin/chunk/LevelSliceBoundsMixin.java
-    metal/src/main/java/mcopt/metal/mixin/chunk/DirectionalVisGraphMixin.java
-    metal/src/main/resources/mcopt/metal/msl/sodium_terrain.vs.metal
-    metal/src/main/resources/mcopt/metal/msl/sodium_terrain.fs.metal
-  Portions copied or adapted from Sodium (those portions are under PolyForm Shield 1.0.0, the rest is Apache-2.0):
-    metal/src/main/java/mcopt/metal/cpu/CullReuse.java
-    metal/src/main/native/mcprobe.m
-    metal/src/main/native/mcterrain.m
+mcopt is licensed under the Apache License, Version 2.0 (LICENSE).

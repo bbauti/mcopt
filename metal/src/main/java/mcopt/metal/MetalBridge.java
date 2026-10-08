@@ -21,6 +21,11 @@ import org.lwjgl.system.MemoryUtil;
  * own classes stay package-private and its hot paths untouched.
  */
 public final class MetalBridge {
+	/** Blocks until the GPU has finished every submitted frame (MetalEncoder.waitIdle): own's level-change release (OwnTerrain.disposeAll). */
+	public static void waitIdle(Object encoder) {
+		((MetalEncoder) encoder).waitIdle();
+	}
+
 	private MetalBridge() {
 	}
 
@@ -66,6 +71,11 @@ public final class MetalBridge {
 		Native.blitTextureToBuffer(enc, texture, 0, 0, 0, width, height, buffer, 0, width * bytesPerPixel);
 	}
 
+	/** Copies w x h texels at (x, y) of texture (mip 0) into buffer at offset, at the frame's current point (a blit). */
+	public static void readTextureRegion(long enc, long texture, int x, int y, int w, int h, int bytesPerPixel, long buffer, long offset) {
+		Native.blitTextureToBuffer(enc, texture, 0, x, y, w, h, buffer, offset, w * bytesPerPixel);
+	}
+
 	public static int pixelFormat(GpuFormat format) {
 		return MetalConst.pixelFormat(format);
 	}
@@ -100,12 +110,28 @@ public final class MetalBridge {
 		return ((MetalTexture) texture).handle;
 	}
 
+	/** Whether the texture was created with ShaderWrite usage (a compute kernel may write it). */
+	public static boolean shaderWritable(GpuTexture texture) {
+		return texture instanceof MetalTexture t && t.shaderWrite;
+	}
+
 	public static long viewHandle(GpuTextureView view) {
 		return ((MetalTexture.View) view).handle;
 	}
 
 	public static long samplerHandle(GpuSampler sampler) {
 		return ((MetalSampler) sampler).handle();
+	}
+
+	/**
+	 * mc_sampler_new's arguments for sampler, as MetalSampler.create computed them: {addressU, addressV, min, mag, mip, anisotropy,
+	 * maxLod} (the own renderer's frame capture, -Dmcopt.own.capture, records them for its replay).
+	 */
+	public static float[] samplerParams(GpuSampler sampler) {
+		MetalSampler s = (MetalSampler) sampler;
+		double lod = s.getMaxLod().orElse(1000.0);
+		return new float[] {MetalConst.addressMode(s.getAddressModeU()), MetalConst.addressMode(s.getAddressModeV()), MetalConst.filter(s.getMinFilter()),
+			MetalConst.filter(s.getMagFilter()), lod > 0.25 ? 2 : 0, Math.max(1, s.getMaxAnisotropy()), (float) Math.max(0.25, lod)};
 	}
 
 	public static long bufferHandle(GpuBuffer buffer) {
@@ -115,6 +141,19 @@ public final class MetalBridge {
 	/** The backend's encoder behind a frontend command encoder, or null when the game isn't on the Metal backend. */
 	public static @Nullable Object encoder(CommandEncoderBackend backend) {
 		return backend instanceof MetalEncoder e ? e : null;
+	}
+
+	/**
+	 * Native handle of buffer, marked as used by the frame being recorded (so the backend won't rewrite it in place while
+	 * the GPU may still read it): for drawing with the game's own uniform buffers (mcopt.metal.own).
+	 */
+	public static long useBuffer(Object encoder, GpuBuffer buffer) {
+		return ((MetalEncoder) encoder).use(buffer).handle;
+	}
+
+	/** CPU address of buffer's current memory (0 for GPU-only storage), for reading what the CPU last wrote into it. */
+	public static long bufferAddress(GpuBuffer buffer) {
+		return ((MetalBuffer) buffer).address;
 	}
 
 	/** Native Enc* of encoder (the object encoder() returned). */
@@ -196,6 +235,12 @@ public final class MetalBridge {
 		Native.vertexBuffer(enc, index, buffer, offset);
 	}
 
+	/** Binds a backend pipeline's own state (as an undelegated pass would) from a delegate that keeps the pass's attachments. */
+	public static void bindOwnPipeline(long enc, Object backendPipeline, boolean hasDepth) {
+		MetalPipeline p = (MetalPipeline) backendPipeline;
+		Native.pipeline(enc, hasDepth ? p.withDepth : p.withoutDepth, p.depthState, p.cull ? 1 : 0, p.wireframe ? 1 : 0, p.depthBiasConstant, p.depthBiasSlope, p.primitive);
+	}
+
 	public static @Nullable String pipelineName(Object backendPipeline) {
 		return backendPipeline instanceof MetalPipeline p ? p.name : null;
 	}
@@ -206,6 +251,14 @@ public final class MetalBridge {
 	 */
 	public static boolean reapplyPipeline(Object encoder) {
 		return ((MetalEncoder) encoder).reapplyPipeline();
+	}
+
+	/**
+	 * The open render pass was split (its render encoder ended and reopened on the same attachments, mc_render_suspend /
+	 * mc_render_resume): bind all of the pass's state again. False when no pass is open.
+	 */
+	public static boolean restorePass(Object encoder) {
+		return ((MetalEncoder) encoder).restorePass();
 	}
 
 	/** Whether a render pass is open on encoder (far terrain draws only into one). */

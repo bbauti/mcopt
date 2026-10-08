@@ -8,8 +8,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import mcopt.metal.MetalBridge;
 import mcopt.metal.MetalHooks;
-import net.caffeinemc.mods.sodium.client.render.SodiumWorldRenderer;
-import net.caffeinemc.mods.sodium.client.util.GameRendererStorage;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -310,7 +308,7 @@ public final class Lod {
 		this.camX = camera.pos.x;
 		this.camY = camera.pos.y;
 		this.camZ = camera.pos.z;
-		Matrix4f proj = SODIUM ? new Matrix4f(((GameRendererStorage) mc.gameRenderer).sodium$getProjectionMatrix()) : new Matrix4f(camera.projectionMatrix);
+		Matrix4f proj = new Matrix4f(camera.projectionMatrix);
 		this.viewProj.set(proj).mul(camera.viewRotationMatrix);
 		camera.viewRotationMatrix.positiveZ(this.forward).negate();
 		this.frustum.set(this.viewProj, false);
@@ -412,15 +410,13 @@ public final class Lod {
 		int rd = mc.options.getEffectiveRenderDistance();
 		if (LodGenStats.ON) LodGenStats.frame(mc.level, w, this.camX, this.camZ, rd);
 		if (LodYield.ON) LodYield.frame(mc, this.camX, this.camZ, rd);
-		if (HANDOFF_DRAWN && SODIUM) {
-			this.updateMaskDrawn(mc, rd);
-			if (CHUNK_HOLD) {
-				ClientLevel cl = mc.level;
-				w.hold = cl == null ? null : key -> this.heldInView((int) (key >> 32), (int) key, cl);
-				w.releaseHeld();
-			}
+		// (three standalone statements, no else: the indie export removes the first one)
+		if (!(HANDOFF_DRAWN && SODIUM) && (!mcopt.metal.own.OwnSeam.ON || !this.updateMaskOwn())) this.updateMask(mc, rd, this.frames % 8 == 1);
+		if (HANDOFF_DRAWN && SODIUM && CHUNK_HOLD) {
+			ClientLevel cl = mc.level;
+			w.hold = cl == null ? null : key -> this.heldInView((int) (key >> 32), (int) key, cl);
+			w.releaseHeld();
 		}
-		else this.updateMask(mc, rd, this.frames % 8 == 1);
 		this.partNanos[2] += System.nanoTime() - t2;
 		boolean probeOn = this.probe(start);
 		if (!LodConfig.DRAW || !probeOn || !MetalBridge.inRenderPass(this.encoder)) {
@@ -866,7 +862,6 @@ public final class Lod {
 				this.readyZ = mz0;
 				this.readySize = size;
 			}
-			SodiumWorldRenderer sodium = SODIUM ? SodiumWorldRenderer.instanceNullable() : null;
 			int inner = Math.max(0, rd - 3);
 			for (int mz = 0; mz < size; mz++) {
 				for (int mx = 0; mx < size; mx++) {
@@ -876,7 +871,6 @@ public final class Lod {
 					LevelChunk chunk = level.getChunkSource().getChunk(cx, cz, false);
 					if (chunk != null) {
 						ready = true;
-						if (sodium != null) ready = sodium.isSectionReady(cx, chunk.getHeight(Heightmap.Types.WORLD_SURFACE, 8, 8) >> 4, cz);
 					}
 					this.ready[k] = ready;
 				}
@@ -972,6 +966,19 @@ public final class Lod {
 
 	private final boolean[] ready = new boolean[MASK_MAX * MASK_MAX];
 
+	/** -Dmcopt.own.int.seam: the mask from our own near terrain (mcopt.metal.own.OwnSeam): exactly the chunks it draws whole this frame. */
+	private boolean updateMaskOwn() {
+		mcopt.metal.own.OwnSeam.Window w = mcopt.metal.own.OwnSeam.mask(this.camX, this.camY, this.camZ, this.mask, MASK_MAX);
+		if (w == null) return false;
+		this.maskX = w.x0;
+		this.maskZ = w.z0;
+		this.maskSize = w.size;
+		this.maskWords = w.words;
+		this.maskOn = true;
+		this.nearestFar = w.nearestFar;
+		return true;
+	}
+
 	/**
 	 * -Dmcopt.lod.handoff=drawn: the far terrain steps back from a chunk only once the real terrain really draws it: Sodium lists
 	 * one of its sections in this frame's render lists, and every section from its surface up to its highest is built. Once
@@ -987,19 +994,6 @@ public final class Lod {
 	private final long[] listedSections = new long[MASK_MAX * MASK_MAX];
 	/** Per chunk: consecutive frames its surface section was listed (a hand-off needs 2). */
 	private final byte[] listedRun = new byte[MASK_MAX * MASK_MAX];
-	private static final java.lang.reflect.Field SODIUM_RSM = sodiumField();
-
-	private static java.lang.reflect.@Nullable Field sodiumField() {
-		if (!HANDOFF_DRAWN || !SODIUM) return null;
-		try {
-			java.lang.reflect.Field f = SodiumWorldRenderer.class.getDeclaredField("renderSectionManager");
-			f.setAccessible(true);
-			return f;
-		} catch (ReflectiveOperationException | RuntimeException e) {
-			System.out.println("mcopt-lod: no Sodium render lists for the hand-off: " + e);
-			return null;
-		}
-	}
 
 	/**
 	 * -Dmcopt.lod.maskFast=false: the hand-off mask's bookkeeping as before (default true: the same bits, cheaper): the render
@@ -1093,185 +1087,7 @@ public final class Lod {
 	private final long[] listedSectionsRef = MASK_VERIFY ? new long[MASK_MAX * MASK_MAX] : new long[0];
 
 	/** Sodium's render lists into listed / sections (window cells), skipping regions nothing reads when skip is set. */
-	private void walkLists(net.caffeinemc.mods.sodium.client.render.chunk.RenderSectionManager rsm, int mx0, int mz0, int size, int minSy,
-		double max2, boolean skip, boolean[] listed, long[] sections) {
-		var lists = rsm.getRenderLists().iterator(false);
-		while (lists.hasNext()) {
-			var list = lists.next();
-			var region = list.getRegion();
-			// a region whose chunks (in the window and the render distance) are all handed off: nothing here is read
-			if (skip && !this.regionNeeded(region.getChunkX() - mx0, region.getChunkZ() - mz0, size, max2)) continue;
-			var it = list.sectionsWithGeometryIterator(false);
-			if (it == null) continue;
-			while (it.hasNext()) {
-				int i = it.nextByteAsInt();
-				int mx = region.getChunkX() + (i >> 5 & 7) - mx0, mz = region.getChunkZ() + (i >> 2 & 7) - mz0;
-				if (mx >= 0 && mz >= 0 && mx < size && mz < size) {
-					listed[mz * MASK_MAX + mx] = true;
-					int sy = region.getChunkY() + (i & 3) - minSy;
-					if (sy >= 0 && sy < 64) sections[mz * MASK_MAX + mx] |= 1L << sy;
-				}
-			}
-		}
-	}
 
-	/** -Dmcopt.lod.maskVerify: the full walk as well, compared with the walk just done on every cell that's read. */
-	private void verifyWalk(net.caffeinemc.mods.sodium.client.render.chunk.RenderSectionManager rsm, int mx0, int mz0, int size, int minSy, double max2) {
-		java.util.Arrays.fill(this.listedRef, false);
-		java.util.Arrays.fill(this.listedSectionsRef, 0L);
-		this.walkLists(rsm, mx0, mz0, size, minSy, max2, false, this.listedRef, this.listedSectionsRef);
-		for (int mz = 0; mz < size; mz++) {
-			for (int mx = 0; mx < size; mx++) {
-				if (!this.cellRead(mx, mz, max2)) continue;
-				int k = mz * MASK_MAX + mx;
-				this.verifyCells++;
-				if (this.listed[k] != this.listedRef[k] || this.listedSections[k] != this.listedSectionsRef[k]) this.verifyDiffs++;
-			}
-		}
-		if (this.frames % 600 == 0) System.out.printf("mcopt-lod: mask verify: %d cells read, %d differ%n", this.verifyCells, this.verifyDiffs);
-	}
-
-	private void updateMaskDrawn(Minecraft mc, int rd) {
-		ClientLevel level = mc.level;
-		SodiumWorldRenderer sodium = SodiumWorldRenderer.instanceNullable();
-		if (level == null || sodium == null || SODIUM_RSM == null) return;
-		int size = Math.min(MASK_MAX, 2 * rd + 5);
-		int ccx = (int) Math.floor(this.camX) >> 4, ccz = (int) Math.floor(this.camZ) >> 4;
-		int mx0 = ccx - size / 2, mz0 = ccz - size / 2;
-		if (mx0 != this.readyX || mz0 != this.readyZ || size != this.readySize) {
-			boolean[] old = MASK_FAST ? copyInto(this.handed, this.handedPrev) : this.handed.clone();
-			int dx = mx0 - this.readyX, dz = mz0 - this.readyZ;
-			java.util.Arrays.fill(this.handed, false);
-			java.util.Arrays.fill(this.listedRun, (byte) 0);
-			if (this.readyX != Integer.MIN_VALUE && size == this.readySize) {
-				for (int mz = 0; mz < size; mz++) {
-					int oz = mz + dz;
-					if (oz < 0 || oz >= size) continue;
-					for (int mx = 0; mx < size; mx++) {
-						int ox = mx + dx;
-						if (ox >= 0 && ox < size) this.handed[mz * MASK_MAX + mx] = old[oz * MASK_MAX + ox];
-					}
-				}
-			}
-			this.readyX = mx0;
-			this.readyZ = mz0;
-			this.readySize = size;
-		}
-		// what Sodium draws this frame (its render lists are this frame's by the end of the opaque phase)
-		// (walked every other frame: a hand-off waits for 2 walks that list the surface section, i.e. 2-4 frames)
-		long m0 = System.nanoTime();
-		boolean walk = (this.frames & 1) == 0;
-		int minSy = level.getMinSectionY();
-		if (walk && MASK_FAST) {
-			// only the window's own columns of each row are ever read
-			for (int mz = 0; mz < size; mz++) {
-				java.util.Arrays.fill(this.listed, mz * MASK_MAX, mz * MASK_MAX + size, false);
-				java.util.Arrays.fill(this.listedSections, mz * MASK_MAX, mz * MASK_MAX + size, 0L);
-			}
-		} else if (walk) {
-			java.util.Arrays.fill(this.listed, 0, size * MASK_MAX, false);
-			java.util.Arrays.fill(this.listedSections, 0, size * MASK_MAX, 0L);
-		}
-		double max = rd * 16.0, max2 = max * max;
-		if (walk) try {
-			var rsm = (net.caffeinemc.mods.sodium.client.render.chunk.RenderSectionManager) SODIUM_RSM.get(sodium);
-			if (MASK_FAST) java.util.Arrays.fill(this.regionNeed, (byte) 0);
-			this.walkLists(rsm, mx0, mz0, size, minSy, max2, MASK_FAST, this.listed, this.listedSections);
-			if (MASK_VERIFY) this.verifyWalk(rsm, mx0, mz0, size, minSy, max2);
-		} catch (ReflectiveOperationException | RuntimeException e) {
-			return;
-		}
-		long m1 = System.nanoTime();
-		int inner = Math.max(0, rd - 3);
-		boolean full = this.frames % 64 == 1;
-		LodPk pk = this.pk;
-		int[] oldMask = pk != null && this.maskOn ? (MASK_FAST ? copyInto(this.mask, this.maskPrev) : this.mask.clone()) : null;
-		int oldX = this.maskX, oldZ = this.maskZ, oldSize = this.maskSize, oldWords = this.maskWords;
-		this.maskX = mx0;
-		this.maskZ = mz0;
-		this.maskSize = size;
-		this.maskWords = (size + 31) / 32;
-		java.util.Arrays.fill(this.mask, 0);
-		for (int mz = 0; mz < size; mz++) {
-			int oz = (mz0 + mz) * 16;
-			double dz = Math.max(0, Math.max(oz - 1 - this.camZ, this.camZ - (oz + 17)));
-			for (int mx = 0; mx < size; mx++) {
-				int k = mz * MASK_MAX + mx;
-				int ox = (mx0 + mx) * 16;
-				double dx = Math.max(0, Math.max(ox - 1 - this.camX, this.camX - (ox + 17)));
-				if (dx * dx + dz * dz >= max2) {
-					this.handed[k] = false;
-					this.listedRun[k] = 0;
-					continue;
-				}
-				int cx = mx0 + mx, cz = mz0 + mz;
-				// the chunk's surface section itself drawn this frame (a chunk can be listed by a lower section first)
-				if (!this.handed[k] && walk) {
-					LevelChunk ch = this.listed[k] ? level.getChunkSource().getChunk(cx, cz, false) : null;
-					if (ch != null) this.maskHeights++;
-					int sy = ch == null ? -1 : ((ch.getHeight(Heightmap.Types.WORLD_SURFACE, 8, 8) - 1) >> 4) - minSy;
-					boolean surface = sy >= 0 && sy < 64 && (this.listedSections[k] >>> sy & 1L) != 0;
-					this.listedRun[k] = (byte) (surface ? Math.min(100, this.listedRun[k] + 1) : 0);
-				}
-				boolean deep = Math.max(Math.abs(cx - ccx), Math.abs(cz - ccz)) <= inner;
-				if (this.handed[k] && (deep ? (MASK_SPREAD ? (this.frames + k) % 64 != 1 : !full) : (this.frames + k) % 16 != 0)) {
-					// handed: built stays built (checked again every 16 frames in the outer ring, 64 deep inside; an unload
-					// clears it at once, see unloaded)
-				} else if (this.handed[k] || this.listedRun[k] >= HANDOFF_FRAMES || HANDOFF_UNSEEN && (this.frames + k) % 4 == 0 && this.unseen(ox, oz, level)) {
-					long b0 = LodConfig.STATS ? System.nanoTime() : 0;
-					this.handed[k] = this.builtColumn(level, sodium, cx, cz);
-					if (LodConfig.STATS) {
-						this.maskBuiltNanos += System.nanoTime() - b0;
-						this.maskBuilt++;
-					}
-				}
-				if (this.handed[k]) {
-					int bit = mz * this.maskWords * 32 + mx;
-					this.mask[bit >> 5] |= 1 << (bit & 31);
-				}
-			}
-		}
-		this.maskOn = true;
-		long m2 = System.nanoTime();
-		if (pk != null) this.maskChanges(pk, oldMask, oldX, oldZ, oldSize, oldWords);
-		long m3 = System.nanoTime();
-		double near = (size / 2 - 1) * 16.0;
-		for (int mz = 0; mz < size; mz++) {
-			int oz = (mz0 + mz) * 16;
-			double dz = Math.max(0, Math.max(oz - this.camZ, this.camZ - (oz + 16)));
-			if (dz >= near) continue;
-			for (int mx = 0; mx < size; mx++) {
-				int bit = mz * this.maskWords * 32 + mx;
-				if ((this.mask[bit >> 5] >>> (bit & 31) & 1) != 0) continue;
-				int ox = (mx0 + mx) * 16;
-				double dx = Math.max(0, Math.max(ox - this.camX, this.camX - (ox + 16)));
-				near = Math.min(near, Math.sqrt(dx * dx + dz * dz));
-			}
-		}
-		this.nearestFar = near;
-		long m4 = System.nanoTime();
-		this.maskNanos[0] += m1 - m0;
-		this.maskNanos[1] += m2 - m1;
-		this.maskNanos[2] += m3 - m2;
-		this.maskNanos[3] += m4 - m3;
-		this.maskMax = Math.max(this.maskMax, m4 - m0);
-	}
-
-	/** Every section of the chunk from its surface (at its middle) up to its highest filled one is built by Sodium. */
-	private static boolean builtColumn(ClientLevel level, SodiumWorldRenderer sodium, int cx, int cz) {
-		LevelChunk chunk = level.getChunkSource().getChunk(cx, cz, false);
-		if (chunk == null) return false;
-		int low = Integer.MAX_VALUE;
-		for (int z = 2; z < 16; z += 8) {
-			for (int x = 2; x < 16; x += 8) low = Math.min(low, chunk.getHeight(Heightmap.Types.WORLD_SURFACE, x, z));
-		}
-		int lo = (low - 1) >> 4;
-		int hi = Math.max(lo, level.getSectionYFromSectionIndex(chunk.getHighestFilledSectionIndex()));
-		for (int sy = lo; sy <= hi; sy++) {
-			if (!sodium.isSectionReady(cx, sy, cz)) return false;
-		}
-		return true;
-	}
 	private double maskCamX = Double.NaN, maskCamZ = Double.NaN;
 
 	/** Once in a while everything is asked again (a chunk inside can be rebuilt, or unloaded by the server). */
