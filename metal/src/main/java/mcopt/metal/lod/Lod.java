@@ -519,6 +519,8 @@ public final class Lod {
 		Path root = LodConfig.CACHE_DIR != null ? Path.of(LodConfig.CACHE_DIR) : mc.gameDirectory.toPath().resolve("mcopt-lod");
 		String save = server != null ? server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize().getFileName().toString() : LodWorlds.serverDir(mc);
 		Path cache = root.resolve(save).resolve(level.dimension().identifier().getNamespace() + "_" + level.dimension().identifier().getPath());
+		// (a new world under an old one's folder name doesn't get the old one's far terrain)
+		if (sl != null && LodConfig.DISK_CACHE) LodWorlds.claim(cache, sl.getSeed());
 		// tiles cached under other crown or tree levels lack (or carry) data these levels need: their own directory
 		if (LodConfig.CROWN_LEVELS != 1 || LodConfig.TREE_LEVELS != 1) cache = cache.resolve("c" + LodConfig.CROWN_LEVELS + "t" + LodConfig.TREE_LEVELS);
 		this.clip = new LodClip(this.ctx, LodConfig.N, LodConfig.reachBlocks());
