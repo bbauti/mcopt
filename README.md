@@ -50,9 +50,9 @@ mcopt's LODs: terrain past the render distance, out to 512 chunks by default, dr
 - **Your saved world too:** in singleplayer, the chunks already saved in the world (explored before, builds included) are
   read in the background once and replace the estimate there.
 - **Coming from Voxy or Distant Horizons:** their saved far terrain (Voxy: `<world>/voxy`, `.voxy/saves/<server>`;
-  Distant Horizons: `DistantHorizons.sqlite` in the world's `data` folder, `Distant_Horizons_server_data/<server>`) is
-  read in the background and becomes ours, for the dimension you're in, while that mod isn't installed. In singleplayer
-  the world's own saved chunks win where both have one.
+  Distant Horizons: `DistantHorizons.sqlite` in the world's `data` folder, `Distant_Horizons_server_data/<server>`, found
+  by the world's seed when the server named the folder) is read in the background and becomes ours, for the dimension
+  you're in, while that mod isn't installed. In singleplayer the world's own saved chunks win where both have one.
 - **Kept on disk:** `mcopt-lod/` in the game folder, compressed. Places you've seen from close by stay when you see them
   from farther away. Saved every few seconds and when you leave the world.
 - **F6** hides and shows it while playing.

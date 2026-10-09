@@ -36,7 +36,7 @@ import org.jspecify.annotations.Nullable;
  * (dh-import.txt in our cache). -Dmcopt.lod.importDh=false turns it off.
  *
  * The format, from Distant Horizons' source (2.x): DistantHorizons.sqlite in the dimension's data folder (singleplayer),
- * or Distant_Horizons_server_data/<server>/<...dimension, ':' as "@@">/ (a server). Table FullData, a row per section:
+ * or Distant_Horizons_server_data/<server>/<level key>@<dimension, ':' as "@@">/ (a server; serverDatabase). Table FullData, a row per section:
  * DetailLevel (0: a column a block), PosX, PosZ (a 64 x 64-column section at (PosX * 64, PosZ * 64)), Data and the four
  * adjacent-border blobs (NorthAdjData...), ColumnGenerationStep (a byte a column, 0: none), Mapping, DataFormatVersion (1,
  * 2), CompressionMode (0 none, 1 LZ4 frames, 2 zstd stream, 3 xz: not read, 4 a zstd frame). A column is a list of runs
@@ -94,33 +94,44 @@ final class LodDhImport implements Runnable {
 	}
 
 	/**
-	 * A server's: Distant Horizons names its folder after the server's name (by default; or its address, with or without
-	 * port and version), and the dimension's after its id with ':' as "@@" (newer versions put the hashed seed before it).
-	 * The newest database of a folder that names this server and ends with this dimension.
+	 * A server's: Distant Horizons names the dimension's folder after its level key, by default the world's hashed seed
+	 * (seedKey) + "@" + the dimension id with ':' as "@@" (before 2.2: the id alone), in a folder for the server named after
+	 * its name or address (with or without port and version), or, when the server runs Distant Horizons with a server key,
+	 * after that key ("<server id>_<key>"), which nothing on the client tells. So: the newest database whose level key is this
+	 * world's hashed seed, in a folder that names this server first, then in any; else, in a folder that names this server,
+	 * one whose key isn't another world's seed (a custom level key, or none).
 	 */
 	private static @Nullable Path serverDatabase(net.minecraft.client.multiplayer.ClientLevel level) throws IOException {
 		Minecraft mc = Minecraft.getInstance();
 		var data = mc.getConnection() != null ? mc.getConnection().getServerData() : null;
 		Path root = mc.gameDirectory.toPath().resolve("Distant_Horizons_server_data");
-		if (data == null || !Files.isDirectory(root)) return null;
-		String name = clean(data.name), ip = clean(data.ip.contains(":") ? data.ip.substring(0, data.ip.lastIndexOf(':')) : data.ip);
-		String dim = level.dimension().identifier().toString().replace(":", "@@");
+		if (!Files.isDirectory(root)) return null;
+		String name = data != null ? clean(data.name) : "", ip = data != null ? clean(data.ip.contains(":") ? data.ip.substring(0, data.ip.lastIndexOf(':')) : data.ip) : "";
+		String dim = level.dimension().identifier().toString().replace(":", "@@"), seed = seedKey(level);
 		Path best = null;
+		int bestRank = 0;
 		long bestTime = Long.MIN_VALUE;
 		try (var servers = Files.list(root)) {
 			for (Path s : servers.toList()) {
+				if (!Files.isDirectory(s)) continue;
 				String folder = java.net.URLDecoder.decode(s.getFileName().toString().replace("+", "%2B"), StandardCharsets.UTF_8);
-				boolean ours = !name.isEmpty() && (folder.equals(name) || folder.startsWith(name + ", IP ")) || !ip.isEmpty() && (folder.equals(ip)
+				boolean named = !name.isEmpty() && (folder.equals(name) || folder.startsWith(name + ", IP ")) || !ip.isEmpty() && (folder.equals(ip)
 					|| folder.contains(", IP " + ip));
-				if (!ours || !Files.isDirectory(s)) continue;
 				try (var dims = Files.list(s)) {
 					for (Path d : dims.toList()) {
 						String dn = d.getFileName().toString();
 						if (!dn.equals(dim) && !dn.endsWith("@" + dim)) continue;
+						String key = dn.length() > dim.length() ? dn.substring(0, dn.length() - dim.length() - 1) : "";
+						// (a key ending in a seed: the default, or a world folder's name + "_" + seed from an integrated server)
+						String keySeed = key.length() >= 13 && key.substring(key.length() - 13).matches("[0-9a-v]{13}") ? key.substring(key.length() - 13) : null;
+						boolean ours = seed != null && seed.equals(keySeed);
+						int rank = ours ? (named ? 3 : 2) : named && (seed == null || keySeed == null) ? 1 : 0;
+						if (rank == 0) continue;
 						Path f = d.resolve("DistantHorizons.sqlite");
 						if (!Files.isRegularFile(f)) continue;
 						long t = Files.getLastModifiedTime(f).toMillis();
-						if (t > bestTime) {
+						if (rank > bestRank || rank == bestRank && t > bestTime) {
+							bestRank = rank;
 							bestTime = t;
 							best = f;
 						}
@@ -128,7 +139,32 @@ final class LodDhImport implements Runnable {
 				}
 			}
 		}
+		if (best == null) System.out.println("mcopt-lod: Distant Horizons has saves here, none for this world's " + level.dimension().identifier()
+			+ (seed != null ? " (level key " + seed + "@" + dim + ")" : ""));
 		return best;
+	}
+
+	/** Distant Horizons' level key for a world: its hashed seed's 8 bytes (big-endian) in base32hex, 13 characters, lowercase. Null if unreadable or 0. */
+	static @Nullable String seedKey(net.minecraft.client.multiplayer.ClientLevel level) {
+		try {
+			java.lang.reflect.Field f = net.minecraft.world.level.biome.BiomeManager.class.getDeclaredField("biomeZoomSeed");
+			f.setAccessible(true);
+			long seed = f.getLong(level.getBiomeManager());
+			return seed == 0 ? null : seedKey(seed);
+		} catch (ReflectiveOperationException | RuntimeException e) {
+			return null;
+		}
+	}
+
+	static String seedKey(long seed) {
+		// (65 bits: the 64 of the seed and a zero; base32hex: 0-9 then a-v)
+		char[] c = new char[13];
+		for (int i = 0; i < 13; i++) {
+			int shift = 59 - 5 * i;
+			int v = (int) ((shift >= 0 ? seed >>> shift : seed << -shift) & 31);
+			c[i] = (char) (v < 10 ? '0' + v : 'a' + v - 10);
+		}
+		return new String(c);
 	}
 
 	/** Distant Horizons' file name cleaning (characters a file name can't have dropped). */
