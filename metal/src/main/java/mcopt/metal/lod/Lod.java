@@ -659,7 +659,10 @@ public final class Lod {
 		this.partNanos[1] += t2 - t1;
 		int rd = mc.options.getEffectiveRenderDistance();
 		if (LodGenStats.ON) LodGenStats.frame(mc.level, w, this.camX, this.camZ, rd);
-		if (LodYield.ON) LodYield.frame(mc, this.camX, this.camZ, rd);
+		if (LodYield.ON) {
+			LodYield.frame(mc, this.camX, this.camZ, rd);
+			w.releaseGated();
+		}
 		// (three standalone statements, no else: the indie export removes the first one)
 		if (!(HANDOFF_DRAWN && SODIUM) && (!mcopt.metal.own.OwnSeam.ON || !this.updateMaskOwn())) this.updateMask(mc, rd, this.frames % 8 == 1);
 		if (HANDOFF_DRAWN && SODIUM && CHUNK_HOLD) {

@@ -90,8 +90,9 @@ final class LodYield {
 
 	/**
 	 * -Dmcopt.lod.yield.at=take (default): the gate is LodField's worker loop, before a generation job is taken on (admit);
-	 * a job that may not run goes back into the queue, so no worker ever holds a waiting tile and the coarsest level's tiles
-	 * (first in the queue's order) keep flowing. tile: the gate is inside LodNoise.generate (enter, checkpoints), the first
+	 * a job that may not run is set aside until the pressure is off (LodField.gated), so no worker ever holds a waiting tile and
+	 * the jobs after it (the coarsest level's tiles, cached tiles, real chunks' summaries) keep flowing. tile: the gate is
+	 * inside LodNoise.generate (enter, checkpoints), the first
 	 * version: a worker blocks holding its tile (holes when all of them do).
 	 */
 	static final boolean AT_TAKE = !"tile".equals(System.getProperty("mcopt.lod.yield.at", "take"));
@@ -138,20 +139,6 @@ final class LodYield {
 			return p.getActiveThreadCount();
 		} catch (RuntimeException e) {
 			return CORES;
-		}
-	}
-
-	/** A worker whose job was requeued parks a moment (the pressure is re-sampled every 3 frames). */
-	static void idle() {
-		long t0 = System.nanoTime();
-		paused.incrementAndGet();
-		try {
-			Thread.sleep(3);
-		} catch (InterruptedException e) {
-			Thread.currentThread().interrupt();
-		} finally {
-			paused.decrementAndGet();
-			pausedNanos.addAndGet(System.nanoTime() - t0);
 		}
 	}
 

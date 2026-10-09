@@ -43,6 +43,12 @@ final class LodField {
 	final Path cache;
 	private final ConcurrentHashMap<Long, Boolean> pending = new ConcurrentHashMap<>();
 	private final PriorityBlockingQueue<Job> jobs = new PriorityBlockingQueue<>();
+	/**
+	 * -Dmcopt.lod.yield: generation jobs the gate turned away, out of the queue until the pressure is off (releaseGated). Put back
+	 * into the queue they came straight out again (the queue's head), so every worker cycled over them with 3 ms sleeps and
+	 * nothing ordered after them ran: real chunks' summaries, tiles already in the disk cache, the coarsest level out of view.
+	 */
+	private final java.util.concurrent.ConcurrentLinkedQueue<Job> gated = new java.util.concurrent.ConcurrentLinkedQueue<>();
 	private final ConcurrentLinkedQueue<Runnable> results = new ConcurrentLinkedQueue<>();
 	private final List<Thread> threads = new ArrayList<>();
 	private volatile boolean closed;
@@ -280,10 +286,10 @@ final class LodField {
 			} catch (InterruptedException e) {
 				return;
 			}
-			// (without generation a tile is a cache read: nothing to yield to the server for)
-			if (j.task == null && LodYield.ON && this.noise != null && !LodYield.admit(LodTile.levelOf(j.key))) {
-				this.jobs.add(j);   // -Dmcopt.lod.yield: the server has chunk work near the player, so this job waits in the queue
-				LodYield.idle();
+			// (without generation a tile is a cache read: nothing to yield to the server for; nor is a tile the disk cache has)
+			if (j.task == null && LodYield.ON && this.noise != null && !LodYield.admit(LodTile.levelOf(j.key))
+				&& !(LodConfig.DISK_CACHE && Files.isRegularFile(this.file(j.key)))) {
+				this.gated.add(j);   // -Dmcopt.lod.yield: the server has chunk work near the player, so this job waits (releaseGated)
 				continue;
 			}
 			try {
@@ -302,6 +308,12 @@ final class LodField {
 
 	private Path file(long key) {
 		return this.cache.resolve("L" + LodTile.levelOf(key)).resolve(LodTile.txOf(key) + "." + LodTile.tzOf(key) + ".lod");
+	}
+
+	/** Render thread, each frame: without pressure, the jobs the yield gate held back go back into the queue. */
+	void releaseGated() {
+		if (LodYield.pressure) return;
+		for (Job j; (j = this.gated.poll()) != null;) this.jobs.add(j);
 	}
 
 	private boolean stillWanted(long key) {
