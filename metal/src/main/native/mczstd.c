@@ -1,6 +1,6 @@
-// Zstandard decompression for the far terrain's Distant Horizons import (LodDhImport, through LodNative): the reference
-// decoder (zstd/zstddeclib.c, v1.5.6, BSD; see zstd/README.md) and two calls around it. Plain C.
-#include "zstd/zstddeclib.c"
+// Zstandard decompression for the far terrain's imports (LodZstd): the reference decoder (v1.5.6, BSD, fetched by
+// build.gradle; its single-file decoder's sources) and two calls around it. Plain C.
+#include "zstddeclib-in.c"
 
 // The decompressed size src's first frame names: >= 0; -1 when the frame doesn't say; -2 when src isn't a zstd frame.
 long long mcz_content_size(const void *src, long long len) {

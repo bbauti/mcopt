@@ -7,5 +7,5 @@ and credit mcopt (https://github.com/noahdunnagan/mcopt).
 mcopt is licensed under the Apache License, Version 2.0 (LICENSE).
 
 Third-party code:
-- Zstandard's decompressor (metal/src/main/native/zstd/zstddeclib.c, compiled into the native library), Copyright (c) Meta
-  Platforms, Inc. and affiliates, under the BSD license in metal/src/main/native/zstd/LICENSE (in the jar: LICENSE-zstd).
+- Zstandard's decompressor (v1.5.6, compiled into the native library), Copyright (c) Meta Platforms, Inc. and affiliates,
+  under the BSD license (in the jar: LICENSE-zstd).
