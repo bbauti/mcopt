@@ -105,7 +105,7 @@ public final class Lod {
 	private Lod(Object encoder) {
 		this.encoder = encoder;
 		this.ctx = MetalBridge.ctx(encoder);
-		this.lod = LodNative.create(this.ctx, source());
+		this.lod = prewarmed(this.ctx);
 		this.paletteBuf = LodNative.buffer(this.ctx, (long) LodPalette.MAX * LodPalette.STRIDE * 4);
 		LodPalette.bind(LodNative.contents(this.paletteBuf));
 		this.dbgBuf = LodNative.buffer(this.ctx, 64);
@@ -141,6 +141,48 @@ public final class Lod {
 		} catch (IOException e) {
 			throw new IllegalStateException(e);
 		}
+	}
+
+	/**
+	 * The far terrain's library and pipelines (columns.metal, ~3,800 lines), compiled on a thread of their own from the
+	 * world's first chunk on, while the world loads: the first frame takes them ready instead of compiling them itself
+	 * (a second's freeze on a launch macOS's shader cache doesn't cover). The context they were made for comes along.
+	 */
+	private static java.util.concurrent.@Nullable CompletableFuture<Long> prewarm;
+	private static long prewarmCtx;
+
+	/** Render thread: starts compiling the far terrain's shaders if nothing has yet. */
+	private static void prewarm() {
+		if (prewarm != null || instance != null || failed || !LodConfig.ENABLED) return;
+		try {
+			Object encoder = MetalBridge.encoder(((FrontendCommandEncoder) RenderSystem.getDevice().createCommandEncoder()).backend());
+			if (encoder == null) return;
+			long ctx = MetalBridge.ctx(encoder);
+			String src = source();
+			prewarmCtx = ctx;
+			prewarm = java.util.concurrent.CompletableFuture.supplyAsync(() -> LodNative.create(ctx, src), task -> {
+				Thread t = new Thread(task, "mcopt-lod-shaders");
+				t.setDaemon(true);
+				t.start();
+			});
+		} catch (RuntimeException e) {
+			prewarm = java.util.concurrent.CompletableFuture.failedFuture(e);
+		}
+	}
+
+	/** The prewarmed library for ctx (waiting for it if it isn't done), else one compiled now. */
+	private static long prewarmed(long ctx) {
+		var f = prewarm;
+		if (f != null && prewarmCtx == ctx) {
+			// (taken once)
+			prewarmCtx = 0;
+			try {
+				return f.join();
+			} catch (RuntimeException e) {
+				// (compiled again below: the error is reported from there)
+			}
+		}
+		return LodNative.create(ctx, source());
 	}
 
 	private static @Nullable Lod get() {
@@ -1477,6 +1519,7 @@ public final class Lod {
 	/** The client loaded a chunk, or is about to unload it (with whatever the player changed): it becomes far terrain too. */
 	public static void chunk(net.minecraft.world.level.chunk.LevelChunk chunk) {
 		Lod l = instance;
+		if (l == null) prewarm();
 		if (l == null || l.field == null || !LodConfig.CHUNKS || chunk == null) return;
 		l.field.chunk(chunk);
 	}
