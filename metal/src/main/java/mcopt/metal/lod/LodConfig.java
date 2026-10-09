@@ -5,15 +5,15 @@ package mcopt.metal.lod;
  * this package loads and the mixins that call into it are rejected by LodMixinPlugin.
  */
 public final class LodConfig {
-	/** -Dmcopt.lod=true: far terrain on. A radius alone turns it on too. */
-	public static final boolean ENABLED = Boolean.getBoolean("mcopt.lod") || System.getProperty("mcopt.lod.radius") != null;
+	/** -Dmcopt.lod=true: far terrain on. A radius alone turns it on too. Off next to Distant Horizons (LodSwitch). */
+	public static final boolean ENABLED = mcopt.metal.LodSwitch.ENABLED;
 	/**
 	 * -Dmcopt.lod.quality=auto|low|medium|high|ultra: one switch for the far terrain's cost, the defaults of the settings below
 	 * (any of them set on its own still wins). auto (the default) picks by the GPU's cores and the Mac's memory (LodQuality).
 	 * low: the small-GPU mode (lod.small), a 512-cell window and 256 chunks; medium: 1024 cells, 384 chunks; high: 2048 cells,
 	 * 512 chunks (the measured default on 10-core GPUs); ultra: 2048 cells, 1024 chunks, the game's trees on level 1 too.
 	 */
-	public static final LodQuality QUALITY = LodQuality.resolve(System.getProperty("mcopt.lod.quality", "auto"));
+	public static final LodQuality QUALITY = ENABLED ? LodQuality.resolve(System.getProperty("mcopt.lod.quality", "auto")) : LodQuality.HIGH;
 	/**
 	 * -Dmcopt.lod.multiplayer=false: no far terrain on servers. On (the default), a server's far terrain is built from the chunks
 	 * the client receives and kept in the disk cache under the server's address: what was seen once is there next time.

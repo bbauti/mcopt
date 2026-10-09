@@ -95,6 +95,8 @@ For the most fps: Options > Video Settings, VSync off and Max Framerate Unlimite
 - Far terrain is experimental. On Macs with fewer than 10 GPU cores, `quality=auto` picks `low`; it still costs fps
   there.
 - On a server, far terrain only shows what you've already seen there (the client has no seed to generate from).
+- With Distant Horizons installed, mcopt's far terrain stays off (DH draws the distance);
+  `mcopt.lod.withDistantHorizons=true` keeps both.
 
 ## Plans
 

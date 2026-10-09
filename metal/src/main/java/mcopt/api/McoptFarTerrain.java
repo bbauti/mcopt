@@ -14,7 +14,7 @@ package mcopt.api;
 public final class McoptFarTerrain {
 	/** This API's version: raised when methods are added (never removed within a major version). */
 	public static final int API_VERSION = 1;
-	private static final boolean ENABLED = Boolean.getBoolean("mcopt.lod") || System.getProperty("mcopt.lod.radius") != null;
+	private static final boolean ENABLED = mcopt.metal.LodSwitch.ENABLED;
 
 	private McoptFarTerrain() {
 	}

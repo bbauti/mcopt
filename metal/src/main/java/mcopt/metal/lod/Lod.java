@@ -679,7 +679,7 @@ public final class Lod {
 	 * arena) skips it and draws the last one's survivors: a camera at rest (building, a menu over the world, AFK) costs only
 	 * the draw. Off with the temporal filter (its jitter) and the dissolve (its clock).
 	 */
-	private static final boolean CULL_SKIP = Boolean.parseBoolean(System.getProperty("mcopt.lod.cullSkip", "true")) && LodMesh.DISSOLVE_MS <= 0;
+	private final boolean cullSkip = Boolean.parseBoolean(System.getProperty("mcopt.lod.cullSkip", "true")) && LodMesh.DISSOLVE_MS <= 0;
 	private final long[] cullFrame = new long[LodMesh.FRAME_BYTES / 8], cullComp = new long[COMP_FRAME_BYTES / 8];
 	private final int[] cullMask = new int[MASK_MAX * MASK_MAX / 32];
 	private long cullTable = -1, cullClip = -1, cullArena;
@@ -688,7 +688,7 @@ public final class Lod {
 
 	/** Whether the cull's inputs are what the last cull read; if not, they're recorded as this cull's and false is returned. */
 	private boolean cullUnchanged(LodMesh mesh, LodClip clip) {
-		boolean same = CULL_SKIP && this.taa == null && this.cullValid && mesh.tableVersion() == this.cullTable && clip.version == this.cullClip
+		boolean same = this.cullSkip && this.taa == null && this.cullValid && mesh.tableVersion() == this.cullTable && clip.version == this.cullClip
 			&& mesh.arena() == this.cullArena && same(mesh.frame, this.cullFrame) && same(this.compFrame, this.cullComp)
 			&& java.util.Arrays.equals(this.mask, this.cullMask);
 		if (same) return true;
