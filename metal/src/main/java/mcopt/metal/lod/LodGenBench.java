@@ -88,8 +88,8 @@ final class LodGenBench {
 				for (int k = 0; k < PER_LEVEL[level]; k++) tiles.add(new long[] {level, tx0 + k % 3, tz0 + k / 3});
 			}
 		}
-		System.out.println(String.format(Locale.ROOT, "mcopt-lod genbench: %d tiles (%d regions, levels 0-%d), %d threads, phases %s%n", tiles.size(),
-			Math.min(REGIONS, origins.length), PER_LEVEL.length - 1, THREADS, abba).stripTrailing());
+		System.out.printf(Locale.ROOT, "mcopt-lod genbench: %d tiles (%d regions, levels 0-%d), %d threads, phases %s%n", tiles.size(),
+			Math.min(REGIONS, origins.length), PER_LEVEL.length - 1, THREADS, abba);
 		LodNativeNoise.Backend before = LodNativeNoise.LOD.backend;
 		Words[] reference = null;
 		double[][] wallByBackend = new double[LodNativeNoise.Backend.values().length][];
@@ -133,12 +133,12 @@ final class LodGenBench {
 				materials += stage1[l * 4 + 2] - stage0[l * 4 + 2];
 			}
 			double total = sum * 1e6;
-			System.out.println(String.format(Locale.ROOT, "mcopt-lod genbench: phase %d/%d %s: %d tiles in %.2f s = %.1f tiles/s; ms/tile %.1f (%s); density %.0f%% biomes %.0f%% materials %.0f%% "
+			System.out.printf(Locale.ROOT, "mcopt-lod genbench: phase %d/%d %s: %d tiles in %.2f s = %.1f tiles/s; ms/tile %.1f (%s); density %.0f%% biomes %.0f%% materials %.0f%% "
 					+ "trees+rest %.0f%%; exact vs plain: %d/%d tiles identical (%d words differ); replaced leaves per tile: %.0f volume calls (%.0f values), %.0f point calls; load avg %.1f%n",
 				phase, abba.size(), b.name().toLowerCase(Locale.ROOT), tiles.size(), wall / 1e9, tiles.size() / (wall / 1e9), sum / tiles.size(), lv,
 				100 * density / total, 100 * biomes / total, 100 * materials / total, 100 * (total - density - biomes - materials) / total,
 				tiles.size() - badTiles, tiles.size(), badWords, (double) calls / tiles.size(), (double) volPoints / tiles.size(), (double) pointCalls / tiles.size(),
-				java.lang.management.ManagementFactory.getOperatingSystemMXBean().getSystemLoadAverage()).stripTrailing());
+				java.lang.management.ManagementFactory.getOperatingSystemMXBean().getSystemLoadAverage());
 			double[] prev = wallByBackend[b.ordinal()];
 			double[] row = {tiles.size() / (wall / 1e9), sum / tiles.size()};
 			wallByBackend[b.ordinal()] = prev == null ? row : new double[] {(prev[0] + row[0]) / 2, (prev[1] + row[1]) / 2};

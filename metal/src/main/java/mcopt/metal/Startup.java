@@ -56,10 +56,10 @@ public final class Startup {
 		}
 		long t1 = System.nanoTime();
 		if (BLOCK_CACHE.endsWith("digest")) {
-			System.out.println(String.format("mcopt-startup: block caches %s, %d states, %.1f ms, digest %016x%n", BLOCK_CACHE, PENDING.isEmpty() ? -1 : PENDING.size(),
-				(t1 - t0) / 1e6, digest()).stripTrailing());
+			System.out.printf("mcopt-startup: block caches %s, %d states, %.1f ms, digest %016x%n", BLOCK_CACHE, PENDING.isEmpty() ? -1 : PENDING.size(),
+				(t1 - t0) / 1e6, digest());
 		} else if (parallelBlockCache()) {
-			System.out.println(String.format("mcopt-startup: block caches in parallel, %d states, %.1f ms%n", PENDING.size(), (t1 - t0) / 1e6).stripTrailing());
+			System.out.printf("mcopt-startup: block caches in parallel, %d states, %.1f ms%n", PENDING.size(), (t1 - t0) / 1e6);
 		}
 		PENDING.clear();
 	}

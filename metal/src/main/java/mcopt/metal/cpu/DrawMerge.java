@@ -68,7 +68,7 @@ public final class DrawMerge {
 		long now = System.nanoTime();
 		if (now - lastPrint > 5_000_000_000L) {
 			lastPrint = now;
-			System.out.println(String.format("mcopt-cpu: mergeDraws ranges %d -> draws %d (%.1f%%)%n", ranges, draws, 100.0 * draws / Math.max(1, ranges)).stripTrailing());
+			System.out.printf("mcopt-cpu: mergeDraws ranges %d -> draws %d (%.1f%%)%n", ranges, draws, 100.0 * draws / Math.max(1, ranges));
 		}
 	}
 }

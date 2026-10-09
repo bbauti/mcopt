@@ -146,7 +146,7 @@ public final class OwnLatency {
 			sum += ms[i];
 			fsum += frames[i];
 		}
-		System.out.println(String.format("mcopt-own latency: n %d, mean %.2f ms, p50 %.2f, p90 %.2f, max %.2f ms, mean %.1f frames, misses %d%n", count, sum / count,
-			s[count / 2], s[Math.min(count - 1, (int) (count * 0.9))], s[count - 1], (double) fsum / count, misses).stripTrailing());
+		System.out.printf("mcopt-own latency: n %d, mean %.2f ms, p50 %.2f, p90 %.2f, max %.2f ms, mean %.1f frames, misses %d%n", count, sum / count,
+			s[count / 2], s[Math.min(count - 1, (int) (count * 0.9))], s[count - 1], (double) fsum / count, misses);
 	}
 }

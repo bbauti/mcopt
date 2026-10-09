@@ -201,8 +201,8 @@ final class LodField {
 			t.start();
 			this.threads.add(t);
 		}
-		System.out.println(String.format("mcopt-lod: field ready: reach %d chunks, %d levels of %d x %d cells (%.0f MB), switch at %s, %d workers, cache %s%n",
-			LodConfig.RADIUS_CHUNKS, clip.levels, clip.n, clip.n, clip.bytes() / 1048576.0, java.util.Arrays.toString(clip.switchDist), LodConfig.THREADS, cache).stripTrailing());
+		System.out.printf("mcopt-lod: field ready: reach %d chunks, %d levels of %d x %d cells (%.0f MB), switch at %s, %d workers, cache %s%n",
+			LodConfig.RADIUS_CHUNKS, clip.levels, clip.n, clip.n, clip.bytes() / 1048576.0, java.util.Arrays.toString(clip.switchDist), LodConfig.THREADS, cache);
 	}
 
 	void close() {
@@ -1217,14 +1217,14 @@ final class LodField {
 					this.dyHist[Math.clamp(dy + 8, 0, 16)]++;
 					if (Math.abs(dy) > 1 && this.groundLogged < 30) {
 						this.groundLogged++;
-						System.out.println(String.format("mcopt-lod: verify: ground at %d,%d: real %d (%s), far terrain %d (%s)%n", x, z, real, realTop, lodTop, lodTopState).stripTrailing());
+						System.out.printf("mcopt-lod: verify: ground at %d,%d: real %d (%s), far terrain %d (%s)%n", x, z, real, realTop, lodTop, lodTopState);
 					}
 				}
 			}
 			if (realCrown != lodCrown && this.verifyLogged < 12) {
 				this.verifyLogged++;
-				System.out.println(String.format("mcopt-lod: verify: crown mismatch at %d,%d: real %s (lo %d hi %d ground %d), far terrain %s (top %d thick %d)%n", x, z,
-					realCrown ? "crown" : "no crown", s.crownLo()[k], s.crownHi()[k], surface, lodCrown ? "crown" : "no crown", lodTop, (w[0] >>> 15) & 63).stripTrailing());
+				System.out.printf("mcopt-lod: verify: crown mismatch at %d,%d: real %s (lo %d hi %d ground %d), far terrain %s (top %d thick %d)%n", x, z,
+					realCrown ? "crown" : "no crown", s.crownLo()[k], s.crownHi()[k], surface, lodCrown ? "crown" : "no crown", lodTop, (w[0] >>> 15) & 63);
 			}
 			int realPlant = s.plantA()[k] & 1023, lodPlant = w[5] & 1023;
 			if (realPlant != 0 == (lodPlant != 0)) this.vs[7]++;
@@ -1257,11 +1257,11 @@ final class LodField {
 		}
 		if (this.verified.size() % 64 == 0) {
 			long n = this.vs[0] - this.vs[1], dry = Math.max(1, this.vs[13]);
-			System.out.println(String.format("mcopt-lod: verify: %d chunks, %d columns (%d without data): ground exact %.2f%% (+-1 %.2f%%), crowns agree %.2f%% (%d both, exact %.2f%%), "
+			System.out.printf("mcopt-lod: verify: %d chunks, %d columns (%d without data): ground exact %.2f%% (+-1 %.2f%%), crowns agree %.2f%% (%d both, exact %.2f%%), "
 					+ "plants agree %.2f%% (%d both, same block %.2f%%); dry open ground: top block %.2f%%, side block %.2f%%, top color %.2f%%%n",
 				this.verified.size(), this.vs[0], this.vs[1], 100.0 * this.vs[2] / Math.max(1, n), 100.0 * (this.vs[2] + this.vs[3]) / Math.max(1, n),
 				100.0 * this.vs[4] / Math.max(1, n), this.vs[5], 100.0 * this.vs[6] / Math.max(1, this.vs[5]), 100.0 * this.vs[7] / Math.max(1, n), this.vs[8],
-				100.0 * this.vs[9] / Math.max(1, this.vs[8]), 100.0 * this.vs[10] / dry, 100.0 * this.vs[11] / dry, 100.0 * this.vs[12] / dry).stripTrailing());
+				100.0 * this.vs[9] / Math.max(1, this.vs[8]), 100.0 * this.vs[10] / dry, 100.0 * this.vs[11] / dry, 100.0 * this.vs[12] / dry);
 			System.out.println("mcopt-lod: verify: open ground real - far terrain y, -8..8: " + java.util.Arrays.toString(this.dyHist));
 			System.out.println("mcopt-lod: verify: water (dry both, real only, far terrain only, both): " + java.util.Arrays.toString(this.wetStats));
 			int[] buckets = new int[6];   // chunks by surface misses: 0, 1-15, 16-63, 64-127, 128-191, 192+

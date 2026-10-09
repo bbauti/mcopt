@@ -39,7 +39,7 @@ final class LodTaa {
 
 	LodTaa(long ctx) {
 		this.ctx = ctx;
-		System.out.println(String.format("mcopt-lod: far terrain temporal filter on (alpha %.2f, box growth %.2f)%n", ALPHA, GROW).stripTrailing());
+		System.out.printf("mcopt-lod: far terrain temporal filter on (alpha %.2f, box growth %.2f)%n", ALPHA, GROW);
 	}
 
 	private static MethodHandle fn(String name, java.lang.foreign.MemoryLayout result, java.lang.foreign.MemoryLayout... args) {

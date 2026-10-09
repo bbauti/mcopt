@@ -67,8 +67,8 @@ public final class EdgeCap {
 			c = now - lastGenNs < HOLD_NS;
 			if (LOG && now >= nextDiag) {
 				nextDiag = now + 2_000_000_000L;
-				System.out.println(String.format("mcopt-edgecap: generated %d chunks (%d within reach %d), distance %d..%d, capped %b%n", GEN.getAndSet(0),
-					NEAR.getAndSet(0), reach, MIN_D.getAndSet(Integer.MAX_VALUE), MAX_D.getAndSet(0), capped).stripTrailing());
+				System.out.printf("mcopt-edgecap: generated %d chunks (%d within reach %d), distance %d..%d, capped %b%n", GEN.getAndSet(0),
+					NEAR.getAndSet(0), reach, MIN_D.getAndSet(Integer.MAX_VALUE), MAX_D.getAndSet(0), capped);
 			}
 			if (c != capped) {
 				if (c) {
@@ -79,7 +79,7 @@ public final class EdgeCap {
 				}
 				capped = c;
 				if (now >= nextLog || !c) {
-					System.out.println(String.format("mcopt-edgecap: %s at %d fps (capped %.1f s so far)%n", c ? "cap on" : "cap off", cap, cappedS).stripTrailing());
+					System.out.printf("mcopt-edgecap: %s at %d fps (capped %.1f s so far)%n", c ? "cap on" : "cap off", cap, cappedS);
 					nextLog = now + 1_000_000_000L;
 				}
 			}

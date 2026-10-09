@@ -47,8 +47,8 @@ public final class Cpu {
 		long now = System.nanoTime();
 		if (now - recLastPrint > 5_000_000_000L && recFrames0 > 0 && recFrames1 > 0) {
 			recLastPrint = now;
-			System.out.println(String.format("mcopt-cpu: ab record per frame off %.2f us on %.2f us ratio %.3f (calls/frame %.0f)%n", recNs0 / 1e3 / recFrames0,
-				recNs1 / 1e3 / recFrames1, ((double) recNs1 / recFrames1) / ((double) recNs0 / recFrames0), (double) recN0 / recFrames0).stripTrailing());
+			System.out.printf("mcopt-cpu: ab record per frame off %.2f us on %.2f us ratio %.3f (calls/frame %.0f)%n", recNs0 / 1e3 / recFrames0,
+				recNs1 / 1e3 / recFrames1, ((double) recNs1 / recFrames1) / ((double) recNs0 / recFrames0), (double) recN0 / recFrames0);
 		}
 	}
 
@@ -117,8 +117,8 @@ public final class Cpu {
 		long now = System.nanoTime();
 		if (now - fenceLastPrint > 5_000_000_000L && submit > fenceFirstSubmit) {
 			double frames = submit - fenceFirstSubmit;
-			System.out.println(String.format("mcopt-cpu: fence %s made %d moved %d, blocking waits %.3f/frame, blocked %.1f us/frame (%s)%n", FENCE ? "on" : "off",
-				fenceMade, fenceMoved, fenceWaits / frames, fenceWaitNs / 1e3 / frames, phase()).stripTrailing());
+			System.out.printf("mcopt-cpu: fence %s made %d moved %d, blocking waits %.3f/frame, blocked %.1f us/frame (%s)%n", FENCE ? "on" : "off",
+				fenceMade, fenceMoved, fenceWaits / frames, fenceWaitNs / 1e3 / frames, phase());
 			fenceLastPrint = now;
 			fenceMade = fenceMoved = fenceWaits = fenceWaitNs = 0;
 			fenceFirstSubmit = submit;

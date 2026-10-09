@@ -37,8 +37,8 @@ public final class Ab {
 		}
 		if (now - lastPrint > 5_000_000_000L && n0 > 0 && n1 > 0) {
 			lastPrint = now;
-			System.out.println(String.format("mcopt-cpu: ab %s off %.2f us (n %d) on %.2f us (n %d) ratio %.3f%n", name, ns0 / 1e3 / n0, n0, ns1 / 1e3 / n1, n1,
-				(double) (ns1 / n1) / (ns0 / n0)).stripTrailing());
+			System.out.printf("mcopt-cpu: ab %s off %.2f us (n %d) on %.2f us (n %d) ratio %.3f%n", name, ns0 / 1e3 / n0, n0, ns1 / 1e3 / n1, n1,
+				(double) (ns1 / n1) / (ns0 / n0));
 		}
 	}
 }

@@ -183,9 +183,9 @@ final class Recorder {
 				throw rethrow(e);
 			}
 			Runtime.getRuntime().addShutdownHook(new Thread(this::exit, "mcopt-rec exit"));
-			System.out.println(String.format("mcopt-rec: recorder ready, %s %dx%d at %s fps (VideoToolbox H.264 in process, %s), start %s, stop %s%s%n", out, this.outW, this.outH,
+			System.out.printf("mcopt-rec: recorder ready, %s %dx%d at %s fps (VideoToolbox H.264 in process, %s), start %s, stop %s%s%n", out, this.outW, this.outH,
 				fpsArg(), BITRATE, START, STOP.isEmpty() ? (DURATION > 0 ? DURATION + " s" : "at exit") : STOP + (DURATION > 0 ? " or after " + DURATION + " s" : ""),
-				PROBE_NS > 0 ? ", PROBE every " + PROBE_NS / 1_000_000 + " ms (measurement only)" : "").stripTrailing());
+				PROBE_NS > 0 ? ", PROBE every " + PROBE_NS / 1_000_000 + " ms (measurement only)" : "");
 			return;
 		}
 		this.vt = 0;
@@ -224,9 +224,9 @@ final class Recorder {
 		this.writer.setDaemon(true);
 		this.writer.start();
 		Runtime.getRuntime().addShutdownHook(new Thread(this::exit, "mcopt-rec exit"));
-		System.out.println(String.format("mcopt-rec: recorder ready, %s %dx%d at %s fps (%s %s), start %s, stop %s%s%n", out, this.outW, this.outH, fpsArg(), NULL ? "NOT ENCODED" : CODEC, BITRATE,
+		System.out.printf("mcopt-rec: recorder ready, %s %dx%d at %s fps (%s %s), start %s, stop %s%s%n", out, this.outW, this.outH, fpsArg(), NULL ? "NOT ENCODED" : CODEC, BITRATE,
 			START, STOP.isEmpty() ? (DURATION > 0 ? DURATION + " s" : "at exit") : STOP + (DURATION > 0 ? " or after " + DURATION + " s" : ""),
-			PROBE_NS > 0 ? ", PROBE every " + PROBE_NS / 1_000_000 + " ms (measurement only)" : "").stripTrailing());
+			PROBE_NS > 0 ? ", PROBE every " + PROBE_NS / 1_000_000 + " ms (measurement only)" : "");
 	}
 
 	private static MethodHandle fn(String name, MemoryLayout result, MemoryLayout... args) {
@@ -311,7 +311,7 @@ final class Recorder {
 			if (!this.reached(START, now, this.firstNs)) return;
 			this.t0 = now;
 			this.state = State.REC;
-			System.out.println(String.format("mcopt-rec: recording from %d (epoch ms), phase '%s'%n", System.currentTimeMillis(), phase).stripTrailing());
+			System.out.printf("mcopt-rec: recording from %d (epoch ms), phase '%s'%n", System.currentTimeMillis(), phase);
 		}
 		if (this.reached(STOP, now, this.t0) || DURATION > 0 && now - this.t0 >= DURATION * 1e9) {
 			this.finish("stop condition " + (STOP.isEmpty() ? DURATION + " s" : STOP));
@@ -402,8 +402,8 @@ final class Recorder {
 		if (this.probeLogAt == 0) this.probeLogAt = now;
 		if (now - this.probeLogAt >= 5_000_000_000L && this.probeOnFrames > 0 && this.probeOffFrames > 0) {
 			double onMs = this.probeOnNs / 1e6 / this.probeOnFrames, offMs = this.probeOffNs / 1e6 / this.probeOffFrames;
-			System.out.println(String.format(Locale.ROOT, "mcopt-rec probe: on %.4f ms/frame (%d frames), off %.4f ms/frame (%d frames): recording costs %+.4f ms/frame, %+.2f%% fps, phase %s%n",
-				onMs, this.probeOnFrames, offMs, this.probeOffFrames, onMs - offMs, (offMs / onMs - 1) * 100, this.phase).stripTrailing());
+			System.out.printf(Locale.ROOT, "mcopt-rec probe: on %.4f ms/frame (%d frames), off %.4f ms/frame (%d frames): recording costs %+.4f ms/frame, %+.2f%% fps, phase %s%n",
+				onMs, this.probeOnFrames, offMs, this.probeOffFrames, onMs - offMs, (offMs / onMs - 1) * 100, this.phase);
 			this.probeOnNs = this.probeOffNs = this.probeOnFrames = this.probeOffFrames = 0;
 			this.probeLogAt = now;
 		}
@@ -424,7 +424,7 @@ final class Recorder {
 			cw = Math.clamp(cw, 16, w - cx);
 			ch = Math.clamp(ch, 16, h - cy);
 			crop = new float[] {(float) cx / w, (float) cy / h, (float) cw / w, (float) ch / h};
-			System.out.println(String.format("mcopt-rec: crop %d,%d %dx%d of %dx%d%n", cx, cy, cw, ch, w, h).stripTrailing());
+			System.out.printf("mcopt-rec: crop %d,%d %dx%d of %dx%d%n", cx, cy, cw, ch, w, h);
 			w = cw;
 			h = ch;
 		}
@@ -452,7 +452,7 @@ final class Recorder {
 		for (int i = 0; i < 4; i++) MemoryUtil.memPutFloat(a + 48 + 4L * i, crop[i]);
 		this.gridW = this.outW / 2;
 		this.gridH = this.outH / 2;
-		System.out.println(String.format("mcopt-rec: frame %dx%d -> %dx%d at %d,%d in %dx%d, %dx%d taps%n", w, h, rw, rh, rx, ry, this.outW, this.outH, tapsX, tapsY).stripTrailing());
+		System.out.printf("mcopt-rec: frame %dx%d -> %dx%d at %d,%d in %dx%d, %dx%d taps%n", w, h, rw, rh, rx, ry, this.outW, this.outH, tapsX, tapsY);
 	}
 
 	private String csvLine(long k, long now, String phase, int w, int h) {
@@ -473,7 +473,7 @@ final class Recorder {
 		this.state = State.DONE;
 		this.drainUntil = System.nanoTime() + 3_000_000_000L;
 		this.closing = true;
-		System.out.println(String.format("mcopt-rec: stopping (%s) after %d recorded frames, %d ticks skipped (no free buffer)%n", why, this.captured, this.skipped).stripTrailing());
+		System.out.printf("mcopt-rec: stopping (%s) after %d recorded frames, %d ticks skipped (no free buffer)%n", why, this.captured, this.skipped);
 		if (this.vt != 0) {
 			this.writer = new Thread(this::closeVt, "mcopt-rec finish");
 			this.writer.setDaemon(true);
@@ -501,8 +501,8 @@ final class Recorder {
 		} catch (IOException e) {
 			// ignore
 		}
-		System.out.println(String.format(Locale.ROOT, "mcopt-rec: wrote %s: %d video frames (%.2f s at %s fps), %d recorded, %d repeated, %d ticks skipped (pool full %d), %d failed, %d late, %d capture errors; H.264 %.1f MB; ffmpeg (mux) exit %d, %.1f MB%n",
-			this.out, st[0], st[0] / FPS, fpsArg(), this.captured, st[1], this.skipped, st[4], st[2], st[3], this.vtFailed, st[5] / 1e6, code, this.out.toFile().length() / 1e6).stripTrailing());
+		System.out.printf(Locale.ROOT, "mcopt-rec: wrote %s: %d video frames (%.2f s at %s fps), %d recorded, %d repeated, %d ticks skipped (pool full %d), %d failed, %d late, %d capture errors; H.264 %.1f MB; ffmpeg (mux) exit %d, %.1f MB%n",
+			this.out, st[0], st[0] / FPS, fpsArg(), this.captured, st[1], this.skipped, st[4], st[2], st[3], this.vtFailed, st[5] / 1e6, code, this.out.toFile().length() / 1e6);
 	}
 
 	void abort() {
@@ -569,7 +569,7 @@ final class Recorder {
 				long now = System.nanoTime();
 				if (now - logAt > 5_000_000_000L) {
 					logAt = now;
-					System.out.println(String.format("mcopt-rec: %d frames (%.1f s of video), %d repeated, %d ticks skipped%n", next, next / FPS, repeated, this.skipped).stripTrailing());
+					System.out.printf("mcopt-rec: %d frames (%.1f s of video), %d repeated, %d ticks skipped%n", next, next / FPS, repeated, this.skipped);
 				}
 			}
 		} catch (Throwable e) {
@@ -592,7 +592,7 @@ final class Recorder {
 			Thread.currentThread().interrupt();
 		}
 		long bytes = out.toFile().length();
-		System.out.println(String.format(Locale.ROOT, "mcopt-rec: wrote %s: %d video frames (%.2f s at %s fps), %d recorded, %d repeated, %d ticks skipped, %d failed, %d late; ffmpeg exit %d, %.1f MB; CPU s: ffmpeg %.1f, writer %.1f%n",
-			out, next, next / FPS, fpsArg(), written, repeated, this.skipped, failed, late, code, bytes / 1e6, ffCpu, writerCpu).stripTrailing());
+		System.out.printf(Locale.ROOT, "mcopt-rec: wrote %s: %d video frames (%.2f s at %s fps), %d recorded, %d repeated, %d ticks skipped, %d failed, %d late; ffmpeg exit %d, %.1f MB; CPU s: ffmpeg %.1f, writer %.1f%n",
+			out, next, next / FPS, fpsArg(), written, repeated, this.skipped, failed, late, code, bytes / 1e6, ffCpu, writerCpu);
 	}
 }

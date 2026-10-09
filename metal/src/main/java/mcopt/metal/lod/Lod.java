@@ -1451,8 +1451,8 @@ public final class Lod {
 		if (this.probeReport == 0) this.probeReport = now;
 		if (now - this.probeReport > 5_000_000_000L && this.probeFrames[0] > 0 && this.probeFrames[1] > 0) {
 			double off = this.probeNanos[0] / 1e6 / this.probeFrames[0], on = this.probeNanos[1] / 1e6 / this.probeFrames[1];
-			System.out.println(String.format("mcopt-lod probe: on %.4f ms (%d frames, %.0f fps), off %.4f ms (%d, %.0f fps), cost %.4f ms, columns %d, rows %d%n", on,
-				this.probeFrames[1], 1000 / on, off, this.probeFrames[0], 1000 / off, on - off, this.lastColumns, this.lastR1 - this.lastR0 + 1).stripTrailing());
+			System.out.printf("mcopt-lod probe: on %.4f ms (%d frames, %.0f fps), off %.4f ms (%d, %.0f fps), cost %.4f ms, columns %d, rows %d%n", on,
+				this.probeFrames[1], 1000 / on, off, this.probeFrames[0], 1000 / off, on - off, this.lastColumns, this.lastR1 - this.lastR0 + 1);
 			this.probeNanos[0] = this.probeNanos[1] = this.probeFrames[0] = this.probeFrames[1] = 0;
 			this.probeReport = now;
 		}
@@ -1492,24 +1492,24 @@ public final class Lod {
 		long now = System.nanoTime();
 		if (now - this.statStart < 1_000_000_000L) return;
 		this.guardReport();
-		System.out.println(String.format("mcopt-lod stats: parts ms/frame results %.4f update %.4f mask %.4f installs %.4f%n", this.partNanos[0] / 1e6 / this.statFrames,
-			this.partNanos[1] / 1e6 / this.statFrames, this.partNanos[2] / 1e6 / this.statFrames, this.partNanos[3] / 1e6 / this.statFrames).stripTrailing());
+		System.out.printf("mcopt-lod stats: parts ms/frame results %.4f update %.4f mask %.4f installs %.4f%n", this.partNanos[0] / 1e6 / this.statFrames,
+			this.partNanos[1] / 1e6 / this.statFrames, this.partNanos[2] / 1e6 / this.statFrames, this.partNanos[3] / 1e6 / this.statFrames);
 		java.util.Arrays.fill(this.partNanos, 0);
 		if (HANDOFF_DRAWN) {
-			System.out.println(String.format("mcopt-lod stats: mask ms/frame walk %.4f cells %.4f changes %.4f nearest %.4f, builtColumn %.1f heights %.1f a frame, builtColumn ms/frame %.4f, worst frame %.3f ms%n",
+			System.out.printf("mcopt-lod stats: mask ms/frame walk %.4f cells %.4f changes %.4f nearest %.4f, builtColumn %.1f heights %.1f a frame, builtColumn ms/frame %.4f, worst frame %.3f ms%n",
 				this.maskNanos[0] / 1e6 / this.statFrames, this.maskNanos[1] / 1e6 / this.statFrames, this.maskNanos[2] / 1e6 / this.statFrames,
 				this.maskNanos[3] / 1e6 / this.statFrames, (double) this.maskBuilt / this.statFrames, (double) this.maskHeights / this.statFrames,
-				this.maskBuiltNanos / 1e6 / this.statFrames, this.maskMax / 1e6).stripTrailing());
+				this.maskBuiltNanos / 1e6 / this.statFrames, this.maskMax / 1e6);
 			java.util.Arrays.fill(this.maskNanos, 0);
 			this.maskBuilt = this.maskHeights = this.maskBuiltNanos = this.maskMax = 0;
 		}
-		System.out.println(String.format("mcopt-lod stats: %d fps, cpu %.3f ms/frame, columns %d, band rows %d..%d, tiles needed %d missing %d, generated %d (%.1f ms avg), "
+		System.out.printf("mcopt-lod stats: %d fps, cpu %.3f ms/frame, columns %d, band rows %d..%d, tiles needed %d missing %d, generated %d (%.1f ms avg), "
 				+ "loaded %d, pending %d, queued %d, chunks %d, nearest far %.0f, settled %s%s%n",
 			this.statFrames, this.statCpuNanos / 1e6 / this.statFrames, this.lastColumns, this.lastR0, this.lastR1, w.needed, w.missing, w.generated.get(),
 			w.generated.get() == 0 ? 0 : w.genNanos.get() / 1e6 / w.generated.get(), w.loaded.get(), w.pendingJobs(), w.queued(), w.chunksSummarized.get(),
 			this.nearestFar, w.settled ? String.format("%.1fs", (w.settledNanos - w.startNanos) / 1e9) : "no",
 			(LodField.CHUNK_TILES ? String.format(", chunk tiles %d (generations skipped %d)", w.chunkTiles.get(), w.chunkSkipped.get()) : "")
-				+ (CHUNK_HOLD ? String.format(", chunks held %d (released %d)", w.heldCount(), w.heldReleased) : "")).stripTrailing());
+				+ (CHUNK_HOLD ? String.format(", chunks held %d (released %d)", w.heldCount(), w.heldReleased) : ""));
 		StringBuilder gen = new StringBuilder();
 		for (int i = 0; i < 16 && w.noise != null; i++) {
 			long n = w.noise.stageNanos.get(i * 4 + 3);
@@ -1521,17 +1521,17 @@ public final class Lod {
 		LodMesh mesh = this.mesh;
 		if (mesh != null) {
 			long n = mesh.meshed.get();
-			System.out.println(String.format("mcopt-lod stats: mesh %d tiles installed, %d meshed (%.2f ms, %.0f quads a tile), %d pending, arena %.1f of %.0f MB, %d culls skipped%n",
+			System.out.printf("mcopt-lod stats: mesh %d tiles installed, %d meshed (%.2f ms, %.0f quads a tile), %d pending, arena %.1f of %.0f MB, %d culls skipped%n",
 				mesh.installed, n, n == 0 ? 0 : mesh.meshNanos.get() / 1e6 / n, n == 0 ? 0 : (double) mesh.meshQuads.get() / n, mesh.pending(), mesh.usedMb(),
-				mesh.arenaMb(), this.cullsSkipped).stripTrailing());
+				mesh.arenaMb(), this.cullsSkipped);
 		}
 		LodPk pk = this.pk;
 		if (pk != null) {
-			System.out.println(String.format("mcopt-lod stats: pk %d frames (+%d fast: full cull, %d switches), %d with stale sectors in view (%d sectors drawn live; stale in view:"
+			System.out.printf("mcopt-lod stats: pk %d frames (+%d fast: full cull, %d switches), %d with stale sectors in view (%d sectors drawn live; stale in view:"
 					+ " %d unbuilt, %d dirty, %d expired), %d sectors rebuilt (%d of the hand-off band), %d generations, %d overflows, %d mesh changes skipped (live ring, level not drawn"
 					+ " there), %d occluder drops, records %.0f MB, %d sectors pruned to the visible set%n",
 				pk.statFrames, pk.statFastFrames, pk.statSwitches, pk.statFallbacks, pk.statLive, pk.statUnbuilt, pk.statDirty, pk.statExpired, pk.statRebuilt,
-				pk.statRebuiltNear, pk.statGenerations, pk.statOverflows, pk.statSkipped, pk.statOccDrops, pk.recordsMb(), pk.statVisPruned).stripTrailing());
+				pk.statRebuiltNear, pk.statGenerations, pk.statOverflows, pk.statSkipped, pk.statOccDrops, pk.recordsMb(), pk.statVisPruned);
 			pk.statVisPruned = 0;
 			if (LodPk.LOAD) System.out.println("mcopt-lod stats: pk " + pk.loadState());
 			this.pkSwitches += pk.statSwitches;
@@ -1561,11 +1561,11 @@ public final class Lod {
 		if (trips == this.guardSeen) return;
 		this.guardSeen = trips;
 		long a = this.dbgAddr;
-		System.out.println(String.format("mcopt-lod: walk guard tripped %d times; first: column %d dIn %.3f level %d cell %d,%d tMax %.3f,%.3f h %.6f,%.6f row %d t %.5f%n", trips,
+		System.out.printf("mcopt-lod: walk guard tripped %d times; first: column %d dIn %.3f level %d cell %d,%d tMax %.3f,%.3f h %.6f,%.6f row %d t %.5f%n", trips,
 			MemoryUtil.memGetInt(a + 4), Float.intBitsToFloat(MemoryUtil.memGetInt(a + 8)), MemoryUtil.memGetInt(a + 12), MemoryUtil.memGetInt(a + 16),
 			MemoryUtil.memGetInt(a + 20), Float.intBitsToFloat(MemoryUtil.memGetInt(a + 24)), Float.intBitsToFloat(MemoryUtil.memGetInt(a + 28)),
 			Float.intBitsToFloat(MemoryUtil.memGetInt(a + 32)), Float.intBitsToFloat(MemoryUtil.memGetInt(a + 36)), MemoryUtil.memGetInt(a + 40),
-			Float.intBitsToFloat(MemoryUtil.memGetInt(a + 44))).stripTrailing());
+			Float.intBitsToFloat(MemoryUtil.memGetInt(a + 44)));
 	}
 
 	/** The client loaded a chunk, or is about to unload it (with whatever the player changed): it becomes far terrain too. */

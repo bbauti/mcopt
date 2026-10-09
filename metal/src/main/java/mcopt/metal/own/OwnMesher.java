@@ -76,9 +76,9 @@ public final class OwnMesher {
 			long now = System.nanoTime();
 			if (now > hiddenLog) {
 				hiddenLog = now + 5_000_000_000L;
-				System.out.println(String.format("mcopt-own mesh hidden: solid %d of %d quads (+X %d -X %d +Y %d -Y %d +Z %d -Z %d), cutout %d of %d (+X %d -X %d +Y %d -Y %d +Z %d -Z %d)%n",
+				System.out.printf("mcopt-own mesh hidden: solid %d of %d quads (+X %d -X %d +Y %d -Y %d +Z %d -Z %d), cutout %d of %d (+X %d -X %d +Y %d -Y %d +Z %d -Z %d)%n",
 					HIDDEN_COUNT[0], HIDDEN_TOTAL[0], HIDDEN_COUNT[1], HIDDEN_COUNT[2], HIDDEN_COUNT[3], HIDDEN_COUNT[4], HIDDEN_COUNT[5], HIDDEN_COUNT[6],
-					HIDDEN_COUNT[7], HIDDEN_TOTAL[1], HIDDEN_COUNT[8], HIDDEN_COUNT[9], HIDDEN_COUNT[10], HIDDEN_COUNT[11], HIDDEN_COUNT[12], HIDDEN_COUNT[13]).stripTrailing());
+					HIDDEN_COUNT[7], HIDDEN_TOTAL[1], HIDDEN_COUNT[8], HIDDEN_COUNT[9], HIDDEN_COUNT[10], HIDDEN_COUNT[11], HIDDEN_COUNT[12], HIDDEN_COUNT[13]);
 				System.out.println("mcopt-own mesh hidden: control (same boundary test, open neighbour): " + hiddenControl + " quads");
 			}
 		}

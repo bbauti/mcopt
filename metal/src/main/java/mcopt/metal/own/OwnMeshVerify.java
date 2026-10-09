@@ -191,24 +191,24 @@ public final class OwnMeshVerify {
 			logAt = now + 5_000_000_000L;
 			OwnTintHook.log();
 			long u = Math.max(1, UNITS.get());
-			System.out.println(String.format("mcopt-own mesh verify: units %d (%s), %.1f quads/unit, box area across the facing %.1f blocks^2 (any-facing: volume), extent along it %.2f blocks%n",
-				UNITS.get(), System.getProperty("mcopt.own.mesh.order", "emission"), UNIT_QUADS.get() / (double) u, UNIT_AREA.get() / (double) u, UNIT_ALONG.get() / (double) u).stripTrailing());
+			System.out.printf("mcopt-own mesh verify: units %d (%s), %.1f quads/unit, box area across the facing %.1f blocks^2 (any-facing: volume), extent along it %.2f blocks%n",
+				UNITS.get(), System.getProperty("mcopt.own.mesh.order", "emission"), UNIT_QUADS.get() / (double) u, UNIT_AREA.get() / (double) u, UNIT_ALONG.get() / (double) u);
 			if (OwnQuads.SUBBOX) {
 				long[] c;
 				synchronized (SUB_TALLY) {
 					c = SUB_TALLY.clone();
 				}
 				long un = Math.max(1, c[0]);
-				System.out.println(String.format("mcopt-own mesh verify: sub-boxes: %d units, %.1f%% split; volume union %.2f -> A+B %.2f blocks^3/unit (%.1f%%), surface union %.2f -> A+B %.2f blocks^2/unit (%.1f%%); mismatched %d%n",
+				System.out.printf("mcopt-own mesh verify: sub-boxes: %d units, %.1f%% split; volume union %.2f -> A+B %.2f blocks^3/unit (%.1f%%), surface union %.2f -> A+B %.2f blocks^2/unit (%.1f%%); mismatched %d%n",
 					c[0], c[1] * 100.0 / un, c[2] / (double) un, c[3] / (double) un, c[3] * 100.0 / Math.max(1, c[2]), c[4] / (double) un, c[5] / (double) un,
-					c[5] * 100.0 / Math.max(1, c[4]), SUB_BAD.get()).stripTrailing());
+					c[5] * 100.0 / Math.max(1, c[4]), SUB_BAD.get());
 			}
 			long q = Math.max(1, UNIT_QUADS.get());
-			System.out.println(String.format("mcopt-own mesh verify: facing purity: %.2f%% of units single-facing, %.3f facings/unit, %.2f%% of quads in single-facing units; any-facing bucket %.2f%% of units, %.2f%% of quads%n",
-				PURE_UNITS.get() * 100.0 / u, FACINGS.get() / (double) u, PURE_QUADS.get() * 100.0 / q, ANY_UNITS.get() * 100.0 / u, ANY_QUADS.get() * 100.0 / q).stripTrailing());
+			System.out.printf("mcopt-own mesh verify: facing purity: %.2f%% of units single-facing, %.3f facings/unit, %.2f%% of quads in single-facing units; any-facing bucket %.2f%% of units, %.2f%% of quads%n",
+				PURE_UNITS.get() * 100.0 / u, FACINGS.get() / (double) u, PURE_QUADS.get() * 100.0 / q, ANY_UNITS.get() * 100.0 / u, ANY_QUADS.get() * 100.0 / q);
 			System.out.println("mcopt-own mesh verify: visibility sets mismatched " + VIS_BAD.get() + (OwnMaterials.ON ? ", material bytes checked " + MATS.get() + ", layers mismatched " + MAT_BAD.get() : ""));
-			System.out.println(String.format("mcopt-own mesh verify: %d sections, %d layers, %d quads, %d mismatched (count %d, bytes %d [light only %d], units %d), digest vanilla %016x ours %016x%n",
-				SECTIONS.get(), LAYERS.get(), QUADS.get(), BAD.get(), BAD_COUNT.get(), BAD_BYTES.get(), BAD_LIGHT.get(), BAD_RUNS.get(), DIGEST_VANILLA.get(), DIGEST_OWN.get()).stripTrailing());
+			System.out.printf("mcopt-own mesh verify: %d sections, %d layers, %d quads, %d mismatched (count %d, bytes %d [light only %d], units %d), digest vanilla %016x ours %016x%n",
+				SECTIONS.get(), LAYERS.get(), QUADS.get(), BAD.get(), BAD_COUNT.get(), BAD_BYTES.get(), BAD_LIGHT.get(), BAD_RUNS.get(), DIGEST_VANILLA.get(), DIGEST_OWN.get());
 		}
 	}
 

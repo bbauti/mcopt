@@ -1049,10 +1049,10 @@ public final class OwnTerrain {
 		}
 		recUsed = this.recAlloc.used();
 		recCap = this.recAlloc.capacity();
-		System.out.println(String.format("mcopt-own reset: %d meshes released; arena %.1f -> %.1f of %.0f MB used (was %.0f)" + (renewed ? ", pages renewed" : ", kept") + ", records %d of %d, lists %d, sorted copies %.1f MB, orphans swept so far %d; own Metal buffers %d, %.1f MB%n",
+		System.out.printf("mcopt-own reset: %d meshes released; arena %.1f -> %.1f of %.0f MB used (was %.0f)" + (renewed ? ", pages renewed" : ", kept") + ", records %d of %d, lists %d, sorted copies %.1f MB, orphans swept so far %d; own Metal buffers %d, %.1f MB%n",
 			meshesBefore, usedBefore * (double) ARENA_QUAD / 1048576, used * (double) ARENA_QUAD / 1048576, cap * (double) ARENA_QUAD / 1048576,
 			capBefore * (double) ARENA_QUAD / 1048576, recUsed, recCap, this.listCap, TS_SORTED_BYTES.get() / 1048576.0, this.orphansSwept,
-			OwnNative.liveBuffers(), OwnNative.liveBufferBytes() / 1048576.0).stripTrailing());
+			OwnNative.liveBuffers(), OwnNative.liveBufferBytes() / 1048576.0);
 	}
 
 	/**
@@ -1185,24 +1185,24 @@ public final class OwnTerrain {
 		if (now < this.tgLogAt) return;
 		this.tgLogAt = now + 5_000_000_000L;
 		long meshes = OwnTieGroups.MESHES.sum();
-		if (meshes > 0) System.out.println(String.format("mcopt-own mesh tieGroups stages: keys %.1f (runs %.1f), edges %.1f, groups %.1f (exact %.1f, near %.1f) us a mesh; reaching quads built: overhangs %d, axis %d, other %d (cutout %d)%n",
+		if (meshes > 0) System.out.printf("mcopt-own mesh tieGroups stages: keys %.1f (runs %.1f), edges %.1f, groups %.1f (exact %.1f, near %.1f) us a mesh; reaching quads built: overhangs %d, axis %d, other %d (cutout %d)%n",
 			OwnTieGroups.KEY_NS.sum() / 1e3 / meshes, OwnTieGroups.RUNS_NS.sum() / 1e3 / meshes, OwnTieGroups.EDGE_NS.sum() / 1e3 / meshes, OwnTieGroups.GROUP_NS.sum() / 1e3 / meshes,
 			OwnTieGroups.EXACTX_NS.sum() / 1e3 / meshes, OwnTieGroups.NEARX_NS.sum() / 1e3 / meshes, OwnTieGroups.REACH_OVER.sum(),
-			OwnTieGroups.REACH_AXIS.sum(), OwnTieGroups.REACH_ANY.sum(), OwnTieGroups.REACH_CUT.sum()).stripTrailing());
-		System.out.println(String.format("mcopt-own mesh tieGroups: %d meshes, %d opaque quads, %.1f us a mesh; groups %d (X solid/cutout %d, S same-layer %d), members %d, S members %d;"
+			OwnTieGroups.REACH_AXIS.sum(), OwnTieGroups.REACH_ANY.sum(), OwnTieGroups.REACH_CUT.sum());
+		System.out.printf("mcopt-own mesh tieGroups: %d meshes, %d opaque quads, %.1f us a mesh; groups %d (X solid/cutout %d, S same-layer %d), members %d, S members %d;"
 				+ " table %d words in use, S bits %d words; dropped %d; verify %d members, %d mismatches%n",
 			meshes, OwnTieGroups.QUADS.sum(), meshes == 0 ? 0.0 : OwnTieGroups.BUILD_NS.sum() / 1000.0 / meshes, OwnTieGroups.GROUPS.sum(),
 			OwnTieGroups.X_GROUPS.sum(), OwnTieGroups.S_GROUPS.sum(), OwnTieGroups.MEMBERS.sum(), OwnTieGroups.S_MEMBERS.sum(),
-			this.grpAlloc == null ? 0 : this.grpAlloc.used(), this.sBitsWords, this.grpDropped, this.grpChecked, this.grpBad).stripTrailing());
-		System.out.println(String.format("mcopt-own mesh tieGroups live: %d meshes with groups; groups %d (X %d, S %d), members %d, S members %d%n", this.grpMeshes,
-			this.grpLive[0], this.grpLive[1], this.grpLive[2], this.grpLive[4], this.grpLive[3]).stripTrailing());
+			this.grpAlloc == null ? 0 : this.grpAlloc.used(), this.sBitsWords, this.grpDropped, this.grpChecked, this.grpBad);
+		System.out.printf("mcopt-own mesh tieGroups live: %d meshes with groups; groups %d (X %d, S %d), members %d, S members %d%n", this.grpMeshes,
+			this.grpLive[0], this.grpLive[1], this.grpLive[2], this.grpLive[4], this.grpLive[3]);
 		long frames = this.frame - this.tgLogFrame, dirNs = this.tieDir.ns - this.tgLogDirNs;
 		this.tgLogFrame = this.frame;
 		this.tgLogDirNs = this.tieDir.ns;
-		System.out.println(String.format("mcopt-own mesh tieGroups fallback: %s; cross-section candidates %d, unknown sections %d; directory %d edge quads (%d recorded),"
+		System.out.printf("mcopt-own mesh tieGroups fallback: %s; cross-section candidates %d, unknown sections %d; directory %d edge quads (%d recorded),"
 				+ " %.2f us an entry (add/remove), render thread %.2f us a frame since the last line; exact certifications %d%n", this.tieFallback() ? "YES" : "no",
 			this.tieDir.pairs, this.tieUnknown, this.tieDir.live(), OwnTieGroups.EDGES.sum(), this.tieDir.ops == 0 ? 0.0 : this.tieDir.ns / 1000.0 / this.tieDir.ops,
-			frames <= 0 ? 0.0 : dirNs / 1000.0 / frames, OwnTieGroups.EXACT.sum()).stripTrailing());
+			frames <= 0 ? 0.0 : dirNs / 1000.0 / frames, OwnTieGroups.EXACT.sum());
 	}
 
 	private long tgLogFrame, tgLogDirNs;
@@ -1588,8 +1588,8 @@ public final class OwnTerrain {
 			if (now > padLogAt) {
 				padLogAt = now + 5_000_000_000L;
 				double q = Math.max(1, PAD[0]);
-				System.out.println(String.format("mcopt-own padstat: units %d, quads %d (%.2f a unit); issued / real quads, own class g=8/4/2/1: %.3f %.3f %.3f %.3f; bucket class g=8/4/2/1: %.3f %.3f %.3f %.3f; suffix class g=8/4/2/1: %.3f %.3f %.3f %.3f%n",
-					PAD[9], PAD[0], PAD[0] / (double) Math.max(1, PAD[9]), PAD[1] / q, PAD[2] / q, PAD[3] / q, PAD[4] / q, PAD[5] / q, PAD[6] / q, PAD[7] / q, PAD[8] / q, PAD[11] / q, PAD[12] / q, PAD[13] / q, PAD[14] / q).stripTrailing());
+				System.out.printf("mcopt-own padstat: units %d, quads %d (%.2f a unit); issued / real quads, own class g=8/4/2/1: %.3f %.3f %.3f %.3f; bucket class g=8/4/2/1: %.3f %.3f %.3f %.3f; suffix class g=8/4/2/1: %.3f %.3f %.3f %.3f%n",
+					PAD[9], PAD[0], PAD[0] / (double) Math.max(1, PAD[9]), PAD[1] / q, PAD[2] / q, PAD[3] / q, PAD[4] / q, PAD[5] / q, PAD[6] / q, PAD[7] / q, PAD[8] / q, PAD[11] / q, PAD[12] / q, PAD[13] / q, PAD[14] / q);
 			}
 		}
 	}
@@ -1643,8 +1643,8 @@ public final class OwnTerrain {
 			long a = this.qrecStatsAddress;
 			for (int i = 0; i < 4; i++) this.qrecTotals[i] += MemoryUtil.memGetInt(a + 4L * i) & 0xFFFFFFFFL;
 			MemoryUtil.memSet(a, 0, 16);
-			System.out.println(String.format("mcopt-own mesh qrec verify: %d passes, corners %d, differing %d, units %d, units without a copy %d%n", this.qrecPasses,
-				this.qrecTotals[0], this.qrecTotals[1], this.qrecTotals[2], this.qrecTotals[3]).stripTrailing());
+			System.out.printf("mcopt-own mesh qrec verify: %d passes, corners %d, differing %d, units %d, units without a copy %d%n", this.qrecPasses,
+				this.qrecTotals[0], this.qrecTotals[1], this.qrecTotals[2], this.qrecTotals[3]);
 		}
 	}
 
@@ -2604,9 +2604,9 @@ public final class OwnTerrain {
 		long now = System.nanoTime();
 		if (now - this.tStatLast >= 5_000_000_000L) {
 			if (this.tStatFrames > 0 && this.tStatRecs > 0)
-				System.out.println(String.format("mcopt-own-frag: translucent fog class: %.0f records a frame, %.1f%% in sections inside the render-distance fog start (%.1f), %.1f%% in the band with that term winning, %.1f%% beyond its end (%.1f)%n",
+				System.out.printf("mcopt-own-frag: translucent fog class: %.0f records a frame, %.1f%% in sections inside the render-distance fog start (%.1f), %.1f%% in the band with that term winning, %.1f%% beyond its end (%.1f)%n",
 					(double) this.tStatRecs / this.tStatFrames, 100.0 * this.tStatIn / this.tStatRecs, rdStart, 100.0 * this.tStatB / this.tStatRecs,
-					100.0 * this.tStatC / this.tStatRecs, rdEnd).stripTrailing());
+					100.0 * this.tStatC / this.tStatRecs, rdEnd);
 			this.tStatRecs = this.tStatIn = this.tStatB = this.tStatC = this.tStatFrames = 0;
 			this.tStatLast = now;
 		}
@@ -2640,10 +2640,10 @@ public final class OwnTerrain {
 			if (now - this.tsAt > 5_000_000_000L) {
 				double sec = (now - this.tsAt) / 1e9, fr = Math.max(1, this.tsFrames);
 				long rs = TS_RESORTS.sumThenReset(), rq = TS_RESORT_QUADS.sumThenReset(), rns = TS_RESORT_NS.sumThenReset();
-				System.out.println(String.format("mcopt-own tstat: %.1f s, %d frames: resorts %.0f/s (%.0f quads/s, %.1f us each in resorted()), stores %.0f/s (%.0f quads/s); listed per frame: meshes %.0f, units %.0f; sorted copies %.1f MB held, %.1f MB/s written; lean units %.1f%%%n",
+				System.out.printf("mcopt-own tstat: %.1f s, %d frames: resorts %.0f/s (%.0f quads/s, %.1f us each in resorted()), stores %.0f/s (%.0f quads/s); listed per frame: meshes %.0f, units %.0f; sorted copies %.1f MB held, %.1f MB/s written; lean units %.1f%%%n",
 					sec, this.tsFrames, rs / sec, rq / sec, rns / 1e3 / Math.max(1, rs), TS_STORES.sumThenReset() / sec, TS_STORE_QUADS.sumThenReset() / sec,
 					this.tsMeshes / fr, this.tsUnits / fr, TS_SORTED_BYTES.get() / 1048576.0, TS_COPY_BYTES.getAndSet(0) / 1048576.0 / sec,
-					100.0 * this.tsLeanUnits / Math.max(1, this.tsAllUnits)).stripTrailing());
+					100.0 * this.tsLeanUnits / Math.max(1, this.tsAllUnits));
 				this.tsLeanUnits = this.tsAllUnits = 0;
 				this.tsAt = now;
 				this.tsFrames = this.tsMeshes = this.tsUnits = 0;
@@ -2654,8 +2654,8 @@ public final class OwnTerrain {
 			long now = System.nanoTime();
 			if (now > this.tcLogAt) {
 				this.tcLogAt = now + 5_000_000_000L;
-				System.out.println(String.format("mcopt-own tcull: %d frames, meshes listed %d (full order %d), refilters %d over %d quads, %d left out (%.1f%%)%n", this.tcFrames,
-					this.tcListed, this.tcFull, TC_REFILTERS.get(), TC_QUADS.get(), TC_DROPPED.get(), 100.0 * TC_DROPPED.get() / Math.max(1, TC_QUADS.get())).stripTrailing());
+				System.out.printf("mcopt-own tcull: %d frames, meshes listed %d (full order %d), refilters %d over %d quads, %d left out (%.1f%%)%n", this.tcFrames,
+					this.tcListed, this.tcFull, TC_REFILTERS.get(), TC_QUADS.get(), TC_DROPPED.get(), 100.0 * TC_DROPPED.get() / Math.max(1, TC_QUADS.get()));
 			}
 		}
 		long fpa = this.tFrNow ? MetalBridge.bufferAddress(projection.buffer()) : 0;
@@ -2692,8 +2692,8 @@ public final class OwnTerrain {
 			long now = System.nanoTime();
 			if (now > this.tFrLogAt) {
 				this.tFrLogAt = now + 5_000_000_000L;
-				System.out.println(String.format("mcopt-own tfrustum: %d frames, per frame: translucent sections left out %.1f of %.1f listed by vanilla, their stored quads %.0f%n",
-					this.tFrFrames, this.tFrSkipped / 600.0, this.tFrListed / 600.0, this.tFrSkippedQ / 600.0).stripTrailing());
+				System.out.printf("mcopt-own tfrustum: %d frames, per frame: translucent sections left out %.1f of %.1f listed by vanilla, their stored quads %.0f%n",
+					this.tFrFrames, this.tFrSkipped / 600.0, this.tFrListed / 600.0, this.tFrSkippedQ / 600.0);
 			}
 			this.tFrSkipped = this.tFrSkippedQ = this.tFrListed = 0;
 		}
@@ -3065,17 +3065,17 @@ public final class OwnTerrain {
 			quadsUsed = this.quadAlloc.used();
 			quadCap = this.quadAlloc.capacity();
 		}
-		System.out.println(String.format("mcopt-own stats: %d frames, slots %d (cap %d), meshes %d, records %d, quads %d (%.1f of %.1f MB), lists %d, drawn records solid %d cutout %d%n",
+		System.out.printf("mcopt-own stats: %d frames, slots %d (cap %d), meshes %d, records %d, quads %d (%.1f of %.1f MB), lists %d, drawn records solid %d cutout %d%n",
 			this.statFrames, this.maxSlot + 1, this.slotCap, this.meshes.size(), this.recAlloc.used(), quadsUsed, quadsUsed * ARENA_QUAD / 1048576.0,
 			(double) quadCap * ARENA_QUAD / 1048576.0, this.listCap, MemoryUtil.memGetInt(this.argsAddress + 4) + MemoryUtil.memGetInt(this.argsAddress + 44),
-			MemoryUtil.memGetInt(this.argsAddress + 24) + MemoryUtil.memGetInt(this.argsAddress + 64)).stripTrailing());
+			MemoryUtil.memGetInt(this.argsAddress + 24) + MemoryUtil.memGetInt(this.argsAddress + 64));
 		if (QUADS && this.qArgsAddress != 0) {
-			System.out.println(String.format("mcopt-own quads: units tested %d, quads drawn A solid %d cutout %d, B solid %d cutout %d%n", MemoryUtil.memGetInt(this.argsAddress + 80),
+			System.out.printf("mcopt-own quads: units tested %d, quads drawn A solid %d cutout %d, B solid %d cutout %d%n", MemoryUtil.memGetInt(this.argsAddress + 80),
 				MemoryUtil.memGetInt(this.qArgsAddress) / 6, MemoryUtil.memGetInt(this.qArgsAddress + 20) / 6, MemoryUtil.memGetInt(this.qArgsAddress + 40) / 6,
-				MemoryUtil.memGetInt(this.qArgsAddress + 60) / 6).stripTrailing());
+				MemoryUtil.memGetInt(this.qArgsAddress + 60) / 6);
 			if (this.qDrawnFrames > 0) {
-				System.out.println(String.format("mcopt-own quads mean: drawn %.0f a frame (A %.0f, B %.0f) over %d frames%n", (double) (this.qDrawnA + this.qDrawnB) / this.qDrawnFrames,
-					(double) this.qDrawnA / this.qDrawnFrames, (double) this.qDrawnB / this.qDrawnFrames, this.qDrawnFrames).stripTrailing());
+				System.out.printf("mcopt-own quads mean: drawn %.0f a frame (A %.0f, B %.0f) over %d frames%n", (double) (this.qDrawnA + this.qDrawnB) / this.qDrawnFrames,
+					(double) this.qDrawnA / this.qDrawnFrames, (double) this.qDrawnB / this.qDrawnFrames, this.qDrawnFrames);
 				this.qDrawnA = this.qDrawnB = this.qDrawnFrames = 0;
 			}
 		}
@@ -3084,14 +3084,14 @@ public final class OwnTerrain {
 			long[] v = new long[8];
 			for (int i = 0; i < 8; i++) v[i] = Integer.toUnsignedLong(MemoryUtil.memGetInt(this.qsAddress + i * 4L));
 			double fr = this.qsFrames;
-			System.out.println(String.format("mcopt-own tally per frame: units %.0f, quads %.0f, back-facing %.0f, outside frustum %.0f, no pixel centre %.0f, hidden %.0f, visible %.0f, vertex invocations %.0f%n",
-				v[0] / fr, v[1] / fr, v[2] / fr, v[3] / fr, v[4] / fr, v[5] / fr, v[6] / fr, v[7] / fr).stripTrailing());
+			System.out.printf("mcopt-own tally per frame: units %.0f, quads %.0f, back-facing %.0f, outside frustum %.0f, no pixel centre %.0f, hidden %.0f, visible %.0f, vertex invocations %.0f%n",
+				v[0] / fr, v[1] / fr, v[2] / fr, v[3] / fr, v[4] / fr, v[5] / fr, v[6] / fr, v[7] / fr);
 			MemoryUtil.memSet(this.qsAddress, 0, 64);
 			this.qsFrames = 0;
 		}
 		long c = COMPILES.sumThenReset(), cns = COMPILE_NS.sumThenReset(), st = STORES.sumThenReset(), sns = STORE_NS.sumThenReset();
-		System.out.println(String.format("mcopt-own mesh: %d compiles %.3f ms each (%.0f ms), %d layer stores %.3f ms each (%.0f ms)%n", c, c == 0 ? 0 : cns / 1e6 / c, cns / 1e6, st,
-			st == 0 ? 0 : sns / 1e6 / st, sns / 1e6).stripTrailing());
+		System.out.printf("mcopt-own mesh: %d compiles %.3f ms each (%.0f ms), %d layer stores %.3f ms each (%.0f ms)%n", c, c == 0 ? 0 : cns / 1e6 / c, cns / 1e6, st,
+			st == 0 ? 0 : sns / 1e6 / st, sns / 1e6);
 		this.statFrames = 0;
 		this.statLast = now;
 	}

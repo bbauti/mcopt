@@ -4,7 +4,7 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.loader.api.FabricLoader;
 
 /**
- * The client entrypoint: the profile's line for the log (Profile.logOverrides), and far terrain's networking with servers running mcopt-server (mcopt.metal.lod.LodRemote), only when
+ * The client entrypoint: printf into the log, the profile's line for the log (Profile.logOverrides), and far terrain's networking with servers running mcopt-server (mcopt.metal.lod.LodRemote), only when
  * far terrain is on and Fabric API's networking is installed (without it, nothing of LodRemote loads).
  */
 public final class LodClientInit implements ClientModInitializer {
@@ -13,6 +13,30 @@ public final class LodClientInit implements ClientModInitializer {
 
 	@Override
 	public void onInitializeClient() {
+		// the game's System.out logs println alone: printf (format, then write) went to stdout, around latest.log
+		java.io.PrintStream log = System.out;
+		System.setOut(new java.io.PrintStream(log, true) {
+			@Override
+			public void println(String s) {
+				log.println(s);
+			}
+
+			@Override
+			public void println(Object o) {
+				log.println(o);
+			}
+
+			@Override
+			public java.io.PrintStream format(String f, Object... a) {
+				return this.format(java.util.Locale.getDefault(java.util.Locale.Category.FORMAT), f, a);
+			}
+
+			@Override
+			public java.io.PrintStream format(java.util.Locale l, String f, Object... a) {
+				log.println(String.format(l, f, a).stripTrailing());
+				return this;
+			}
+		});
 		Profile.logOverrides();
 		if (!LodSwitch.ENABLED) return;
 		if (!FabricLoader.getInstance().isModLoaded("fabric-networking-api-v1")) {
