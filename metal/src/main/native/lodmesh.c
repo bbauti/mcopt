@@ -10,9 +10,7 @@
 #define GEOM_VALID 0x2000u
 #define GEOM_CROWN 0x4000u
 #define GEOM_CLEAR (1u << 24)   // (a real chunk's top that doesn't hide what's behind it: no occluder)
-// (a dry real chunk's: how deep its top solid run reaches, 0 all the way; a wet cell's: its clear water's depth, drawn as an
-// opaque top the fragment stage looks through)
-#define GEOM_DEPTH(g) ((int) (((g) >> 25) & 127u))
+#define GEOM_DEPTH(g) ((int) (((g) >> 25) & 127u))   // (a real chunk's: how deep its top solid run reaches; 0 all the way)
 #define NEG_INF (-100000)
 #define MAX_IV 5
 #define REGION (LM_TILE + 2)
@@ -49,7 +47,7 @@ static void column(const LmIn *in, int ax, int az, Col *c) {
 	column0(in, ax, az, c);
 	int m = (1 << in->logN) - 1;
 	uint32_t g = in->geom[((size_t) (az & m) << in->logN) | (size_t) (ax & m)];
-	int depth = (g & GEOM_WET) ? 0 : GEOM_DEPTH(g);
+	int depth = (g & GEOM_WET) ? 0 : GEOM_DEPTH(g);   // (a wet cell's bits there: its clear water's depth, for the fragment stage)
 	c->bot = depth > 0 && c->n > 0 ? c->hi[0] - depth : NEG_INF;
 }
 
@@ -92,7 +90,7 @@ static int faceDiff(const Col *a, const Col *b, int *lo, int *hi, unsigned char 
 	// the common case, a column of ground beside another: what of a stands over b
 	if (a->n == 1 && b->n == 1 && a->lo[0] == NEG_INF && b->lo[0] == NEG_INF) {
 		int l = b->hi[0] < LM_DEEP ? LM_DEEP : b->hi[0], h = a->hi[0];
-		if (h <= b->hi[0] || h <= l) return 0;
+		if (h <= l) return 0;
 		lo[0] = l;
 		hi[0] = h;
 		kind[0] = a->kind[0];
@@ -100,14 +98,12 @@ static int faceDiff(const Col *a, const Col *b, int *lo, int *hi, unsigned char 
 	}
 	int n = 0;
 	for (int k = 0; k < a->n; k++) {
-		// the pieces left of a's interval k, cut by each of b's in turn (two buffers in turn, no copies)
-		int bufL[2][MAX_IV * 2 + 2], bufH[2][MAX_IV * 2 + 2];
-		int *pl = bufL[0], *ph = bufH[0], pn = 1, cur = 0;
+		int bufL[2][MAX_IV * 2 + 2], bufH[2][MAX_IV * 2 + 2], *pl = bufL[0], *ph = bufH[0], pn = 1;   // (two buffers in turn, no copies)
 		pl[0] = a->lo[k];
 		ph[0] = a->hi[k];
 		for (int j = 0; b->n > 0 && j < b->n; j++) {
 			int bl = b->lo[j], bh = b->hi[j], qn = 0;
-			int *ql = bufL[cur ^ 1], *qh = bufH[cur ^ 1];
+			int *ql = pl == bufL[0] ? bufL[1] : bufL[0], *qh = ph == bufH[0] ? bufH[1] : bufH[0];
 			for (int p = 0; p < pn; p++) {
 				if (bh <= pl[p] || bl >= ph[p]) {
 					ql[qn] = pl[p];
@@ -123,10 +119,9 @@ static int faceDiff(const Col *a, const Col *b, int *lo, int *hi, unsigned char 
 					qh[qn++] = ph[p];
 				}
 			}
-			cur ^= 1;
+			pn = qn;
 			pl = ql;
 			ph = qh;
-			pn = qn;
 		}
 		for (int p = 0; p < pn && n < MAX_IV * 2; p++) {
 			int l = pl[p] < LM_DEEP ? LM_DEEP : pl[p], h = ph[p];
@@ -195,8 +190,7 @@ typedef struct {
 	int x, z;
 } Item;
 
-// Tops (bottoms = 0) or undersides (bottoms = 1) of the block's cells, merged per height and kind (in key order: two passes
-// of a 7-bit radix sort; the order within a key doesn't matter, its cells only set bits).
+// Tops (bottoms = 0) or undersides (bottoms = 1) of the block's cells, merged per height and kind.
 static void flats(Out *o, const Col *cols, int b, int x0, int z0, int bottoms) {
 	Item items[16 * 16 * MAX_IV], sorted[16 * 16 * MAX_IV];
 	int n = 0;
@@ -214,18 +208,12 @@ static void flats(Out *o, const Col *cols, int b, int x0, int z0, int bottoms) {
 		}
 	}
 	if (n == 0) return;
-	int count[128];
-	for (int pass = 0; pass < 2; pass++) {
+	for (int pass = 0; pass < 2; pass++) {   // key order: two 7-bit radix passes (the order within a key doesn't matter, its cells only set bits)
 		Item *from = pass == 0 ? items : sorted, *to = pass == 0 ? sorted : items;
-		int shift = pass * 7;
-		memset(count, 0, sizeof count);
+		int count[128] = {0}, shift = pass * 7;
 		for (int i = 0; i < n; i++) count[(from[i].key >> shift) & 127]++;
-		for (int i = 0, sum = 0; i < 128; i++) {
-			int c = count[i];
-			count[i] = sum;
-			sum += c;
-		}
-		for (int i = 0; i < n; i++) to[count[(from[i].key >> shift) & 127]++] = from[i];
+		for (int i = 1; i < 128; i++) count[i] += count[i - 1];
+		for (int i = n - 1; i >= 0; i--) to[--count[(from[i].key >> shift) & 127]] = from[i];
 	}
 	for (int i = 0; i < n;) {
 		int j = i;
@@ -343,22 +331,7 @@ static void plants(Out *o, const LmIn *in, int b, int x0, int z0) {
 	}
 }
 
-// Whether every column of the block is one interval of the same kind, from the bottom up to the same top: then no column
-// shows a wall to another inside it (faceDiff finds nothing between equal intervals).
-static int blockFlat(const Col *cols, int b, int x0, int z0) {
-	const Col *f = &cols[(z0 + 1) * REGION + (x0 + 1)];
-	if (f->n != 1 || f->lo[0] != NEG_INF) return 0;
-	for (int z = 0; z < b; z++) {
-		for (int x = 0; x < b; x++) {
-			const Col *c = &cols[(z0 + z + 1) * REGION + (x0 + x + 1)];
-			if (c->n != 1 || c->lo[0] != NEG_INF || c->hi[0] != f->hi[0] || c->kind[0] != f->kind[0]) return 0;
-		}
-	}
-	return 1;
-}
-
-// The region's columns: each thread's own buffer, kept while the thread lives (~200 KB: malloc'd per call, it came as fresh
-// pages every time), freed when it ends.
+// The region's columns: a buffer per thread, kept until it ends (~200 KB malloc'd per call came as fresh pages every time).
 static pthread_key_t scratchKey;
 static pthread_once_t scratchOnce = PTHREAD_ONCE_INIT;
 
@@ -366,19 +339,11 @@ static void scratchInit(void) {
 	pthread_key_create(&scratchKey, free);
 }
 
-static Col *scratchCols(void) {
-	pthread_once(&scratchOnce, scratchInit);
-	Col *c = pthread_getspecific(scratchKey);
-	if (!c) {
-		c = malloc(sizeof(Col) * REGION * REGION);
-		if (c) pthread_setspecific(scratchKey, c);
-	}
-	return c;
-}
-
 int lm_mesh(const LmIn *in, uint32_t *header, uint32_t *quads, int cap) {
 	int b = in->block == 16 ? 16 : 8, nb = LM_TILE / b;
-	Col *cols = scratchCols();
+	pthread_once(&scratchOnce, scratchInit);
+	Col *cols = pthread_getspecific(scratchKey);
+	if (!cols && (cols = malloc(sizeof(Col) * REGION * REGION))) pthread_setspecific(scratchKey, cols);
 	if (!cols) return -1;
 	int ax0 = in->tx * LM_TILE, az0 = in->tz * LM_TILE;
 	for (int z = -1; z <= LM_TILE; z++) {
@@ -406,17 +371,23 @@ int lm_mesh(const LmIn *in, uint32_t *header, uint32_t *quads, int cap) {
 			o.minY = 1 << 20;
 			o.maxY = -(1 << 20);
 			int groupMax[LM_GROUPS];
-			int flat = blockFlat(cols, b, x0, z0);
+			int flat = 1;   // every column the ground up to one top of one kind (still water, a plain)
+			const Col *f = &cols[(z0 + 1) * REGION + (x0 + 1)];
+			for (int z = 0; z < b && flat; z++) {
+				for (int x = 0; x < b && flat; x++) {
+					const Col *c = &cols[(z0 + z + 1) * REGION + (x0 + x + 1)];
+					flat = c->n == 1 && c->lo[0] == NEG_INF && c->hi[0] == f->hi[0] && c->kind[0] == f->kind[0];
+				}
+			}
 			for (int g = 0; g < LM_G_INFO; g++) {
 				int start = o.count;
-				switch (g) {
+				switch (flat && g >= LM_G_XP && g <= LM_G_ZN ? -1 : g) {   // (a flat block has no wall inside it: faceDiff finds none)
 				case LM_G_TOP: flats(&o, cols, b, x0, z0, 0); break;
 				case LM_G_BOTTOM: flats(&o, cols, b, x0, z0, 1); break;
-				// (a block of one flat top, still water or a plain, has no wall inside it)
-				case LM_G_XP: if (!flat) walls(&o, cols, b, x0, z0, LM_F_XP, 0, b - 2, 0); break;
-				case LM_G_XN: if (!flat) walls(&o, cols, b, x0, z0, LM_F_XN, 1, b - 1, 0); break;
-				case LM_G_ZP: if (!flat) walls(&o, cols, b, x0, z0, LM_F_ZP, 0, b - 2, 0); break;
-				case LM_G_ZN: if (!flat) walls(&o, cols, b, x0, z0, LM_F_ZN, 1, b - 1, 0); break;
+				case LM_G_XP: walls(&o, cols, b, x0, z0, LM_F_XP, 0, b - 2, 0); break;
+				case LM_G_XN: walls(&o, cols, b, x0, z0, LM_F_XN, 1, b - 1, 0); break;
+				case LM_G_ZP: walls(&o, cols, b, x0, z0, LM_F_ZP, 0, b - 2, 0); break;
+				case LM_G_ZN: walls(&o, cols, b, x0, z0, LM_F_ZN, 1, b - 1, 0); break;
 				case LM_G_BXP: walls(&o, cols, b, x0, z0, LM_F_XP, b - 1, b - 1, 0); break;
 				case LM_G_BXN: walls(&o, cols, b, x0, z0, LM_F_XN, 0, 0, 0); break;
 				case LM_G_BZP: walls(&o, cols, b, x0, z0, LM_F_ZP, b - 1, b - 1, 0); break;
