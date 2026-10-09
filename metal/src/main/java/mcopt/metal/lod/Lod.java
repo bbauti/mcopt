@@ -341,15 +341,6 @@ public final class Lod {
 		}
 	}
 
-	/** Render thread: the level's projection this frame (LodGameRendererMixin), taken by the frame's beginLevel. */
-	private static final Matrix4f LEVEL_PROJECTION = new Matrix4f();
-	private static boolean levelProjectionSet;
-
-	public static void levelProjection(Matrix4f projection) {
-		LEVEL_PROJECTION.set(projection);
-		levelProjectionSet = true;
-	}
-
 	/** Top of the level's frame: the camera and fog this frame draws with. */
 	public static void beginLevel(CameraRenderState camera) {
 		Lod l = get();
@@ -494,9 +485,7 @@ public final class Lod {
 		this.camX = camera.pos.x;
 		this.camY = camera.pos.y;
 		this.camZ = camera.pos.z;
-		// the projection the level is drawn with (bobbing, hurt tilt, nausea, camera rolls), else the camera's alone
-		Matrix4f proj = new Matrix4f(levelProjectionSet ? LEVEL_PROJECTION : camera.projectionMatrix);
-		levelProjectionSet = false;
+		Matrix4f proj = new Matrix4f(camera.projectionMatrix);
 		this.viewProj.set(proj).mul(camera.viewRotationMatrix);
 		camera.viewRotationMatrix.positiveZ(this.forward).negate();
 		this.frustum.set(this.viewProj, false);
@@ -979,9 +968,6 @@ public final class Lod {
 		int r1 = Math.min(height - 1, (int) Math.ceil((yTop + 1) * height / 2 - 0.5) + 2);
 		// columns: lines through the vanishing point of the vertical, one pixel apart where they spread most
 		Vector4d v = this.m.transform(new Vector4d(0, 1, 0, 0));
-		// (level with the horizon the verticals are parallel on screen: upright when the camera isn't rolled; rolled (Camera
-		// Overhaul, bobbing) they lean, so their vanishing point is taken far off along their slant instead)
-		if (Math.abs(v.w) <= 1e-9 * Math.abs(v.y) && Math.abs(v.x) > 1e-6 * Math.abs(v.y)) v.w = Math.copySign(1e-6 * Math.hypot(v.x, v.y), v.w == 0 ? 1 : v.w);
 		boolean parallel = Math.abs(v.w) <= 1e-9 * Math.abs(v.y);
 		double vx = parallel ? 0 : v.x / v.w, vy = parallel ? 0 : v.y / v.w;
 		if (!parallel) {

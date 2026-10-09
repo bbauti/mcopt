@@ -18,8 +18,8 @@ final class OwnPosTable {
 	private static final ConcurrentHashMap<Integer, Integer> CODES = new ConcurrentHashMap<>();
 	private static final float[] VALUES = new float[SIZE];
 	private static volatile int count;
-	private static final AtomicLong OVERFLOW = new AtomicLong(), LOG_AT = new AtomicLong(Long.MIN_VALUE);
-	private static long syncLogAt;
+	private static final AtomicLong OVERFLOW = new AtomicLong();
+	private static long logAt, syncLogAt;
 
 	private OwnPosTable() {
 	}
@@ -30,30 +30,24 @@ final class OwnPosTable {
 		if (g < BASE && g / 2048f - 8f == p) return g;
 		Integer c = CODES.get(Float.floatToRawIntBits(p));
 		if (c != null) return c;
-		// a full table stays full: its misses no longer take the lock (with plant offsets or tall-grass packs every meshing
-		// worker misses on most off-grid coordinates, millions a session, each one queued on this monitor while holding the
-		// arena's read lock, which a growth, and the render thread behind it, waits out)
-		if (count >= SIZE) return overflow(g);
 		synchronized (VALUES) {
 			c = CODES.get(Float.floatToRawIntBits(p));
 			if (c != null) return c;
 			int i = count;
-			if (i >= SIZE) return overflow(g);
+			if (i >= SIZE) {
+				long n = OVERFLOW.incrementAndGet();
+				long now = System.nanoTime();
+				if (now > logAt) {
+					logAt = now + 5_000_000_000L;
+					System.out.println("mcopt-own mesh exactPos: table full (" + SIZE + "), " + n + " coordinates rounded to the grid");
+				}
+				return Math.min(g, BASE - 1);
+			}
 			VALUES[i] = p;
 			count = i + 1;  // (volatile: the value is visible before the count)
 			CODES.put(Float.floatToRawIntBits(p), BASE + i);
 			return BASE + i;
 		}
-	}
-
-	/** A coordinate the full table can't hold: the nearest grid code, counted. */
-	private static int overflow(int g) {
-		long n = OVERFLOW.incrementAndGet(), now = System.nanoTime(), at = LOG_AT.get();
-		if (now > at && LOG_AT.compareAndSet(at, now + 60_000_000_000L)) {
-			// (once a minute: what it rounds is within 1/4096 of a block, as before exactPos)
-			System.out.println("mcopt-own mesh exactPos: table full (" + SIZE + "), " + n + " coordinates rounded to the 1/2048-block grid");
-		}
-		return Math.min(g, BASE - 1);
 	}
 
 	/** The coordinate of code c (CPU side, as the shader decodes it). */
