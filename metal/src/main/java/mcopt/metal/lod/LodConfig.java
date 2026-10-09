@@ -5,31 +5,17 @@ package mcopt.metal.lod;
  * this package loads and the mixins that call into it are rejected by LodMixinPlugin.
  */
 public final class LodConfig {
-	/** -Dmcopt.lod=true: far terrain on. A radius alone turns it on too. Off next to Distant Horizons (LodSwitch). */
+	/** -Dmcopt.lod=true: far terrain on. A radius alone turns it on too. */
 	public static final boolean ENABLED = mcopt.metal.LodSwitch.ENABLED;
-	/**
-	 * -Dmcopt.lod.quality=auto|low|medium|high|ultra: one switch for the far terrain's cost, the defaults of the settings below
-	 * (any of them set on its own still wins). auto (the default) picks by the GPU's cores and the Mac's memory (LodQuality).
-	 * low: the small-GPU mode (lod.small), a 512-cell window and 256 chunks; medium: 1024 cells, 384 chunks; high: 2048 cells,
-	 * 512 chunks (the measured default on 10-core GPUs); ultra: 2048 cells, 1024 chunks, the game's trees on level 1 too.
-	 */
+	/** -Dmcopt.lod.quality=auto|low|medium|high|ultra: the defaults of the settings below (each set alone wins); auto: by the GPU (LodQuality). */
 	public static final LodQuality QUALITY = ENABLED ? LodQuality.resolve(System.getProperty("mcopt.lod.quality", "auto")) : LodQuality.HIGH;
-	/**
-	 * -Dmcopt.lod.multiplayer=false: no far terrain on servers. On (the default), a server's far terrain is built from the chunks
-	 * the client receives and kept in the disk cache under the server's address: what was seen once is there next time.
-	 */
+	/** -Dmcopt.lod.multiplayer=false: no far terrain on servers; on, it's built from the chunks received, cached under the server's address. */
 	public static final boolean MULTIPLAYER = Boolean.parseBoolean(System.getProperty("mcopt.lod.multiplayer", "true"));
-	/**
-	 * -Dmcopt.lod.chunksOnly=false: no far terrain where it can't be generated (a server, a flat or modded chunk generator, a
-	 * dimension with a roof). On (the default), there it comes from real chunks and the disk cache alone.
-	 */
+	/** -Dmcopt.lod.chunksOnly=false: none where it can't be generated (a server, a flat or modded generator, a roof); on: real chunks, the cache. */
 	public static final boolean CHUNKS_ONLY = Boolean.parseBoolean(System.getProperty("mcopt.lod.chunksOnly", "true"));
 	/** -Dmcopt.lod.ceiling=false: a roofed dimension's (the Nether's) columns read from the top (the roof) instead of under it. */
 	public static final boolean CEILING = Boolean.parseBoolean(System.getProperty("mcopt.lod.ceiling", "true"));
-	/**
-	 * -Dmcopt.lod.dimensions=ID,ID: far terrain only in these dimensions (e.g. minecraft:overworld); -Dmcopt.lod.excludeDimensions=ID,ID:
-	 * never in these. Default: every dimension.
-	 */
+	/** -Dmcopt.lod.dimensions=ID,ID: far terrain only in these (e.g. minecraft:overworld); -Dmcopt.lod.excludeDimensions=ID,ID: never in these. */
 	private static final java.util.Set<String> DIMENSIONS = ids(System.getProperty("mcopt.lod.dimensions", "")),
 		EXCLUDE_DIMENSIONS = ids(System.getProperty("mcopt.lod.excludeDimensions", ""));
 	/**
@@ -41,16 +27,16 @@ public final class LodConfig {
 	 * the coarser levels held while it's in view and not handed off (lod.chunkHold). Each can still be set
 	 * on its own; an explicit flag wins.
 	 */
-	public static final boolean SMALL = Boolean.parseBoolean(System.getProperty("mcopt.lod.small", String.valueOf(QUALITY.small())));
+	public static final boolean SMALL = Boolean.parseBoolean(System.getProperty("mcopt.lod.small", String.valueOf(QUALITY.small)));
 	/** -Dmcopt.lod.radius=N: how far the far terrain reaches, in chunks (to the edge of the coarsest tiles drawn). */
-	public static final int RADIUS_CHUNKS = Math.max(16, Integer.getInteger("mcopt.lod.radius", QUALITY.radiusChunks()));
+	public static final int RADIUS_CHUNKS = Math.max(16, Integer.getInteger("mcopt.lod.radius", QUALITY.radiusChunks));
 	/**
 	 * -Dmcopt.lod.n=N: cells across each clipmap level's window (a power of two). Level L's cells are 2^L blocks and it is drawn
 	 * out to (N / 2 - 64) x 2^L blocks, so on screen a cell is never more than about twice what a real block at that distance
 	 * would be, and N sets how big that is: at 5K, 2048 gives cells of 2.5-5 px (level 0 to ~960 blocks), 4096 1.2-2.5 px.
 	 * Memory: 8 N^2 bytes a level.
 	 */
-	public static final int N = powerOfTwo(Integer.getInteger("mcopt.lod.n", SMALL ? 512 : QUALITY.n()));
+	public static final int N = powerOfTwo(Integer.getInteger("mcopt.lod.n", SMALL ? 512 : QUALITY.n));
 	/** -Dmcopt.lod.threads=N: generation workers (default: the cores the game and the GPU driver leave). */
 	public static final int THREADS = Math.max(1, Integer.getInteger("mcopt.lod.threads", Math.max(2, Runtime.getRuntime().availableProcessors() - 4)));
 	/**
@@ -81,18 +67,15 @@ public final class LodConfig {
 	 * -Dmcopt.lod.plants=false: no grass, ferns or flowers on level 0. With them (needs textures), the game's own plant features
 	 * run with its trees, and the walk draws each plant's crossed quads where the real chunks will have them.
 	 */
-	public static final boolean PLANTS = TEXTURES && Boolean.parseBoolean(System.getProperty("mcopt.lod.plants", String.valueOf(QUALITY.plants())));
-	/**
-	 * -Dmcopt.lod.clearWater=false: far water drawn opaque, its color mixed with its floor's by depth. Default: see-through, as
-	 * the game's water is (the bed where the view reaches it, darker and bluer with depth and at grazing angles).
-	 */
+	public static final boolean PLANTS = TEXTURES && Boolean.parseBoolean(System.getProperty("mcopt.lod.plants", String.valueOf(QUALITY.plants)));
+	/** -Dmcopt.lod.clearWater=false: far water drawn opaque, mixed with its floor's color by depth; default see-through, as the game's water is. */
 	public static final boolean CLEAR_WATER = Boolean.parseBoolean(System.getProperty("mcopt.lod.clearWater", "true"));
 	/**
 	 * -Dmcopt.lod.treeLevels=N: the N finest levels (at most 2) get the game's own trees (its tree features run on the far
 	 * terrain); coarser levels the biome's impostor canopy. Level 1 needs every chunk's block-exact ground: ~5x the work of
 	 * its tiles. Default 1.
 	 */
-	public static final int TREE_LEVELS = Integer.getInteger("mcopt.lod.treeLevels", QUALITY.treeLevels());
+	public static final int TREE_LEVELS = Integer.getInteger("mcopt.lod.treeLevels", QUALITY.treeLevels);
 	/** -Dmcopt.lod.crownShade=F: sky light factor under tree crowns (the game's sky light drops under leaves). */
 	public static final double CROWN_SHADE = Double.parseDouble(System.getProperty("mcopt.lod.crownShade", "0.7"));
 	/**

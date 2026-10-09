@@ -16,9 +16,8 @@ public enum LodQuality {
 	/** 30 cores or more (Max, Ultra): 1024 chunks, the game's own trees on level 1 too. */
 	ULTRA(false, 2048, 1024, true, 2);
 
-	private final boolean small;
-	private final int n, radiusChunks, treeLevels;
-	private final boolean plants;
+	final boolean small, plants;
+	final int n, radiusChunks, treeLevels;
 
 	LodQuality(boolean small, int n, int radiusChunks, boolean plants, int treeLevels) {
 		this.small = small;
@@ -26,26 +25,6 @@ public enum LodQuality {
 		this.radiusChunks = radiusChunks;
 		this.plants = plants;
 		this.treeLevels = treeLevels;
-	}
-
-	boolean small() {
-		return this.small;
-	}
-
-	int n() {
-		return this.n;
-	}
-
-	int radiusChunks() {
-		return this.radiusChunks;
-	}
-
-	boolean plants() {
-		return this.plants;
-	}
-
-	int treeLevels() {
-		return this.treeLevels;
 	}
 
 	/** The preset a -Dmcopt.lod.quality value names; auto (or anything unknown) picks by the hardware. */
@@ -60,10 +39,7 @@ public enum LodQuality {
 		return q;
 	}
 
-	/**
-	 * By the GPU's cores (-1: unknown) and the game's heap: the far terrain's cost is the GPU's (its cull and quads) and its
-	 * memory the clipmap's and the cache's. A heap under 3 GB never gets more than medium.
-	 */
+	/** By the GPU's cores (-1: unknown), the far terrain's cost (its cull and quads); a heap under 3 GB (clipmap, cache) gets medium at most. */
 	static LodQuality auto(int gpuCores, long maxHeap) {
 		LodQuality q = gpuCores < 0 ? MEDIUM : gpuCores < 10 ? LOW : gpuCores < 30 ? HIGH : ULTRA;
 		if (maxHeap > 0 && maxHeap < 3L << 30 && q.ordinal() > MEDIUM.ordinal()) q = MEDIUM;

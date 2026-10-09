@@ -22,10 +22,7 @@ final class LodTile {
 	final short[] height;
 	/** World y of the water surface's top face, or DRY. */
 	final short[] water;
-	/**
-	 * RGB seen from above. Where wet: the water's own color when `clear` holds its depth (the floor's top color is then in
-	 * `side`: the GPU looks through the water), else (ice) the top's.
-	 */
+	/** RGB seen from above; where wet, the water's own color if `clear` holds its depth (the floor's top is then in `side`), else (ice) the top's. */
 	final int[] top;
 	/**
 	 * RGB of the column's sides: at level 0 the top block's own side, deeper walls take `below`; coarser levels a mix of the
@@ -63,10 +60,7 @@ final class LodTile {
 	final BlockState[] plantLower, plantUpper;
 	final byte[] plantBlocks;
 	final int[] plantColor;
-	/**
-	 * Structure only (a server's tiles, LodNoise without paint): the block under the top block, and the height an impostor
-	 * canopy added to the column (0: none), for the client to paint them (LodPaint).
-	 */
+	/** For LodPaint (a server's tiles, LodNoise without paint): the block under the top block, the height an impostor canopy added (0: none). */
 	final BlockState[] belowState;
 	final byte[] impostor;
 	/** Open water seen through (LodClip.depthBits): its depth over the floor, 1-127; 0 where dry, frozen or a crown's. */
@@ -75,10 +69,7 @@ final class LodTile {
 	boolean waterKnown;
 	/** Impostor canopies from the biome (LodTrees) where no exact trees are planted. */
 	boolean impostorTrees = true;
-	/**
-	 * Columns whose ground is at or under this y found no solid at all (the generator's bottom: the End's void between its
-	 * islands): they're left out (no cell) instead of drawn as a floor there. Set by LodNoise.
-	 */
+	/** Columns whose ground is at or under this y had no solid (the End's void between islands): left out, not drawn as a floor. Set by LodNoise. */
 	int voidY = Integer.MIN_VALUE;
 	int source;
 

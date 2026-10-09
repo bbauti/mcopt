@@ -28,12 +28,10 @@ final class LodMesh implements LodClip.Listener {
 	/** -Dmcopt.lod.meshFences=true: the cull's outputs ordered by fences instead of hazard tracking (see mclod.m). */
 	static final boolean FENCES = Boolean.getBoolean("mcopt.lod.meshFences") && !LodPk.ENABLED;
 	/**
-	 * -Dmcopt.lod.meshDouble=false: one set of the cull's outputs the draw reads (args, instances, plants, survivors) instead of two
-	 * used in turn. With one, frame N + 1's cull writes what frame N's level pass reads: hazard tracking makes the cull wait for that
-	 * whole pass (fragments included), and the next level pass waits for the cull, so the cull never overlaps the previous frame. With
-	 * two it only waits for the pass two frames back. Exact: each cull rewrites its set whole (lod_mesh_reset), a skipped cull's frame
-	 * draws the set the last one wrote. Costs ~50 MB of GPU memory. (Not with -Dmcopt.lod.meshFences, ordered by fences, or the pk
-	 * lists, which use the first set.)
+	 * -Dmcopt.lod.meshDouble=false: one set of the cull's outputs the draw reads (args, instances, plants, survivors), not two in turn.
+	 * With one, hazard tracking makes frame N + 1's cull wait for frame N's whole level pass (no overlap); with two, for the pass two
+	 * frames back. Exact: each cull rewrites its set whole (lod_mesh_reset), a skipped cull's frame draws the set the last one wrote.
+	 * ~50 MB of GPU memory. Not with -Dmcopt.lod.meshFences (fences order it) or the pk lists (the first set).
 	 */
 	static final boolean DOUBLE = !FENCES && !LodPk.ENABLED && Boolean.parseBoolean(System.getProperty("mcopt.lod.meshDouble", "true"));
 	/** -Dmcopt.lod.horizonCull=false: no occlusion cull (what nearer terrain hides). */
@@ -170,18 +168,15 @@ final class LodMesh implements LodClip.Listener {
 
 	// ---- the clipmap's changes (render thread) ----
 
-	/** The 4 neighbors: dx, dz, and the LodClip.EDGE_* bit of the border cells their meshes read. */
-	private static final int[][] NEIGHBORS = {{1, 0, LodClip.EDGE_PX}, {-1, 0, LodClip.EDGE_NX}, {0, 1, LodClip.EDGE_PZ}, {0, -1, LodClip.EDGE_NZ}};
-
-	/** The 4 neighbors: dx, dz, and their bit in builtNeighbors. */
-	private static final int[][] BUILT_SIDES = {{1, 0, 2}, {-1, 0, 1}, {0, 1, 8}, {0, -1, 4}};
+	/** The 4 neighbors: dx, dz, and their bit in builtNeighbors, the same as the LodClip.EDGE_* bit of the border cells their meshes read. */
+	private static final int[][] NEIGHBORS = {{1, 0, 2}, {-1, 0, 1}, {0, 1, 8}, {0, -1, 4}};
 
 	@Override
 	public void tilePut(int level, int tx, int tz, boolean refreshed) {
 		if (LodClip.PAIRS) this.snaps.remove(LodTile.key(level, tx, tz));
 		this.request(level, tx, tz);
 		// each neighbor's border walls toward this tile: built without it (skirts), or this tile's border cells changed
-		for (int[] n : BUILT_SIDES) {
+		for (int[] n : NEIGHBORS) {
 			int nx = tx + n[0], nz = tz + n[1];
 			if (!this.clip.resident(level, nx, nz)) continue;
 			int ns = this.clip.slot(nx, nz);
@@ -605,8 +600,8 @@ final class LodMesh implements LodClip.Listener {
 	/** This frame's copy of the tile table. */
 	long table(long frame) {
 		this.lastFrame = frame;
+		long b = this.tableBufs[(int) (frame % RING)];
 		int i = (int) (frame % RING);
-		long b = this.tableBufs[i];
 		// (a ring slot already holding this version of the table isn't copied again: the whole table is 16 bytes a slot of
 		// every level's window, 80 KB at the defaults, every frame)
 		if (this.tableSlotVersion[i] != this.tableVersion) {

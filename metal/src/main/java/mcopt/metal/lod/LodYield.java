@@ -60,8 +60,7 @@ final class LodYield {
 		if (MODE == 1) {
 			p = serverHasWork(mc);
 		} else {
-			int thresh = MODE == 3 ? 0 : THRESH;
-			p = LodGenStats.missing(mc.level, camX, camZ, rd, thresh) > thresh;
+			p = LodGenStats.missing(mc.level, camX, camZ, rd, MODE == 3 ? 0 : THRESH) > (MODE == 3 ? 0 : THRESH);
 		}
 		pressure = p;
 		local = mc.getSingleplayerServer() != null;
@@ -93,9 +92,8 @@ final class LodYield {
 
 	/**
 	 * -Dmcopt.lod.yield.at=take (default): the gate is LodField's worker loop, before a generation job is taken on (admit);
-	 * a job that may not run is set aside until the pressure is off (LodField.gated), so no worker ever holds a waiting tile and
-	 * the jobs after it (the coarsest level's tiles, cached tiles, real chunks' summaries) keep flowing. tile: the gate is
-	 * inside LodNoise.generate (enter, checkpoints), the first
+	 * a job that may not run is set aside until the pressure is off (LodField.gated), so no worker ever holds a waiting tile and the jobs after it
+	 * (the coarsest level's, cached tiles, chunk summaries) keep flowing. tile: the gate is inside LodNoise.generate (enter, checkpoints), the first
 	 * version: a worker blocks holding its tile (holes when all of them do).
 	 */
 	static final boolean AT_TAKE = !"tile".equals(System.getProperty("mcopt.lod.yield.at", "take"));
@@ -131,11 +129,7 @@ final class LodYield {
 		return false;
 	}
 
-	/**
-	 * The importers (saved chunks, Voxy's, Distant Horizons'): wait while the pressure is on, with an integrated server to give way
-	 * to. On a server's world the pressure only means chunks are still on their way (with a server view distance under the
-	 * client's, or while moving, nearly always): the imports waited there for good.
-	 */
+	/** The importers wait under pressure only with an integrated server to give way to: on a server's world it's on nearly always. */
 	static boolean importsWait() {
 		return ON && pressure && local;
 	}
@@ -151,6 +145,20 @@ final class LodYield {
 			return p.getActiveThreadCount();
 		} catch (RuntimeException e) {
 			return CORES;
+		}
+	}
+
+	/** A worker whose job was requeued parks a moment (the pressure is re-sampled every 3 frames). */
+	static void idle() {
+		long t0 = System.nanoTime();
+		paused.incrementAndGet();
+		try {
+			Thread.sleep(3);
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+		} finally {
+			paused.decrementAndGet();
+			pausedNanos.addAndGet(System.nanoTime() - t0);
 		}
 	}
 
