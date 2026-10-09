@@ -38,7 +38,7 @@ import org.jspecify.annotations.Nullable;
  * The format, from Distant Horizons' source (2.x): DistantHorizons.sqlite in the dimension's data folder (singleplayer),
  * or Distant_Horizons_server_data/<server>/<level key>@<dimension, ':' as "@@">/ (a server; serverDatabase). Table FullData, a row per section:
  * DetailLevel (0: a column a block), PosX, PosZ (a 64 x 64-column section at (PosX * 64, PosZ * 64)), Data and the four
- * adjacent-border blobs (NorthAdjData...), ColumnGenerationStep (a byte a column, 0: none), Mapping, DataFormatVersion (1,
+ * adjacent-border blobs (NorthAdjData...), ColumnGenerationStep (a byte a column, 0: none, -1: down-sampled), Mapping, DataFormatVersion (1,
  * 2), CompressionMode (0 none, 1 LZ4 frames, 2 zstd stream, 3 xz: not read, 4 a zstd frame). A column is a list of runs
  * from the top down, each a mapping index, a height and its bottom (relative to the world's lowest y). Mapping: an int
  * count, then per entry an unsigned short length and its bytes: "<biome>_DH-BSW_<block>", the block "AIR" or
@@ -322,7 +322,9 @@ final class LodDhImport implements Runnable {
 		BlockState air = Blocks.AIR.defaultBlockState();
 		for (int i = 0; i < WIDTH * WIDTH; i++) {
 			long[] p = points[i];
-			generated[i] = p != null && p.length > 0 && (steps == null || i >= steps.length || steps[i] != 0);
+			// (a step: 0 empty, -1 down-sampled: filled from a coarser or a parent section, as a server's far sections arrive;
+			// only a generated column is the block column itself)
+			generated[i] = p != null && p.length > 0 && (steps == null || i >= steps.length || steps[i] > 0);
 			int n = p == null ? 0 : p.length;
 			bottom[i] = new int[n];
 			height[i] = new int[n];
