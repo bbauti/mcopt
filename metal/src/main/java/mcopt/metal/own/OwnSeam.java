@@ -161,8 +161,8 @@ public final class OwnSeam {
 			long now = System.nanoTime();
 			if (statLast == 0) statLast = now;
 			if (now - statLast >= 5_000_000_000L) {
-				System.out.printf("mcopt-own seam: %d frames, %.4f ms a frame, %d columns recomputed, %d mask builds; chunks in range %d, drawn whole %d, nearest far %.1f%n",
-					statCalls, statNanos / 1e6 / Math.max(1, statCalls), statCols, statMasks, statInRange, statMasked, w.nearestFar);
+				System.out.println(String.format("mcopt-own seam: %d frames, %.4f ms a frame, %d columns recomputed, %d mask builds; chunks in range %d, drawn whole %d, nearest far %.1f%n",
+					statCalls, statNanos / 1e6 / Math.max(1, statCalls), statCols, statMasks, statInRange, statMasked, w.nearestFar).stripTrailing());
 				statNanos = statCalls = statCols = statMasks = 0;
 				statLast = now;
 			}

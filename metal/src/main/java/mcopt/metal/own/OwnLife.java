@@ -145,9 +145,9 @@ public final class OwnLife {
 			long[] w = java.util.Arrays.copyOf(waitNs, lockN), h = java.util.Arrays.copyOf(holdNs, lockN);
 			java.util.Arrays.sort(w);
 			java.util.Arrays.sort(h);
-			System.out.printf("mcopt-own-life-lock: %d resets in %.1f s: wait us p50 %.1f p99 %.1f max %.1f | hold us p50 %.1f p99 %.1f max %.1f | run max wait %.1f hold %.1f (%d resets)%n",
+			System.out.println(String.format("mcopt-own-life-lock: %d resets in %.1f s: wait us p50 %.1f p99 %.1f max %.1f | hold us p50 %.1f p99 %.1f max %.1f | run max wait %.1f hold %.1f (%d resets)%n",
 				lockN, (now - lockWindowStart) / 1e9, w[lockN / 2] / 1e3, w[Math.min(lockN - 1, lockN * 99 / 100)] / 1e3, w[lockN - 1] / 1e3,
-				h[lockN / 2] / 1e3, h[Math.min(lockN - 1, lockN * 99 / 100)] / 1e3, h[lockN - 1] / 1e3, lockMaxWait / 1e3, lockMaxHold / 1e3, lockTotal);
+				h[lockN / 2] / 1e3, h[Math.min(lockN - 1, lockN * 99 / 100)] / 1e3, h[lockN - 1] / 1e3, lockMaxWait / 1e3, lockMaxHold / 1e3, lockTotal).stripTrailing());
 			lockN = 0;
 			lockWindowStart = now;
 		}

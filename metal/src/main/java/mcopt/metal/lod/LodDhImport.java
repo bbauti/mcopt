@@ -203,8 +203,8 @@ final class LodDhImport implements Runnable {
 				}
 			}
 			this.lastReport = System.nanoTime();
-			System.out.printf(java.util.Locale.ROOT, "mcopt-lod: importing Distant Horizons' save %s (%d MB)%s%n", this.db, Files.size(this.db) >> 20,
-				this.resumeRow > 0 ? ", from row " + this.resumeRow + ", where the last session stopped" : "");
+			System.out.println(String.format(java.util.Locale.ROOT, "mcopt-lod: importing Distant Horizons' save %s (%d MB)%s%n", this.db, Files.size(this.db) >> 20,
+				this.resumeRow > 0 ? ", from row " + this.resumeRow + ", where the last session stopped" : "").stripTrailing());
 			try (LodSqlite sql = new LodSqlite(this.db)) {
 				this.importAll(sql);
 			}
@@ -214,8 +214,8 @@ final class LodDhImport implements Runnable {
 			}
 			Files.createDirectories(this.done.getParent());
 			Files.writeString(this.done, signature + "\n");
-			System.out.printf(java.util.Locale.ROOT, "mcopt-lod: imported %d chunks from Distant Horizons' save (%d sections; %d chunks left to the world's own; %s)%n",
-				this.chunks.get(), this.sections.get(), this.skipped.get(), this.rowCounts());
+			System.out.println(String.format(java.util.Locale.ROOT, "mcopt-lod: imported %d chunks from Distant Horizons' save (%d sections; %d chunks left to the world's own; %s)%n",
+				this.chunks.get(), this.sections.get(), this.skipped.get(), this.rowCounts()).stripTrailing());
 		} catch (InterruptedException e) {
 			if (this.stopped) this.paused();
 		} catch (IOException | RuntimeException e) {
@@ -229,8 +229,8 @@ final class LodDhImport implements Runnable {
 	private void paused() {
 		if (this.signature.isEmpty()) return;
 		this.saveProgress();
-		System.out.printf(java.util.Locale.ROOT, "mcopt-lod: Distant Horizons import paused at row %d (%d chunks imported this session); it goes on next time%n",
-			this.rowsDone, this.chunks.get());
+		System.out.println(String.format(java.util.Locale.ROOT, "mcopt-lod: Distant Horizons import paused at row %d (%d chunks imported this session); it goes on next time%n",
+			this.rowsDone, this.chunks.get()).stripTrailing());
 	}
 
 	private void saveProgress() {
@@ -290,7 +290,7 @@ final class LodDhImport implements Runnable {
 			if (now - this.lastReport > 30_000_000_000L) {
 				this.lastReport = now;
 				this.saveProgress();
-				System.out.printf(java.util.Locale.ROOT, "mcopt-lod: Distant Horizons import: row %d, %d chunks imported%n", index, this.chunks.get());
+				System.out.println(String.format(java.util.Locale.ROOT, "mcopt-lod: Distant Horizons import: row %d, %d chunks imported%n", index, this.chunks.get()).stripTrailing());
 			}
 			if (row[cLevel] instanceof Long lv && lv >= 0 && lv < this.rowsByLevel.length) this.rowsByLevel[(int) (long) lv]++;
 			if (!(row[cLevel] instanceof Long lv) || lv != 0 || !(row[cX] instanceof Long px) || !(row[cZ] instanceof Long pz)) {

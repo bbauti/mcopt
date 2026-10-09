@@ -66,9 +66,9 @@ public final class OwnMeshStats {
 		if (now > logAt) {
 			logAt = now + 2_000_000_000L;
 			// the window since the last line (pick the bench phase by t), then reset
-			System.out.printf("mcopt-own mesh stats: t %.1f s, %d compiles, wall %.3f ms mean, p50 %.2f, p99 %.2f; cpu %.3f ms mean, p99 %.2f; alloc %.1f KB/section; total %d%n",
+			System.out.println(String.format("mcopt-own mesh stats: t %.1f s, %d compiles, wall %.3f ms mean, p50 %.2f, p99 %.2f; cpu %.3f ms mean, p99 %.2f; alloc %.1f KB/section; total %d%n",
 				(now - START) / 1e9, count, wallNs / 1e6 / count, pct(wall, 0.5), pct(wall, 0.99), cpuNs / 1e6 / count, pct(cpu, 0.99),
-				allocBytes / 1024.0 / count, total += count);
+				allocBytes / 1024.0 / count, total += count).stripTrailing());
 			count = wallNs = cpuNs = allocBytes = 0;
 			java.util.Arrays.fill(wall, 0);
 			java.util.Arrays.fill(cpu, 0);

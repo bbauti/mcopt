@@ -117,7 +117,7 @@ final class LodSeam {
 			throw new IllegalStateException(e);
 		}
 		for (int i = 0; i < RING; i++) this.vp[i] = new Matrix4f();
-		System.out.printf("mcopt-lod seam: probe on, writing %s (change > %d, back <= %d)%n", DIR, CHANGE, BACK);
+		System.out.println(String.format("mcopt-lod seam: probe on, writing %s (change > %d, back <= %d)%n", DIR, CHANGE, BACK).stripTrailing());
 	}
 
 	private static MethodHandle fn(String name, MemoryLayout result, MemoryLayout... args) {
@@ -275,8 +275,8 @@ final class LodSeam {
 		long now = System.nanoTime();
 		if (now - this.lastSummary > 5_000_000_000L) {
 			this.lastSummary = now;
-			System.out.printf("mcopt-lod seam: %d frames, solid flash px %d in %d frames, pop px %d, region px/frame %.0f, max change %d%n", this.framesLogged, this.sumFlash,
-				this.flashFrames, this.sumPop, this.sumRegion / (double) Math.max(1, this.framesLogged), this.maxChange);
+			System.out.println(String.format("mcopt-lod seam: %d frames, solid flash px %d in %d frames, pop px %d, region px/frame %.0f, max change %d%n", this.framesLogged, this.sumFlash,
+				this.flashFrames, this.sumPop, this.sumRegion / (double) Math.max(1, this.framesLogged), this.maxChange).stripTrailing());
 			try {
 				this.csv.flush();
 				this.durations.flush();
@@ -323,7 +323,7 @@ final class LodSeam {
 				}
 			}
 		});
-		System.out.printf("mcopt-lod seam: flash of %d px in frame %d around %d,%d: crops at %d,%d%n", px, frame - 2, cx, cy, x0, y0);
+		System.out.println(String.format("mcopt-lod seam: flash of %d px in frame %d around %d,%d: crops at %d,%d%n", px, frame - 2, cx, cy, x0, y0).stripTrailing());
 	}
 
 	/** -Dmcopt.lod.seam.strip=FIRST,COUNT,STEP,SCALE: frame FIRST + i x STEP (i < COUNT) scaled down by SCALE. */

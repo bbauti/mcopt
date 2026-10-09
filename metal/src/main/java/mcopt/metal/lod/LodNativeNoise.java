@@ -199,8 +199,8 @@ final class LodNativeNoise {
 			next.put(root, r);
 			this.roots = next;
 			if (this.leaves + this.blends != before) {
-				System.out.printf(Locale.ROOT, "mcopt-lod: nativeNoise %s: %d noise stacks and %d blended noises replaced in %s samplers (%d records kept)%n",
-					this.mode.backend.name().toLowerCase(Locale.ROOT), this.leaves, this.blends, this.what, this.unknown);
+				System.out.println(String.format(Locale.ROOT, "mcopt-lod: nativeNoise %s: %d noise stacks and %d blended noises replaced in %s samplers (%d records kept)%n",
+					this.mode.backend.name().toLowerCase(Locale.ROOT), this.leaves, this.blends, this.what, this.unknown).stripTrailing());
 			}
 			return r;
 		}
@@ -384,11 +384,11 @@ final class LodNativeNoise {
 			}
 		}
 		long done = verified.incrementAndGet();
-		if (done % 200 == 0) System.out.printf(Locale.ROOT, "mcopt-lod: nativeNoise verify: %d volumes compared with the game's samplers, %d values differed%n", done, mismatches.get());
+		if (done % 200 == 0) System.out.println(String.format(Locale.ROOT, "mcopt-lod: nativeNoise verify: %d volumes compared with the game's samplers, %d values differed%n", done, mismatches.get()).stripTrailing());
 		if (bad > 0) {
 			long all = mismatches.addAndGet(bad);
-			System.out.printf(Locale.ROOT, "mcopt-lod: nativeNoise verify MISMATCH: %d of %d values (%s, first at %d: game %s, %s %s; %d so far)%n", bad, v.size(), v, first,
-				want.get(first), "copy", got.get(first), all);
+			System.out.println(String.format(Locale.ROOT, "mcopt-lod: nativeNoise verify MISMATCH: %d of %d values (%s, first at %d: game %s, %s %s; %d so far)%n", bad, v.size(), v, first,
+				want.get(first), "copy", got.get(first), all).stripTrailing());
 		}
 	}
 

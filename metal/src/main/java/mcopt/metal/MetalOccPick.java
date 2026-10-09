@@ -47,8 +47,8 @@ final class MetalOccPick {
 		this.split = this.bias <= 0;
 		this.frame = -1;
 		this.decidedAt = now;
-		System.out.printf("mcopt-metal occ: %d px, split %.3f ms, plain %.3f ms, sum %+.3f: %s%n", pixels, split / 1e6, plain / 1e6, this.bias,
-			this.split ? "split" : "plain");
+		System.out.println(String.format("mcopt-metal occ: %d px, split %.3f ms, plain %.3f ms, sum %+.3f: %s%n", pixels, split / 1e6, plain / 1e6, this.bias,
+			this.split ? "split" : "plain").stripTrailing());
 		return this.split;
 	}
 

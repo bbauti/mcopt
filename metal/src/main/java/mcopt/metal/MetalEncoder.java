@@ -250,13 +250,13 @@ final class MetalEncoder implements CommandEncoderBackend {
 		if (this.statStart == 0) this.statStart = now;
 		if (now - this.statStart < 1_000_000_000L) return;
 		double frameMs = (now - this.statStart) / 1e6 / this.statFrames;
-		System.out.printf("mcopt-metal stats: %d fps, %.3f ms/frame, %.3f ms of it waiting on the GPU, %d presents%s%n", this.statFrames,
+		System.out.println(String.format("mcopt-metal stats: %d fps, %.3f ms/frame, %.3f ms of it waiting on the GPU, %d presents%s%n", this.statFrames,
 			frameMs, this.waitNanos / 1e6 / this.statFrames, this.statPresents, (PRESENT_QUEUE ? " (queued" + (PRESENT_ACQUIRE ? ", acquired on the present side" : "") + "; skipped so far " + Native.presentSkipped() + ", dropped " + Native.presentDropped() + ")" : "")
-			+ (MetalSurface.PACE_ADAPT ? String.format(" (pace margin +%.2f ms learned)", Native.paceExtraMs()) : ""));
+			+ (MetalSurface.PACE_ADAPT ? String.format(" (pace margin +%.2f ms learned)", Native.paceExtraMs()) : "")).stripTrailing());
 		if (MetalTerrain.OCC) {
 			long[] t = this.terrain.lastCompletedCounts();
-			System.out.printf("mcopt-metal stats: terrain drew %d of %d quads (%.1f%%), %d before the split, %d chunks (%.1f quads each), %d frames drew terrain%n", t[0], t[1],
-				100.0 * t[0] / Math.max(1, t[1]), t[2], t[3], (double) t[1] / Math.max(1, t[3]), this.terrain.terrainFrames - this.statTerrainFrames);
+			System.out.println(String.format("mcopt-metal stats: terrain drew %d of %d quads (%.1f%%), %d before the split, %d chunks (%.1f quads each), %d frames drew terrain%n", t[0], t[1],
+				100.0 * t[0] / Math.max(1, t[1]), t[2], t[3], (double) t[1] / Math.max(1, t[3]), this.terrain.terrainFrames - this.statTerrainFrames).stripTrailing());
 			this.statTerrainFrames = this.terrain.terrainFrames;
 		}
 		this.statStart = now;
@@ -286,12 +286,12 @@ final class MetalEncoder implements CommandEncoderBackend {
 		}
 		if (++this.profiledFrames < PROFILE_FRAMES) return;
 		double[] avg = Arrays.stream(this.profileSums).map(v -> v / PROFILE_FRAMES).toArray();
-		System.out.printf("mcopt-metal gpu: submits %d-%d took %.0f us on the GPU on average%n", TRACE_SUBMIT, TRACE_SUBMIT + PROFILE_FRAMES - 1, avg[0]);
+		System.out.println(String.format("mcopt-metal gpu: submits %d-%d took %.0f us on the GPU on average%n", TRACE_SUBMIT, TRACE_SUBMIT + PROFILE_FRAMES - 1, avg[0]).stripTrailing());
 		for (int e = 0; e < PROFILE_ENCODERS && avg[1 + 2 * e] + avg[2 + 2 * e] > 0; e++) {
 			double[] at = new double[4];
 			for (int k = 0; k < 4; k++) at[k] = this.profileAtN[4 * e + k] > 0 ? this.profileAt[4 * e + k] / this.profileAtN[4 * e + k] : -1;
-			System.out.printf("mcopt-metal gpu: #%d vertex %6.0f us, fragment %6.0f us; at vertex %.0f-%.0f, fragment %.0f-%.0f us%n", e, avg[1 + 2 * e], avg[2 + 2 * e],
-				at[0], at[1], at[2], at[3]);
+			System.out.println(String.format("mcopt-metal gpu: #%d vertex %6.0f us, fragment %6.0f us; at vertex %.0f-%.0f, fragment %.0f-%.0f us%n", e, avg[1 + 2 * e], avg[2 + 2 * e],
+				at[0], at[1], at[2], at[3]).stripTrailing());
 		}
 	}
 

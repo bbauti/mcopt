@@ -93,8 +93,8 @@ final class LodImport implements Runnable {
 			}
 			this.writeDone(done);
 			if (this.chunks.get() > 0) {
-				System.out.printf("mcopt-lod: imported %d saved chunks from %d regions of %s (%d unreadable)%n", this.chunks.get(), this.regionsDone.get(),
-					this.level.dimension().identifier(), this.failed.get());
+				System.out.println(String.format("mcopt-lod: imported %d saved chunks from %d regions of %s (%d unreadable)%n", this.chunks.get(), this.regionsDone.get(),
+					this.level.dimension().identifier(), this.failed.get()).stripTrailing());
 			}
 		} catch (InterruptedException e) {
 			// closing

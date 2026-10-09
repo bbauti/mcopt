@@ -68,7 +68,7 @@ final class LodTaaTile {
 		} catch (Throwable t) {
 			throw t instanceof RuntimeException r ? r : new IllegalStateException(t);
 		}
-		System.out.printf("mcopt-lod: far terrain tile filter on (%s, box growth %.2f)%n", EMPTY ? "empty dispatch" : "alpha " + ALPHA, GROW);
+		System.out.println(String.format("mcopt-lod: far terrain tile filter on (%s, box growth %.2f)%n", EMPTY ? "empty dispatch" : "alpha " + ALPHA, GROW).stripTrailing());
 	}
 
 	private static MethodHandle fn(String name, java.lang.foreign.MemoryLayout result, java.lang.foreign.MemoryLayout... args) {
@@ -116,7 +116,7 @@ final class LodTaaTile {
 			double err = this.r11.distance(this.r10.x + this.r01.x - this.r00.x, this.r10.y + this.r01.y - this.r00.y, this.r10.z + this.r01.z - this.r00.z);
 			if (err > 1e-3 * this.r11.length()) {
 				this.affineWarned = true;
-				System.out.printf("mcopt-lod: tile filter: view ray not affine in the pixel (error %.2g), reprojection is approximate%n", err / this.r11.length());
+				System.out.println(String.format("mcopt-lod: tile filter: view ray not affine in the pixel (error %.2g), reprojection is approximate%n", err / this.r11.length()).stripTrailing());
 			}
 		}
 		putVec(f, this.d0, 0);

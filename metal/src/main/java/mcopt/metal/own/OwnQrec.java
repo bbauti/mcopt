@@ -193,9 +193,9 @@ final class OwnQrec {
 			synchronized (WHY) {
 				if (now <= logAt) return;
 				logAt = now + 5_000_000_000L;
-				System.out.printf("mcopt-own mesh qrec: layers %d (%d from vanilla meshes), records %d (hinted %d, uniform %d, grey %d, alpha %d), stubs %d (position %d, uv %d, alpha %d, colour %d)%s%n",
+				System.out.println(String.format("mcopt-own mesh qrec: layers %d (%d from vanilla meshes), records %d (hinted %d, uniform %d, grey %d, alpha %d), stubs %d (position %d, uv %d, alpha %d, colour %d)%s%n",
 					LAYERS.get(), RAW_LAYERS.get(), QUADS.get(), HINTED.get(), UNIFORM.get(), GREY.get(), ALPHA.get(), STUBS.get(), WHY[0], WHY[1], WHY[2], WHY[3],
-					CHECK ? "; check: " + CHECKED.get() + " quads, " + BAD.get() + " differ" : "");
+					CHECK ? "; check: " + CHECKED.get() + " quads, " + BAD.get() + " differ" : "").stripTrailing());
 			}
 		}
 	}

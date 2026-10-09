@@ -159,8 +159,8 @@ final class LodVoxyImport implements Runnable {
 			if (this.stopped) return;
 			Files.createDirectories(this.done.getParent());
 			Files.writeString(this.done, signature + "\n");
-			System.out.printf("mcopt-lod: imported %d chunks from Voxy's save (%d sections; %d chunks left to the world's own)%n", this.chunks.get(),
-				this.sections.get(), this.skipped.get());
+			System.out.println(String.format("mcopt-lod: imported %d chunks from Voxy's save (%d sections; %d chunks left to the world's own)%n", this.chunks.get(),
+				this.sections.get(), this.skipped.get()).stripTrailing());
 		} catch (InterruptedException e) {
 			// closing
 		} catch (IOException | RuntimeException e) {
