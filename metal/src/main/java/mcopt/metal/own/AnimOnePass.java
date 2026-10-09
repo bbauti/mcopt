@@ -75,6 +75,30 @@ public final class AnimOnePass {
 		OWNER.put(state, contents);
 	}
 
+	/**
+	 * The contents that made state, by vanilla's own link: its animationInfo is an AnimatedTexture, an inner class of the
+	 * SpriteContents that built it (this$0). For states made without SpriteContents.createAnimationState: Fusion's connected
+	 * textures (FusionSpriteContents) override it and build their AnimatedTexture and state themselves. Null if unreadable.
+	 */
+	private static @org.jspecify.annotations.Nullable SpriteContents linkedOwner(SpriteContents.AnimationState state) {
+		try {
+			if (animationInfo == null) {
+				java.lang.reflect.Field info = SpriteContents.AnimationState.class.getDeclaredField("animationInfo");
+				java.lang.reflect.Field outer = info.getType().getDeclaredField("this$0");
+				info.setAccessible(true);
+				outer.setAccessible(true);
+				infoOwner = outer;
+				animationInfo = info;
+			}
+			Object info = animationInfo.get(state);
+			return info != null && infoOwner.get(info) instanceof SpriteContents c ? c : null;
+		} catch (ReflectiveOperationException | RuntimeException e) {
+			return null;
+		}
+	}
+
+	private static java.lang.reflect.@org.jspecify.annotations.Nullable Field animationInfo, infoOwner;
+
 	private static final class Entry {
 		List<SpriteContents.AnimationState> states;
 		List<TextureAtlasSprite> sprites;
@@ -266,6 +290,7 @@ public final class AnimOnePass {
 		// another sprite's rectangle; any mismatch leaves the atlas with vanilla
 		for (int i = 0; i < sprites.size(); i++) {
 			SpriteContents owner = OWNER.get(states.get(i));
+			if (owner == null) owner = linkedOwner(states.get(i));
 			if (TEST.equals("mismatch") && i == sprites.size() - 1) owner = null;  // (test: the last state's owner unknown)
 			if (owner != sprites.get(i).contents()) {
 				MISMATCH = "animation state " + i + " doesn't belong to sprite " + sprites.get(i).contents().name()
