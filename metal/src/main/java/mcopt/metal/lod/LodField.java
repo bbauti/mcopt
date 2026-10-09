@@ -167,6 +167,8 @@ final class LodField {
 
 	/** Singleplayer: the saved chunks' importer (LodImport), else null. */
 	@org.jspecify.annotations.Nullable LodImport importer;
+	/** Voxy's saved terrain's importer (LodVoxyImport), else null. */
+	@org.jspecify.annotations.Nullable LodVoxyImport voxy;
 	int needed, missing;
 
 	private record Job(double priority, long seq, long key, Runnable task) implements Comparable<Job> {
@@ -199,6 +201,7 @@ final class LodField {
 	void close() {
 		this.closed = true;
 		if (this.importer != null) this.importer.stop();
+		if (this.voxy != null) this.voxy.stop();
 		if (this.scanner != null) {
 			// (its re-sort drains and re-adds the queue: done before the queue is drained here)
 			this.scanner.shutdownNow();

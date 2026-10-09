@@ -608,6 +608,12 @@ public final class Lod {
 		if (server != null && sl != null && LodImport.ON && LodConfig.DISK_CACHE && LodConfig.CHUNKS) {
 			this.field.importer = new LodImport(this.field, sl, server.getWorldPath(LevelResource.ROOT), cache);
 		}
+		// Voxy's saved far terrain, where it has some for this dimension (singleplayer: where the world has no saved chunk)
+		if (LodConfig.CHUNKS) {
+			Path worldRoot = server != null ? server.getWorldPath(LevelResource.ROOT) : null;
+			Path regions = worldRoot != null ? net.minecraft.world.level.dimension.DimensionType.getStorageFolder(level.dimension(), worldRoot).resolve("region") : null;
+			this.field.voxy = LodVoxyImport.start(this.field, level, worldRoot, regions);
+		}
 		if (noise == null) System.out.println("mcopt-lod: " + level.dimension().identifier() + (server == null ? " on a server" : " (not noise-generated, or a roof)")
 			+ ": far terrain from the chunks the client receives, kept in " + cache);
 		// on a server running mcopt-server: it's asked for what it can make (generated tiles, its saved chunks)
@@ -1640,6 +1646,7 @@ public final class Lod {
 		m.put("emptyTiles", w.empty.get());
 		m.put("patchedTiles", w.patched.get());
 		if (w.importer != null) m.put("importedChunks", w.importer.chunks.get());
+		if (w.voxy != null) m.put("voxyChunks", w.voxy.chunks.get());
 		m.put("cullsSkipped", l.cullsSkipped);
 		m.put("quality", LodConfig.QUALITY.name());
 		if (LodField.CHUNK_TILES) {
