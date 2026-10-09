@@ -2344,7 +2344,9 @@ static inline void meshEmitBlock(constant MeshFrame& f, device const uint* arena
         float yHi = float(int(h[15] >> 16) - 512 - f.origin.y) - f.cam.y;
         if (PK) yHi += f.hz.z;
         if (hzTangent(yHi, dn, df) < hzt) {
+#ifdef MESH_BENCH_STATS
             atomic_fetch_add_explicit(&args[23], 1u, memory_order_relaxed);
+#endif
             if ((f.opts.z & 8) == 0) return;
             hiddenBlock = true;
         } else if (hzt > -INFINITY && sh == 0) {
@@ -2354,7 +2356,9 @@ static inline void meshEmitBlock(constant MeshFrame& f, device const uint* arena
                 if (PK) gy += f.hz.z;
                 if (hzTangent(gy, dn, df) < hzt) {
                     bits &= ~(1u << g);
+#ifdef MESH_BENCH_STATS
                     atomic_fetch_add_explicit(&args[24], 1u, memory_order_relaxed);
+#endif
                 }
             }
         }
@@ -2394,20 +2398,30 @@ static inline void meshEmitBlock(constant MeshFrame& f, device const uint* arena
     }
     int4 clip = int4(ox0, ox0 + size, oz0, oz0 + size);
     int ttx = meshTileOf(f, kx), ttz = meshTileOf(f, kz);
+    // (the counters in args 10-12, 15, 23, 24, 32-47 and 48-63 are statistics nothing reads: same-address atomics a listed block,
+    // group or hidden quad each, kept for the offline bench only)
+#ifdef MESH_BENCH_STATS
     uint quads = 0u;
+#endif
     for (int g = 0; g < 14; g++) {
         if (((bits >> g) & 1u) == 0u) continue;
         uint n = h[g] >> 20;
+#ifdef MESH_BENCH_STATS
         atomic_fetch_add_explicit(&args[48 + L], n, memory_order_relaxed);
         atomic_fetch_add_explicit(&args[32 + g], n, memory_order_relaxed);
         quads += n;
+#endif
         meshEmit(f, args, inst, ARGS_CAND, uint(f.counts.z), quadBase + (h[g] & 0xFFFFFu), n, tag, ttx, ttz, clip);
     }
+#ifdef MESH_BENCH_STATS
     atomic_fetch_add_explicit(&args[10], 1u, memory_order_relaxed);
     atomic_fetch_add_explicit(&args[11], quads, memory_order_relaxed);
+#endif
     if (((bits >> 14) & 1u) != 0u) {
         uint np = h[14] >> 20;
+#ifdef MESH_BENCH_STATS
         atomic_fetch_add_explicit(&args[12], np, memory_order_relaxed);
+#endif
         if (PK) {
             // the position pass's plants go into their home sector's own instances (the frames pick the sectors in view)
             device atomic_uint* w = sec + home * PK_SECTOR_WORDS;
@@ -2701,7 +2715,9 @@ kernel void lod_mesh_quads(constant CompFrame& f [[buffer(22)]], device const Me
                         qdbg[3 * at + 5] = float4(lo.x, lo.y, hi.x, hi.y);
                     }
 #endif
+#ifdef MESH_BENCH_STATS
                     atomic_fetch_add_explicit(&args[15], 1u, memory_order_relaxed);
+#endif
                 }
 #ifdef MESH_BENCH_AREA
                 if (keep) {
