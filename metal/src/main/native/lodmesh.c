@@ -2,6 +2,7 @@
 // offline harness.
 #include "lodmesh.h"
 
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -88,14 +89,25 @@ static void column0(const LmIn *in, int ax, int az, Col *c) {
 
 // a's intervals where b has none (b unknown: all of a's, the ground's from LM_DEEP). Returns the pieces.
 static int faceDiff(const Col *a, const Col *b, int *lo, int *hi, unsigned char *kind) {
+	// the common case, a column of ground beside another: what of a stands over b
+	if (a->n == 1 && b->n == 1 && a->lo[0] == NEG_INF && b->lo[0] == NEG_INF) {
+		int l = b->hi[0] < LM_DEEP ? LM_DEEP : b->hi[0], h = a->hi[0];
+		if (h <= b->hi[0] || h <= l) return 0;
+		lo[0] = l;
+		hi[0] = h;
+		kind[0] = a->kind[0];
+		return 1;
+	}
 	int n = 0;
 	for (int k = 0; k < a->n; k++) {
-		int pl[MAX_IV * 2 + 2], ph[MAX_IV * 2 + 2], pn = 1;
+		// the pieces left of a's interval k, cut by each of b's in turn (two buffers in turn, no copies)
+		int bufL[2][MAX_IV * 2 + 2], bufH[2][MAX_IV * 2 + 2];
+		int *pl = bufL[0], *ph = bufH[0], pn = 1, cur = 0;
 		pl[0] = a->lo[k];
 		ph[0] = a->hi[k];
 		for (int j = 0; b->n > 0 && j < b->n; j++) {
 			int bl = b->lo[j], bh = b->hi[j], qn = 0;
-			int ql[MAX_IV * 2 + 2], qh[MAX_IV * 2 + 2];
+			int *ql = bufL[cur ^ 1], *qh = bufH[cur ^ 1];
 			for (int p = 0; p < pn; p++) {
 				if (bh <= pl[p] || bl >= ph[p]) {
 					ql[qn] = pl[p];
@@ -111,9 +123,10 @@ static int faceDiff(const Col *a, const Col *b, int *lo, int *hi, unsigned char 
 					qh[qn++] = ph[p];
 				}
 			}
+			cur ^= 1;
+			pl = ql;
+			ph = qh;
 			pn = qn;
-			memcpy(pl, ql, sizeof(int) * (size_t) qn);
-			memcpy(ph, qh, sizeof(int) * (size_t) qn);
 		}
 		for (int p = 0; p < pn && n < MAX_IV * 2; p++) {
 			int l = pl[p] < LM_DEEP ? LM_DEEP : pl[p], h = ph[p];
@@ -178,18 +191,14 @@ static void rects(Out *o, uint32_t *rows, int b, int x0, int z0, int face, int k
 }
 
 typedef struct {
-	int key;   // kind << 16 | (y + 512)
+	int key;   // kind << 12 | (y + 512): 14 bits
 	int x, z;
 } Item;
 
-static int itemCmp(const void *a, const void *b) {
-	const Item *p = a, *q = b;
-	return p->key != q->key ? (p->key < q->key ? -1 : 1) : 0;
-}
-
-// Tops (bottoms = 0) or undersides (bottoms = 1) of the block's cells, merged per height and kind.
+// Tops (bottoms = 0) or undersides (bottoms = 1) of the block's cells, merged per height and kind (in key order: two passes
+// of a 7-bit radix sort; the order within a key doesn't matter, its cells only set bits).
 static void flats(Out *o, const Col *cols, int b, int x0, int z0, int bottoms) {
-	Item items[16 * 16 * MAX_IV];
+	Item items[16 * 16 * MAX_IV], sorted[16 * 16 * MAX_IV];
 	int n = 0;
 	for (int z = 0; z < b; z++) {
 		for (int x = 0; x < b; x++) {
@@ -197,7 +206,7 @@ static void flats(Out *o, const Col *cols, int b, int x0, int z0, int bottoms) {
 			for (int k = 0; k < c->n; k++) {
 				if (bottoms && c->lo[k] == NEG_INF) continue;
 				int y = bottoms ? c->lo[k] : c->hi[k];
-				items[n].key = (int) c->kind[k] << 16 | (y + 512);
+				items[n].key = (int) c->kind[k] << 12 | (y + 512);
 				items[n].x = x;
 				items[n].z = z;
 				n++;
@@ -205,7 +214,19 @@ static void flats(Out *o, const Col *cols, int b, int x0, int z0, int bottoms) {
 		}
 	}
 	if (n == 0) return;
-	qsort(items, (size_t) n, sizeof(Item), itemCmp);
+	int count[128];
+	for (int pass = 0; pass < 2; pass++) {
+		Item *from = pass == 0 ? items : sorted, *to = pass == 0 ? sorted : items;
+		int shift = pass * 7;
+		memset(count, 0, sizeof count);
+		for (int i = 0; i < n; i++) count[(from[i].key >> shift) & 127]++;
+		for (int i = 0, sum = 0; i < 128; i++) {
+			int c = count[i];
+			count[i] = sum;
+			sum += c;
+		}
+		for (int i = 0; i < n; i++) to[count[(from[i].key >> shift) & 127]++] = from[i];
+	}
 	for (int i = 0; i < n;) {
 		int j = i;
 		uint32_t rows[16] = {0};
@@ -213,7 +234,7 @@ static void flats(Out *o, const Col *cols, int b, int x0, int z0, int bottoms) {
 			rows[items[j].z] |= 1u << items[j].x;
 			j++;
 		}
-		int y = (items[i].key & 0xFFFF) - 512, kind = items[i].key >> 16;
+		int y = (items[i].key & 0xFFF) - 512, kind = items[i].key >> 12;
 		range(o, y, y);
 		rects(o, rows, b, x0, z0, bottoms ? LM_F_BOTTOM : LM_F_TOP, kind, y);
 		i = j;
@@ -322,9 +343,28 @@ static void plants(Out *o, const LmIn *in, int b, int x0, int z0) {
 	}
 }
 
+// The region's columns: each thread's own buffer, kept while the thread lives (~200 KB: malloc'd per call, it came as fresh
+// pages every time), freed when it ends.
+static pthread_key_t scratchKey;
+static pthread_once_t scratchOnce = PTHREAD_ONCE_INIT;
+
+static void scratchInit(void) {
+	pthread_key_create(&scratchKey, free);
+}
+
+static Col *scratchCols(void) {
+	pthread_once(&scratchOnce, scratchInit);
+	Col *c = pthread_getspecific(scratchKey);
+	if (!c) {
+		c = malloc(sizeof(Col) * REGION * REGION);
+		if (c) pthread_setspecific(scratchKey, c);
+	}
+	return c;
+}
+
 int lm_mesh(const LmIn *in, uint32_t *header, uint32_t *quads, int cap) {
 	int b = in->block == 16 ? 16 : 8, nb = LM_TILE / b;
-	Col *cols = malloc(sizeof(Col) * REGION * REGION);
+	Col *cols = scratchCols();
 	if (!cols) return -1;
 	int ax0 = in->tx * LM_TILE, az0 = in->tz * LM_TILE;
 	for (int z = -1; z <= LM_TILE; z++) {
@@ -414,7 +454,6 @@ int lm_mesh(const LmIn *in, uint32_t *header, uint32_t *quads, int cap) {
 			}
 		}
 	}
-	free(cols);
 	if (o.overflow || o.count >= (1 << 20)) return -1;
 	return o.count;
 }
