@@ -730,8 +730,9 @@ public final class Lod {
 					// everything the cull reads is as it was at the last one: its outputs (persistent buffers) are drawn again
 					this.cullsSkipped++;
 				} else {
-					LodNative.meshCull(this.lod, enc, mesh.frame, LodMesh.FRAME_BYTES, this.compFrame, COMP_FRAME_BYTES, table, mesh.arena(), maskBuf, mesh.argsBuf,
-						mesh.instBuf, mesh.plantBuf, mesh.survBuf, mesh.horizonBuf, mesh.listBuf, clip.geomBuf, clip.crownBuf, mesh.blocks(), LodMesh.FENCES);
+					mesh.nextCull();
+					LodNative.meshCull(this.lod, enc, mesh.frame, LodMesh.FRAME_BYTES, this.compFrame, COMP_FRAME_BYTES, table, mesh.arena(), maskBuf, mesh.args(),
+						mesh.inst(), mesh.plants(), mesh.survivors(), mesh.horizonBuf, mesh.listBuf, clip.geomBuf, clip.crownBuf, mesh.blocks(), LodMesh.FENCES);
 				}
 				if (timed) {
 					pk.timedPath(slot, listsRan);
@@ -740,7 +741,7 @@ public final class Lod {
 				}
 				long atlas = this.atlasHandle();
 				if (this.taa != null) this.taa.beforeDraw(this.camX, this.camY, this.camZ, rd * 16.0F + 48.0F);
-				LodNative.meshDraw(this.lod, enc, gbuffer, this.compFrame, COMP_FRAME_BYTES, mesh.arena(), mesh.argsBuf, mesh.instBuf, mesh.plantBuf, mesh.survBuf,
+				LodNative.meshDraw(this.lod, enc, gbuffer, this.compFrame, COMP_FRAME_BYTES, mesh.arena(), mesh.args(), mesh.inst(), mesh.plants(), mesh.survivors(),
 					clip.geomBuf, clip.colorBuf, clip.crownBuf, clip.texBuf, this.paletteBuf, atlas, mesh.currentTable(), mesh.frame, LodMesh.FRAME_BYTES,
 					LodMesh.FENCES && pk == null, this.err, 4096);
 				if (this.taa != null) this.taa.afterDraw(this.viewProj, this.camX, this.camY, this.camZ);

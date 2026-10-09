@@ -27,6 +27,15 @@ final class LodMesh implements LodClip.Listener {
 	static final int FRAME_BYTES = 432;
 	/** -Dmcopt.lod.meshFences=true: the cull's outputs ordered by fences instead of hazard tracking (see mclod.m). */
 	static final boolean FENCES = Boolean.getBoolean("mcopt.lod.meshFences") && !LodPk.ENABLED;
+	/**
+	 * -Dmcopt.lod.meshDouble=false: one set of the cull's outputs the draw reads (args, instances, plants, survivors) instead of two
+	 * used in turn. With one, frame N + 1's cull writes what frame N's level pass reads: hazard tracking makes the cull wait for that
+	 * whole pass (fragments included), and the next level pass waits for the cull, so the cull never overlaps the previous frame. With
+	 * two it only waits for the pass two frames back. Exact: each cull rewrites its set whole (lod_mesh_reset), a skipped cull's frame
+	 * draws the set the last one wrote. Costs ~50 MB of GPU memory. (Not with -Dmcopt.lod.meshFences, ordered by fences, or the pk
+	 * lists, which use the first set.)
+	 */
+	static final boolean DOUBLE = !FENCES && !LodPk.ENABLED && Boolean.parseBoolean(System.getProperty("mcopt.lod.meshDouble", "true"));
 	/** -Dmcopt.lod.horizonCull=false: no occlusion cull (what nearer terrain hides). */
 	static final boolean HORIZON = Boolean.parseBoolean(System.getProperty("mcopt.lod.horizonCull", "true"));
 	/** -Dmcopt.lod.realOcc=true: the real terrain (level 0's blocks the hand-off masks) raises the horizon cull's horizon too. */
@@ -80,6 +89,10 @@ final class LodMesh implements LodClip.Listener {
 	private final long tableHost;
 	private final long[] tableBufs = new long[RING];
 	final long argsBuf, instBuf, plantBuf, survBuf, horizonBuf, listBuf;
+	/** DOUBLE: the second set of the draw's inputs {args, inst, plant, surv}; else null. */
+	private final long @org.jspecify.annotations.Nullable [] second;
+	/** The set the last cull wrote and the draw reads: false the fields above, true second. */
+	private boolean onSecond;
 	private static final int MAX_LISTED = 1 << 16;
 	final long frame = MemoryUtil.nmemCalloc(1, FRAME_BYTES);
 	// meshing
@@ -140,6 +153,8 @@ final class LodMesh implements LodClip.Listener {
 		// (bins x bands, then per bin the far terrain's lowest tangent: columns.metal HZ_FARMIN)
 		this.horizonBuf = gpu.applyAsLong(4096L * 129 * 4);
 		this.listBuf = gpu.applyAsLong((long) MAX_LISTED * 16);
+		this.second = DOUBLE ? new long[] {gpu.applyAsLong(512), gpu.applyAsLong((long) MAX_INSTANCES * 32), gpu.applyAsLong((long) MAX_PLANT_INSTANCES * 32),
+			gpu.applyAsLong((long) MAX_SURVIVORS * 16)} : null;
 		// (2, as measured on 8-10 core Macs; one more per 4 cores past that, up to 4: a 12-16 core Mac meshes a world's join sooner)
 		int n = Math.max(1, Integer.getInteger("mcopt.lod.meshThreads", Math.clamp(Runtime.getRuntime().availableProcessors() / 4, 2, 4)));
 		this.workers = new Thread[n];
@@ -673,9 +688,31 @@ final class LodMesh implements LodClip.Listener {
 		this.clip.listener = null;
 	}
 
+	/** Render thread, before encoding a cull: it writes the other set (DOUBLE), the one the level pass two frames back read. */
+	void nextCull() {
+		if (this.second != null) this.onSecond = !this.onSecond;
+	}
+
+	/** The cull's outputs the next cull writes, or the draw reads: the set nextCull picked. */
+	long args() {
+		return this.onSecond ? this.second[0] : this.argsBuf;
+	}
+
+	long inst() {
+		return this.onSecond ? this.second[1] : this.instBuf;
+	}
+
+	long plants() {
+		return this.onSecond ? this.second[2] : this.plantBuf;
+	}
+
+	long survivors() {
+		return this.onSecond ? this.second[3] : this.survBuf;
+	}
+
 	/** GPU buffers, for release by the owner once frames in flight are done (the arena's current and old ones included). */
 	long[] buffers() {
-		long[] b = new long[RING + 7 + this.buffersLater.size()];
+		long[] b = new long[RING + 7 + (this.second != null ? this.second.length : 0) + this.buffersLater.size()];
 		int i = 0;
 		for (long t : this.tableBufs) b[i++] = t;
 		b[i++] = this.arenaBuf;
@@ -685,6 +722,7 @@ final class LodMesh implements LodClip.Listener {
 		b[i++] = this.survBuf;
 		b[i++] = this.horizonBuf;
 		b[i++] = this.listBuf;
+		if (this.second != null) for (long s : this.second) b[i++] = s;
 		for (long[] o : this.buffersLater) b[i++] = o[1];
 		return b;
 	}

@@ -77,6 +77,7 @@ Settings: Options > Video Settings > **Far Terrain (mcopt)...**, or in `config/m
 | `mcopt.lod.importVoxy` | `true` | Read Voxy's saved far terrain for the world or server you're in (with Voxy uninstalled), once per change of its files |
 | `mcopt.lod.importDh` | `true` | Read Distant Horizons' saved far terrain the same way (with Distant Horizons uninstalled) |
 | `mcopt.lod.cache` | `true` | The disk cache (`mcopt.lod.cacheDir` moves it) |
+| `mcopt.lod.meshDouble` | `true` | Two sets of the far terrain cull's outputs used in turn, so a frame's cull doesn't wait for the previous frame's level pass (~50 MB of GPU memory; `false`: one) |
 | `mcopt.lod.server` | `true` | Ask servers running mcopt-server for far terrain (needs Fabric API) |
 
 ### mcopt-server
