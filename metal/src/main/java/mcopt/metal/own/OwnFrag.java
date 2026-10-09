@@ -1138,10 +1138,15 @@ final class OwnFrag {
 		return m;
 	}
 
-	/** (every 5 s while a1Exact or a2Exact is requested) the effective mode, from the native telemetry (mco_frag_exact_telemetry). */
+	/**
+	 * (every 5 s while a1Exact or a2Exact is requested and on; once when it is requested but gated off) the effective mode, from
+	 * the native telemetry (mco_frag_exact_telemetry).
+	 */
 	private void exactLog() {
 		long now = System.nanoTime();
 		if (!(this.a1Req || this.a2Req) || now - this.exactLogAt < 5_000_000_000L) return;
+		// (requested but gated off on this GPU, as the indie profile's a2 on 16 cores: said once, its telemetry would repeat zeros)
+		if (!(this.a1Exact || this.a2Exact) && this.exactLogAt != 0) return;
 		this.exactLogAt = now;
 		OwnNative.fragExactTelemetry(this.own, this.exactTel);
 		int cores = mcopt.metal.Profile.gpuCores();

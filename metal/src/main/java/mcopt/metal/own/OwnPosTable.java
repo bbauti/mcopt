@@ -10,7 +10,9 @@ import org.lwjgl.system.MemoryUtil;
  * 0.002 / 16, random block offsets of plants, fluid heights, ...) gets a code >= 61440 indexing a table of its exact float, kept in
  * the arena's first 256 units (4096 floats; the arena is bound wherever positions are decoded, and growth copies it along). The
  * table only grows (one entry per distinct coordinate, section-relative); a full table falls back to the nearest grid code
- * (counted and logged: then that coordinate is as before, rounded). Every producer of compact positions encodes through here.
+ * (counted, said once: then that coordinate is as before, rounded, within 1/4096 of a block). It can't be larger: the 16-bit
+ * code has 4096 values above the grid's. Plant offsets and fluid heights fill it within seconds in most worlds. Every producer
+ * of compact positions encodes through here.
  */
 final class OwnPosTable {
 	static final boolean ON = Boolean.getBoolean("mcopt.own.mesh.exactPos") && Boolean.getBoolean("mcopt.own.compact");
@@ -19,7 +21,8 @@ final class OwnPosTable {
 	private static final float[] VALUES = new float[SIZE];
 	private static volatile int count;
 	private static final AtomicLong OVERFLOW = new AtomicLong();
-	private static long logAt, syncLogAt;
+	private static final java.util.concurrent.atomic.AtomicBoolean FULL_SAID = new java.util.concurrent.atomic.AtomicBoolean();
+	private static long syncLogAt;
 
 	private OwnPosTable() {
 	}
@@ -30,24 +33,30 @@ final class OwnPosTable {
 		if (g < BASE && g / 2048f - 8f == p) return g;
 		Integer c = CODES.get(Float.floatToRawIntBits(p));
 		if (c != null) return c;
+		// a full table stays full: its misses don't take the lock (every meshing worker misses on most off-grid coordinates from
+		// then on, ~1.8 million in a 15-minute session, each one queued on this monitor while holding the arena's read lock,
+		// which a growth, and the render thread behind it, waits out)
+		if (count >= SIZE) return overflow(g);
 		synchronized (VALUES) {
 			c = CODES.get(Float.floatToRawIntBits(p));
 			if (c != null) return c;
 			int i = count;
-			if (i >= SIZE) {
-				long n = OVERFLOW.incrementAndGet();
-				long now = System.nanoTime();
-				if (now > logAt) {
-					logAt = now + 5_000_000_000L;
-					System.out.println("mcopt-own mesh exactPos: table full (" + SIZE + "), " + n + " coordinates rounded to the grid");
-				}
-				return Math.min(g, BASE - 1);
-			}
+			if (i >= SIZE) return overflow(g);
 			VALUES[i] = p;
 			count = i + 1;  // (volatile: the value is visible before the count)
 			CODES.put(Float.floatToRawIntBits(p), BASE + i);
 			return BASE + i;
 		}
+	}
+
+	/** A coordinate the full table can't hold: the nearest grid code, counted. */
+	private static int overflow(int g) {
+		OVERFLOW.incrementAndGet();
+		if (!FULL_SAID.get() && FULL_SAID.compareAndSet(false, true)) {
+			System.out.println("mcopt-own mesh exactPos: table full (" + SIZE + " coordinates); further off-grid ones are rounded to the 1/2048-block"
+				+ " grid (within 1/4096 of a block, as before exactPos)");
+		}
+		return Math.min(g, BASE - 1);
 	}
 
 	/** The coordinate of code c (CPU side, as the shader decodes it). */
