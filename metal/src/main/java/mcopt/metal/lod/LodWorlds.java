@@ -62,6 +62,9 @@ final class LodWorlds {
 	 * or is 0 (a server that hides it): worlds behind one address then share a cache, as before.
 	 */
 	static String seedSuffix(net.minecraft.client.multiplayer.ClientLevel level) {
+		// -Dmcopt.lod.serverSeed=false: one cache per server address and dimension (for a server that sends a new hashed seed
+		// every time, which would otherwise start a new cache each session)
+		if (!Boolean.parseBoolean(System.getProperty("mcopt.lod.serverSeed", "true"))) return "";
 		try {
 			java.lang.reflect.Field f = net.minecraft.world.level.biome.BiomeManager.class.getDeclaredField("biomeZoomSeed");
 			f.setAccessible(true);

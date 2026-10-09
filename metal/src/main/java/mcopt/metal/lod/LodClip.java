@@ -506,7 +506,8 @@ final class LodClip {
 		boolean crowns = level < this.crownLevels;
 		if (s == null) {
 			s = new Snapshot(level, tx, tz, crowns, level == 0 && LodConfig.TEXTURES, level == 0 && this.plants);
-			this.read(level, tx, tz, s.g, s.c, s.cr, s.tw, s.runs, s.pl);
+			// from the newest words: a copy published in the last frames may not be in the live words yet (the GPU's copy)
+			this.readForSave(level, tx, tz, s.g, s.c, s.cr, s.tw, s.runs, s.pl);
 			s.epoch = this.epoch[level][this.slot(tx, tz)];
 			this.staged.put(key, s);
 		}
@@ -526,13 +527,17 @@ final class LodClip {
 	}
 
 	private final int[] scratchG = new int[TILE * TILE], scratchC = new int[TILE * TILE];
+	/** The staged copies' versions (render thread). */
+	private long stageSeq;
 
 	void refresh(int level, int tx, int tz) {
 		if (this.staging()) {
 			Snapshot s = this.staged.get(LodTile.key(level, tx, tz));
 			Listener l = this.listener;
 			if (s == null || l == null) return;
-			s.version++;
+			// (versions from one counter: a tile's next staged copy is always newer than the one it last published, whose
+			// version LodMesh keeps; counting from each copy's own 0 held back every other round of changes)
+			s.version = ++this.stageSeq;
 			l.tileStaged(s.copy());
 			return;
 		}

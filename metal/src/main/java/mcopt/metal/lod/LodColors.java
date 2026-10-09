@@ -114,7 +114,8 @@ final class LodColors {
 		}
 		// (lines split at their '=' here: java.util.Properties would split modid:block at its ':')
 		for (String line : lines) {
-			String t = line.strip();
+			// (a byte order mark some editors put first is no part of the key)
+			String t = line.replace("\uFEFF", "").strip();
 			if (t.isEmpty() || t.startsWith("#") || t.startsWith("!")) continue;
 			int eq = t.indexOf('=');
 			if (eq <= 0) {

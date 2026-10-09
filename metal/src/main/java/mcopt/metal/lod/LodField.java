@@ -115,11 +115,20 @@ final class LodField {
 			}
 		}
 		// what the workers handed back and the held chunks: into the tiles (or their patches) before anything is saved
-		Runnable r;
-		while ((r = this.results.poll()) != null) r.run();
+		this.drainResults();
 		for (LodChunks.Summary s : this.held.values()) this.applyChunk(s, 1, this.clip.levels);
 		this.held.clear();
 		for (Thread t : this.threads) t.interrupt();
+		// (a worker's job in flight, a save or a generation, finishes before the last saves here; then what it handed back)
+		for (Thread t : this.threads) {
+			try {
+				t.join(2000);
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+				break;
+			}
+		}
+		this.drainResults();
 		// the saves still queued (real chunks' tiles: what was seen this session) are written now, not dropped with the queue
 		java.util.ArrayList<Job> left = new java.util.ArrayList<>();
 		this.jobs.drainTo(left);
@@ -131,6 +140,18 @@ final class LodField {
 		}
 		saved += this.saveDirty(true);
 		if (saved > 0) System.out.println("mcopt-lod: saved " + saved + " tiles real chunks changed");
+	}
+
+	/** Render thread at close: every result the workers handed back, each on its own (one failing doesn't stop the saves). */
+	private void drainResults() {
+		Runnable r;
+		while ((r = this.results.poll()) != null) {
+			try {
+				r.run();
+			} catch (RuntimeException e) {
+				System.out.println("mcopt-lod: closing: a result failed: " + e);
+			}
+		}
 	}
 
 	/** A job's key for a disk-cache save (its task does the work). */
@@ -158,7 +179,10 @@ final class LodField {
 			} catch (Throwable t) {
 				System.out.println("mcopt-lod: job failed: " + t);
 				t.printStackTrace(System.out);
-				if (j.task == null) this.pending.remove(j.key);
+				if (j.task == null) {
+					this.pending.remove(j.key);
+					this.requeuePatch(j.key);
+				}
 			}
 		}
 	}
@@ -175,6 +199,7 @@ final class LodField {
 	private void generate(long key) {
 		if (!this.stillWanted(key)) {
 			this.pending.remove(key);
+			this.requeuePatch(key);
 			return;
 		}
 		int level = LodTile.levelOf(key), tx = LodTile.txOf(key), tz = LodTile.tzOf(key);
@@ -183,6 +208,7 @@ final class LodField {
 			this.chunkSkipped.incrementAndGet();
 			this.results.add(() -> {
 				this.pending.remove(key);
+				this.requeuePatch(key);
 				// evicted since: the next scan asks for it again, and then it's generated
 				if (!this.clip.resident(0, tx, tz)) this.chunkBuilt.remove(key);
 			});
@@ -197,7 +223,10 @@ final class LodField {
 		this.results.add(() -> {
 			this.pending.remove(key);
 			if (CHUNK_TILES && level == 0 && this.chunkBuilt.contains(key)) {
-				if (this.clip.resident(0, tx, tz)) return;
+				if (this.clip.resident(0, tx, tz)) {
+					this.requeuePatch(key);
+					return;
+				}
 				this.chunkBuilt.remove(key);
 			}
 			if (this.clip.put(level, tx, tz, g, c, cr, tw, rn, pl)) {
@@ -205,6 +234,8 @@ final class LodField {
 				this.applyPending(key);
 				List<LodChunks.Summary> real = level == 0 ? this.waiting.remove(key) : null;
 				if (real != null) for (LodChunks.Summary s : real) this.applyChunk(s);
+			} else {
+				this.requeuePatch(key);
 			}
 			this.arrived(key);
 		});
@@ -862,6 +893,11 @@ final class LodField {
 		return true;
 	}
 
+	/** A patch job for the tile, if a patch is queued for it (a load that ended without putting the tile left it there). */
+	private void requeuePatch(long key) {
+		if (this.queued.containsKey(key)) this.jobs.add(new Job(SAVE_PRIORITY, this.seq.incrementAndGet(), SAVE_KEY, () -> this.patchFile(key)));
+	}
+
 	/** Render thread, right after a tile is put: the patches made for it while it wasn't resident, older first. */
 	private void applyPending(long key) {
 		Patch q = this.queued.remove(key);
@@ -898,6 +934,13 @@ final class LodField {
 		int[] rn = cr != null ? new int[LodTile.CELLS] : null;
 		int[] pl = level == 0 && this.clip.plants ? new int[2 * LodTile.CELLS] : null;
 		synchronized (this.lock(key)) {
+			// the tile is being loaded: it takes the patch when it's put (applyPending), or a job is queued again if it isn't
+			if (!this.closed && this.pending.containsKey(key)) return;
+			// a save of the tile from memory is still queued: it goes first (it would overwrite the patched file)
+			if (!this.closed && this.saveQueued.containsKey(key)) {
+				this.requeuePatch(key);
+				return;
+			}
 			Patch p = this.queued.remove(key);
 			// (taken by the tile's loading meanwhile, or by the render thread: nothing left to write)
 			if (p == null) return;
@@ -955,6 +998,9 @@ final class LodField {
 			}
 		}
 		if (!this.clip.put(0, tx, tz, g, c, cr, tw, rn, pl)) return;
+		// (every cell was just written from the live chunks: patches made before are older)
+		this.queued.remove(key);
+		this.patches.remove(key);
 		this.chunkBuilt.add(key);
 		this.waiting.remove(key);
 		this.chunkTiles.incrementAndGet();
@@ -1123,10 +1169,29 @@ final class LodField {
 		int[] pl = level == 0 && this.clip.plants ? new int[2 * LodTile.CELLS] : null;
 		// (the newest words: real chunks' cells may still be staged, or published but not yet copied by the GPU)
 		this.clip.readForSave(level, tx, tz, g, c, cr, tw, rn, pl);
-		if (sync) this.save(key, g, c, cr, tw, rn, pl);
-		else this.jobs.add(new Job(SAVE_PRIORITY, this.seq.incrementAndGet(), SAVE_KEY, () -> this.save(key, g, c, cr, tw, rn, pl)));
+		if (sync) {
+			this.saveQueued.remove(key);
+			this.save(key, g, c, cr, tw, rn, pl);
+			return true;
+		}
+		long mine = this.seq.incrementAndGet();
+		this.saveQueued.put(key, mine);
+		this.jobs.add(new Job(SAVE_PRIORITY, mine, SAVE_KEY, () -> {
+			synchronized (this.lock(key)) {
+				try {
+					// (a newer save of the tile was scheduled since: it has newer words; two workers could write them in either order)
+					if (this.saveQueued.getOrDefault(key, mine) != mine) return;
+					this.save0(key, g, c, cr, tw, rn, pl);
+				} finally {
+					this.saveQueued.remove(key, mine);
+				}
+			}
+		}));
 		return true;
 	}
+
+	/** Per tile with a save from memory still queued: the newest one's number (only it writes). */
+	private final ConcurrentHashMap<Long, Long> saveQueued = new ConcurrentHashMap<>();
 
 	/**
 	 * Before the windows move to the camera at (cx, cz): the tiles real chunks changed that are about to leave their window are

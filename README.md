@@ -58,6 +58,7 @@ Settings: Options > Video Settings > **Far Terrain (mcopt)...**, or in `config/m
 | `mcopt.lod.quality` | `auto` | `low`, `medium`, `high`, `ultra`; `auto` picks `low` under 10 GPU cores, `high` up to 29, `ultra` from 30 |
 | `mcopt.lod.radius` | by quality (256 / 384 / 512 / 1024) | Reach in chunks |
 | `mcopt.lod.multiplayer` | `true` | Far terrain on servers |
+| `mcopt.lod.serverSeed` | `true` | A server's worlds kept apart by the seed hash it sends (`false` for a server that changes it every session) |
 | `mcopt.lod.chunksOnly` | `true` | Far terrain where it can't be generated (servers, flat and modded generators, the Nether) |
 | `mcopt.lod.ceiling` | `true` | The Nether seen under its roof |
 | `mcopt.lod.dimensions` / `mcopt.lod.excludeDimensions` | (all) | Comma-separated dimension ids, e.g. `minecraft:the_end` |
