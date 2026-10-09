@@ -44,11 +44,13 @@ mcopt's LODs: terrain past the render distance, out to 512 chunks by default, dr
   really there.
 - **Servers, flat and modded generators, the Nether:** built from the chunks the client receives (under the Nether's roof)
   and kept on disk per server and dimension: what you've seen once is there next time.
+- **Your saved world too:** in singleplayer, the chunks already saved in the world (explored before, builds included) are
+  read in the background once and replace the estimate there.
 - **Kept on disk:** `mcopt-lod/` in the game folder, compressed. Places you've seen from close by stay when you see them
   from farther away. Saved every few seconds and when you leave the world.
 - **F6** hides and shows it while playing.
 
-Settings, in `config/mcopt.properties` (restart to apply):
+Settings: Options > Video Settings > **Far Terrain (mcopt)...**, or in `config/mcopt.properties` (restart to apply):
 
 | Setting | Default | |
 |---|---|---|
@@ -62,6 +64,7 @@ Settings, in `config/mcopt.properties` (restart to apply):
 | `mcopt.lod.toggleKey` | `F6` | `F1`-`F12`, or `none` |
 | `mcopt.lod.threads` | cores - 4 | Generation threads |
 | `mcopt.lod.plants`, `mcopt.lod.trees`, `mcopt.lod.textures` | by quality / `true` | Detail on the nearest far terrain |
+| `mcopt.lod.import` | `true` | Read the singleplayer world's saved chunks |
 | `mcopt.lod.cache` | `true` | The disk cache (`mcopt.lod.cacheDir` moves it) |
 
 Modded blocks get their colors from their own textures. For blocks whose models can't be read that way (dynamic or
