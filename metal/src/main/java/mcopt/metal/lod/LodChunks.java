@@ -277,8 +277,94 @@ final class LodChunks {
 				biome[i] = src.biome(x, y, z);
 			}
 		}
+		if (SPAN_STATS) spanStats(src, minY);
 		return new Snapshot(chunkX, chunkZ, top, under, height, water, biome, crown, crownLeaf, crownLo, crownHi, crownRuns, trunk, above, runFrom, null, 0,
 			minY);
+	}
+
+	/**
+	 * Measurement only (-Dmcopt.lod.spanStats=true): how much of the world isn't a heightfield near its surface, for sizing far
+	 * terrain with more than one span a column (overhangs, arches, cave mouths, floating islands). Per column, down to 64 blocks
+	 * under its top: solid runs (not leaves, not water) with an air gap of 2 or more blocks under them and solid under the gap.
+	 * Such a gap is open when a neighbor column in the chunk has its top under the gap's top (seen from that side), else
+	 * enclosed (a cave pocket, which far terrain would leave solid). Leaf crowns (leaves over air, which far terrain already
+	 * draws) are counted on their own. Logged every 30 s while chunks come in. ~16k block reads a chunk while on.
+	 */
+	static final boolean SPAN_STATS = Boolean.getBoolean("mcopt.lod.spanStats");
+	private static final java.util.concurrent.atomic.LongAdder STAT_CHUNKS = new java.util.concurrent.atomic.LongAdder(),
+		STAT_COLUMNS = new java.util.concurrent.atomic.LongAdder(), STAT_OPEN1 = new java.util.concurrent.atomic.LongAdder(),
+		STAT_OPEN2 = new java.util.concurrent.atomic.LongAdder(), STAT_ENCLOSED = new java.util.concurrent.atomic.LongAdder(),
+		STAT_LEAVES = new java.util.concurrent.atomic.LongAdder(), STAT_THICK = new java.util.concurrent.atomic.LongAdder(),
+		STAT_GAP = new java.util.concurrent.atomic.LongAdder();
+	private static final java.util.concurrent.atomic.AtomicLong STAT_LOG_AT = new java.util.concurrent.atomic.AtomicLong(System.nanoTime() + 30_000_000_000L);
+
+	private static void spanStats(Source src, int minY) {
+		int[] topY = new int[256];
+		for (int i = 0; i < 256; i++) topY[i] = src.surface(i & 15, i >> 4) - 1;
+		for (int z = 0; z < 16; z++) {
+			for (int x = 0; x < 16; x++) {
+				int i = z * 16 + x, y = topY[i], floor = Math.max(minY, y - 64);
+				if (y <= minY) continue;
+				STAT_COLUMNS.increment();
+				int open = 0;
+				boolean enclosed = false, leaves = false;
+				// walking down: in a solid run (not leaves), then the gap under it
+				boolean inSolid = false, inLeaves = false;
+				int gapTop = Integer.MIN_VALUE, runTop = y;
+				for (int k = y; k >= floor; k--) {
+					BlockState b = src.state(x, k, z);
+					boolean air = b.isAir() || decoration(b);
+					if (air) {
+						if ((inSolid || inLeaves) && gapTop == Integer.MIN_VALUE) gapTop = k;
+						continue;
+					}
+					boolean leaf = b.is(BlockTags.LEAVES);
+					boolean water = b.getFluidState().is(FluidTags.WATER);
+					if (gapTop != Integer.MIN_VALUE) {
+						int gap = gapTop - k;
+						if (gap >= 2 && !water) {
+							if (inLeaves) {
+								leaves = true;
+							} else {
+								// open when a neighbor column's top lies under the gap's top (in the chunk; edge columns see less)
+								boolean seen = false;
+								int[][] d = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+								for (int[] n : d) {
+									int nx = x + n[0], nz = z + n[1];
+									if (nx >= 0 && nz >= 0 && nx < 16 && nz < 16 && topY[nz * 16 + nx] < gapTop) seen = true;
+								}
+								if (seen) {
+									open++;
+									STAT_THICK.add(runTop - gapTop);
+									STAT_GAP.add(gap);
+								} else {
+									enclosed = true;
+								}
+							}
+						}
+						gapTop = Integer.MIN_VALUE;
+						runTop = k;
+					}
+					if (water) break;   // (under water: what's below doesn't show from afar)
+					inSolid = !leaf;
+					inLeaves = leaf;
+				}
+				if (open >= 1) STAT_OPEN1.increment();
+				if (open >= 2) STAT_OPEN2.increment();
+				if (open == 0 && enclosed) STAT_ENCLOSED.increment();
+				if (leaves) STAT_LEAVES.increment();
+			}
+		}
+		STAT_CHUNKS.increment();
+		long now = System.nanoTime(), at = STAT_LOG_AT.get();
+		if (now > at && STAT_LOG_AT.compareAndSet(at, now + 30_000_000_000L)) {
+			double cols = Math.max(1, STAT_COLUMNS.sum());
+			long spans = Math.max(1, STAT_OPEN1.sum());
+			System.out.println(String.format(java.util.Locale.ROOT, "mcopt-lod span stats: %d chunks, %.0f columns: %.2f%% with a solid span over an open gap"
+				+ " (%.2f%% two or more; spans %.1f blocks thick over %.1f-block gaps on average), %.2f%% over enclosed gaps only, %.2f%% leaf crowns",
+				STAT_CHUNKS.sum(), cols, 100 * STAT_OPEN1.sum() / cols, 100 * STAT_OPEN2.sum() / cols, (double) STAT_THICK.sum() / spans,
+				(double) STAT_GAP.sum() / spans, 100 * STAT_ENCLOSED.sum() / cols, 100 * STAT_LEAVES.sum() / cols));
+		}
 	}
 
 	private static final BlockState WATER = Blocks.WATER.defaultBlockState();
