@@ -192,8 +192,15 @@ final class LodDhImport implements Runnable {
 			while (!this.stopped && !this.field.settled && System.nanoTime() < until) Thread.sleep(500);
 			if (this.stopped) return;
 			String signature = signature(this.db);
-			String done = Files.isRegularFile(this.done) ? Files.readString(this.done).strip() : "";
-			if (done.equals(signature)) return;
+			String doneText = Files.isRegularFile(this.done) ? Files.readString(this.done) : "";
+			String done = doneText.lines().findFirst().orElse("").strip();
+			if (done.equals(signature)) {
+				// (said every time: an import that finished before 0fc6360 only said so through printf, which the log never got)
+				String note = doneText.lines().skip(1).findFirst().orElse("").strip();
+				System.out.println("mcopt-lod: Distant Horizons' save " + this.db + " was imported before" + (note.isEmpty() ? "" : " (" + note + ")")
+					+ "; delete " + this.done + " to import it again");
+				return;
+			}
 			this.signature = signature;
 			if (done.startsWith(signature + " ")) {
 				try {
@@ -212,10 +219,12 @@ final class LodDhImport implements Runnable {
 				this.paused();
 				return;
 			}
+			String summary = String.format(java.util.Locale.ROOT, "%d chunks from %d sections, %d left to the world's own; %s", this.chunks.get(), this.sections.get(),
+				this.skipped.get(), this.rowCounts());
 			Files.createDirectories(this.done.getParent());
-			Files.writeString(this.done, signature + "\n");
-			System.out.println(String.format(java.util.Locale.ROOT, "mcopt-lod: imported %d chunks from Distant Horizons' save (%d sections; %d chunks left to the world's own; %s)%n",
-				this.chunks.get(), this.sections.get(), this.skipped.get(), this.rowCounts()).stripTrailing());
+			// (the summary on the second line, for the next sessions' 'imported before' line)
+			Files.writeString(this.done, signature + "\n" + java.time.LocalDate.now() + ": " + summary + "\n");
+			System.out.println("mcopt-lod: imported from Distant Horizons' save: " + summary);
 		} catch (InterruptedException e) {
 			if (this.stopped) this.paused();
 		} catch (IOException | RuntimeException e) {

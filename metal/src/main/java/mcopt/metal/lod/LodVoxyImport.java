@@ -151,7 +151,10 @@ final class LodVoxyImport implements Runnable {
 			while (!this.stopped && !this.field.settled && System.nanoTime() < until) Thread.sleep(500);
 			if (this.stopped) return;
 			String signature = signature(this.storage);
-			if (Files.isRegularFile(this.done) && Files.readString(this.done).strip().equals(signature)) return;
+			if (Files.isRegularFile(this.done) && Files.readString(this.done).strip().equals(signature)) {
+				System.out.println("mcopt-lod: Voxy's save " + this.storage + " was imported before; delete " + this.done + " to import it again");
+				return;
+			}
 			System.out.println("mcopt-lod: importing Voxy's save " + this.storage);
 			try (LodRocks db = new LodRocks(this.storage)) {
 				this.importAll(db);
