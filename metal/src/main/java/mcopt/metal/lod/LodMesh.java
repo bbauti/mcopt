@@ -140,7 +140,8 @@ final class LodMesh implements LodClip.Listener {
 		// (bins x bands, then per bin the far terrain's lowest tangent: columns.metal HZ_FARMIN)
 		this.horizonBuf = gpu.applyAsLong(4096L * 129 * 4);
 		this.listBuf = gpu.applyAsLong((long) MAX_LISTED * 16);
-		int n = Math.max(1, Integer.getInteger("mcopt.lod.meshThreads", 2));
+		// (2, as measured on 8-10 core Macs; one more per 4 cores past that, up to 4: a 12-16 core Mac meshes a world's join sooner)
+		int n = Math.max(1, Integer.getInteger("mcopt.lod.meshThreads", Math.clamp(Runtime.getRuntime().availableProcessors() / 4, 2, 4)));
 		this.workers = new Thread[n];
 		for (int i = 0; i < n; i++) {
 			Thread t = new Thread(this::work, "mcopt-lod-mesh-" + i);
