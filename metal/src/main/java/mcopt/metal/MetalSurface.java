@@ -32,6 +32,10 @@ final class MetalSurface implements GpuSurfaceBackend {
 	 */
 	static final boolean PACE_ADAPT = Boolean.getBoolean("mcopt.metal.paceAdapt");
 	private boolean paced;
+	/** When the pacer next checks which display the window is on (mc_pace_follow), once a second while pacing. */
+	private long followAt;
+	private boolean followLogged;
+	private final long window;
 	private final long ctx;
 	private final MetalEncoder encoder;
 	private final long view;
@@ -40,6 +44,7 @@ final class MetalSurface implements GpuSurfaceBackend {
 	MetalSurface(long ctx, MetalEncoder encoder, long window) {
 		this.ctx = ctx;
 		this.encoder = encoder;
+		this.window = window;
 		this.view = SDLMetal.SDL_Metal_CreateView(window);
 		this.layer = SDLMetal.SDL_Metal_GetLayer(this.view);
 	}
@@ -66,7 +71,9 @@ final class MetalSurface implements GpuSurfaceBackend {
 		// mcopt.rec hook: the opt-in recorder (-Dmcopt.rec, mcopt.metal.rec) takes the finished frame, GUI included. Rec.ON is a constant false without it.
 		if (mcopt.metal.rec.Rec.ON) mcopt.metal.rec.Rec.frame(this.encoder, textureView);
 		long t0 = WaitStats.ON ? System.nanoTime() : 0;
-		if (this.paced && !Native.pace(PACE_MARGIN_S)) {
+		boolean skip = this.paced && !Native.pace(PACE_MARGIN_S);
+		if (this.paced) this.followDisplay();   // (after mc_pace, which starts the display link)
+		if (skip) {
 			if (WaitStats.ON) WaitStats.wait(WaitStats.PACE, System.nanoTime() - t0, 0);
 			return;
 		}
@@ -87,6 +94,21 @@ final class MetalSurface implements GpuSurfaceBackend {
 		if (drawable == 0) return; // no drawable (window hidden): skip the frame's present
 		this.encoder.presentTexture(drawable, textureView);
 		this.encoder.afterGpuFinishes(() -> Native.release(drawable));
+	}
+
+	/** Once a second: the pacer takes its refreshes from the display under the window's center (it began on the main display). */
+	private void followDisplay() {
+		long now = System.nanoTime();
+		if (now < this.followAt) return;
+		this.followAt = now + 1_000_000_000L;
+		try (org.lwjgl.system.MemoryStack stack = org.lwjgl.system.MemoryStack.stackPush()) {
+			java.nio.IntBuffer x = stack.mallocInt(1), y = stack.mallocInt(1), w = stack.mallocInt(1), h = stack.mallocInt(1);
+			if (!org.lwjgl.sdl.SDLVideo.SDL_GetWindowPosition(this.window, x, y) || !org.lwjgl.sdl.SDLVideo.SDL_GetWindowSize(this.window, w, h)) return;
+			double hz = Native.paceFollow(x.get(0) + w.get(0) / 2.0, y.get(0) + h.get(0) / 2.0);
+			if (hz != 0) System.out.println("mcopt-metal: present pacing follows the window's display" + (hz > 0 ? String.format(" (%.2f Hz)", hz) : ""));
+			else if (!this.followLogged) System.out.println("mcopt-metal: present pacing on the main display, where the window is");
+			this.followLogged = true;
+		}
 	}
 
 	@Override

@@ -1716,12 +1716,18 @@ static CVReturn onRefresh(CVDisplayLinkRef link, const CVTimeStamp *now, const C
 	return kCVReturnSuccess;
 }
 
+static CVDisplayLinkRef paceLink;
+static CGDirectDisplayID paceDisplay;
+
 static void startDisplayLink(void) {
 	CVDisplayLinkRef link;
 	if (CVDisplayLinkCreateWithCGDisplay(CGMainDisplayID(), &link) != kCVReturnSuccess) return;
 	CVDisplayLinkSetOutputCallback(link, onRefresh, NULL);
 	CVDisplayLinkStart(link); // runs for the life of the process
+	paceDisplay = CGMainDisplayID();
+	paceLink = link;
 }
+
 #pragma clang diagnostic pop
 
 // 1 if this frame should be presented: it is the first to make some refresh, and the next one, allowing it twice the
@@ -1752,6 +1758,28 @@ static void paceWatch(id<CAMetalDrawable> drawable) {
 		paceExtra = e < 0 ? 0 : e > PACE_EXTRA_MAX ? PACE_EXTRA_MAX : e;
 	}];
 }
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations" // CVDisplayLink, as above
+// The pacer's refreshes from the display the window is on: (x, y) is the window's center in global points, top-left origin
+// (SDL's window coordinates, CoreGraphics' display space). The link started on CGMainDisplayID, the menu bar's display: a
+// window on another one (say a 100 Hz monitor beside the laptop's 120 Hz panel) was paced on that display's refreshes, which
+// would leave some of its own refreshes without a frame and make paceAdapt take presents for late (bbauti's, on an external
+// 100 Hz monitor: 93 presents/s, the margin pinned at PACE_EXTRA_MAX within a second). The learned margin starts over on a
+// new display. Returns its refresh rate in Hz when the display changed (-1: unknown), else 0.
+double mc_pace_follow(double x, double y) {
+	CVDisplayLinkRef link = paceLink;
+	if (!link) return 0;
+	CGDirectDisplayID d;
+	uint32_t n = 0;
+	if (CGGetDisplaysWithPoint(CGPointMake(x, y), 1, &d, &n) != kCGErrorSuccess || n == 0 || d == paceDisplay) return 0;
+	if (CVDisplayLinkSetCurrentCGDisplay(link, d) != kCVReturnSuccess) return 0;
+	paceDisplay = d;
+	paceExtra = 0;
+	CVTime t = CVDisplayLinkGetNominalOutputVideoRefreshPeriod(link);
+	return t.timeValue > 0 && !(t.flags & kCVTimeIsIndefinite) ? (double) t.timeScale / t.timeValue : -1;
+}
+#pragma clang diagnostic pop
 
 int mc_pace(double margin) {
 	static int started;

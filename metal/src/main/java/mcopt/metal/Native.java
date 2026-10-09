@@ -114,6 +114,7 @@ final class Native {
 	private static final MethodHandle PACE_ADAPT = fn("mc_pace_adapt", false, null, JAVA_INT);
 	private static final MethodHandle PACE_EXTRA_MS = fn("mc_pace_extra_ms", false, JAVA_DOUBLE);
 	private static final MethodHandle PACE = fn("mc_pace", false, JAVA_INT, JAVA_DOUBLE);
+	private static final MethodHandle PACE_FOLLOW = fn("mc_pace_follow", false, JAVA_DOUBLE, JAVA_DOUBLE, JAVA_DOUBLE);
 	private static final MethodHandle SLEEP_PRECISE = fn("mc_sleep_precise", false, null, JAVA_LONG);
 
 	private Native() {
@@ -235,6 +236,7 @@ final class Native {
 	static double paceExtraMs() { try { return (double) PACE_EXTRA_MS.invokeExact(); } catch (Throwable t) { throw rethrow(t); } }
 	static long presentDropped() { try { return (long) PRESENT_DROPPED.invokeExact(); } catch (Throwable t) { throw rethrow(t); } }
 	static void sleepPrecise(long ns) { try { SLEEP_PRECISE.invokeExact(ns); } catch (Throwable t) { throw rethrow(t); } }
+	static double paceFollow(double x, double y) { try { return (double) PACE_FOLLOW.invokeExact(x, y); } catch (Throwable t) { throw rethrow(t); } }
 	static boolean pace(double marginSeconds) { try { return (int) PACE.invokeExact(marginSeconds) != 0; } catch (Throwable t) { throw rethrow(t); } }
 
 	private static RuntimeException rethrow(Throwable t) {
