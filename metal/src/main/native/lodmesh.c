@@ -343,6 +343,20 @@ static void plants(Out *o, const LmIn *in, int b, int x0, int z0) {
 	}
 }
 
+// Whether every column of the block is one interval of the same kind, from the bottom up to the same top: then no column
+// shows a wall to another inside it (faceDiff finds nothing between equal intervals).
+static int blockFlat(const Col *cols, int b, int x0, int z0) {
+	const Col *f = &cols[(z0 + 1) * REGION + (x0 + 1)];
+	if (f->n != 1 || f->lo[0] != NEG_INF) return 0;
+	for (int z = 0; z < b; z++) {
+		for (int x = 0; x < b; x++) {
+			const Col *c = &cols[(z0 + z + 1) * REGION + (x0 + x + 1)];
+			if (c->n != 1 || c->lo[0] != NEG_INF || c->hi[0] != f->hi[0] || c->kind[0] != f->kind[0]) return 0;
+		}
+	}
+	return 1;
+}
+
 // The region's columns: each thread's own buffer, kept while the thread lives (~200 KB: malloc'd per call, it came as fresh
 // pages every time), freed when it ends.
 static pthread_key_t scratchKey;
@@ -392,15 +406,17 @@ int lm_mesh(const LmIn *in, uint32_t *header, uint32_t *quads, int cap) {
 			o.minY = 1 << 20;
 			o.maxY = -(1 << 20);
 			int groupMax[LM_GROUPS];
+			int flat = blockFlat(cols, b, x0, z0);
 			for (int g = 0; g < LM_G_INFO; g++) {
 				int start = o.count;
 				switch (g) {
 				case LM_G_TOP: flats(&o, cols, b, x0, z0, 0); break;
 				case LM_G_BOTTOM: flats(&o, cols, b, x0, z0, 1); break;
-				case LM_G_XP: walls(&o, cols, b, x0, z0, LM_F_XP, 0, b - 2, 0); break;
-				case LM_G_XN: walls(&o, cols, b, x0, z0, LM_F_XN, 1, b - 1, 0); break;
-				case LM_G_ZP: walls(&o, cols, b, x0, z0, LM_F_ZP, 0, b - 2, 0); break;
-				case LM_G_ZN: walls(&o, cols, b, x0, z0, LM_F_ZN, 1, b - 1, 0); break;
+				// (a block of one flat top, still water or a plain, has no wall inside it)
+				case LM_G_XP: if (!flat) walls(&o, cols, b, x0, z0, LM_F_XP, 0, b - 2, 0); break;
+				case LM_G_XN: if (!flat) walls(&o, cols, b, x0, z0, LM_F_XN, 1, b - 1, 0); break;
+				case LM_G_ZP: if (!flat) walls(&o, cols, b, x0, z0, LM_F_ZP, 0, b - 2, 0); break;
+				case LM_G_ZN: if (!flat) walls(&o, cols, b, x0, z0, LM_F_ZN, 1, b - 1, 0); break;
 				case LM_G_BXP: walls(&o, cols, b, x0, z0, LM_F_XP, b - 1, b - 1, 0); break;
 				case LM_G_BXN: walls(&o, cols, b, x0, z0, LM_F_XN, 0, 0, 0); break;
 				case LM_G_BZP: walls(&o, cols, b, x0, z0, LM_F_ZP, b - 1, b - 1, 0); break;
