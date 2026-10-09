@@ -169,6 +169,8 @@ final class LodField {
 	@org.jspecify.annotations.Nullable LodImport importer;
 	/** Voxy's saved terrain's importer (LodVoxyImport), else null. */
 	@org.jspecify.annotations.Nullable LodVoxyImport voxy;
+	/** Distant Horizons' saved terrain's importer (LodDhImport), else null. */
+	@org.jspecify.annotations.Nullable LodDhImport dh;
 	int needed, missing;
 
 	private record Job(double priority, long seq, long key, Runnable task) implements Comparable<Job> {
@@ -202,6 +204,7 @@ final class LodField {
 		this.closed = true;
 		if (this.importer != null) this.importer.stop();
 		if (this.voxy != null) this.voxy.stop();
+		if (this.dh != null) this.dh.stop();
 		if (this.scanner != null) {
 			// (its re-sort drains and re-adds the queue: done before the queue is drained here)
 			this.scanner.shutdownNow();
