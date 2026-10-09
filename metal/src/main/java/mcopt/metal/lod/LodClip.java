@@ -473,57 +473,85 @@ final class LodClip {
 		return w;
 	}
 
-	/** Overwrites one cell of a resident tile (real chunks); the caller refreshes the tile's maxima with refresh(). */
-	void putCell(int level, int cx, int cz, int g, int c, int cr, int tw, int runs, int plantA, int plantB) {
-		if (this.staging()) {
-			this.putStaged(level, cx, cz, g, c, cr, tw, runs, plantA, plantB);
-			return;
-		}
+	/**
+	 * Overwrites one cell of a resident tile (real chunks); the caller refreshes the tile's maxima with refresh(). False, nothing
+	 * written, when the cell already holds these words: a chunk unloaded or sent again unchanged writes exactly what it wrote when
+	 * it loaded, and each write used to cost its tile a staged copy, a remesh with its 4 neighbours', a publish and a save.
+	 */
+	boolean putCell(int level, int cx, int cz, int g, int c, int cr, int tw, int runs, int plantA, int plantB) {
+		boolean crowns = level < this.crownLevels, texture = level == 0 && LodConfig.TEXTURES, plant = level == 0 && this.plants;
+		if (!plant) g &= ~GEOM_PLANT_BITS;
+		if (!crowns) g &= ~GEOM_CROWN_BITS;
+		if (this.staging()) return this.putStaged(level, cx, cz, g, c, cr, tw, runs, plantA, plantB, crowns, texture, plant);
+		long at = this.cellOffset(level, cx, cz) * 4;
+		if (this.liveEquals(at, g, c, cr, tw, runs, plantA, plantB, crowns, texture, plant)) return false;
 		int ps = this.slot(Math.floorDiv(cx, TILE), Math.floorDiv(cz, TILE));
 		this.beginWrite(level, ps);
-		long at = this.cellOffset(level, cx, cz) * 4;
-		boolean crowns = level < this.crownLevels;
 		if (crowns) MemoryUtil.memPutInt(this.crown + this.runsOffset() * 4 + at, runs);
-		if (level == 0 && LodConfig.TEXTURES) MemoryUtil.memPutInt(this.tex + at, tw);
-		if (level == 0 && this.plants) {
+		if (texture) MemoryUtil.memPutInt(this.tex + at, tw);
+		if (plant) {
 			MemoryUtil.memPutInt(this.tex + this.levelWords * 4 + at, plantA);
 			MemoryUtil.memPutInt(this.tex + this.levelWords * 8 + at, plantB);
-		} else {
-			g &= ~GEOM_PLANT_BITS;
 		}
 		if (crowns) MemoryUtil.memPutInt(this.crown + at, cr);
-		else g &= ~GEOM_CROWN_BITS;
 		MemoryUtil.memPutInt(this.geom + at, g);
 		MemoryUtil.memPutInt(this.color + at, c);
 		this.endWrite(level, ps);
+		return true;
 	}
 
-	/** putCell into the tile's staged copy (made from its live words on first use). */
-	private void putStaged(int level, int cx, int cz, int g, int c, int cr, int tw, int runs, int plantA, int plantB) {
+	/** Whether the live words at byte offset at already are these (g masked as putCell writes it). */
+	private boolean liveEquals(long at, int g, int c, int cr, int tw, int runs, int plantA, int plantB, boolean crowns, boolean texture, boolean plant) {
+		return MemoryUtil.memGetInt(this.geom + at) == g && MemoryUtil.memGetInt(this.color + at) == c
+			&& (!crowns || MemoryUtil.memGetInt(this.crown + at) == cr && MemoryUtil.memGetInt(this.crown + this.runsOffset() * 4 + at) == runs)
+			&& (!texture || MemoryUtil.memGetInt(this.tex + at) == tw)
+			&& (!plant || MemoryUtil.memGetInt(this.tex + this.levelWords * 4 + at) == plantA && MemoryUtil.memGetInt(this.tex + this.levelWords * 8 + at) == plantB);
+	}
+
+	/** Whether cell i of snapshot s already holds these words (an array s lacks reads as 0, as readForSave copies it). */
+	private static boolean snapshotEquals(Snapshot s, int i, int g, int c, int cr, int tw, int runs, int plantA, int plantB, boolean crowns, boolean texture,
+		boolean plant) {
+		return s.g[i] == g && s.c[i] == c && (!crowns || (s.cr != null ? s.cr[i] : 0) == cr && (s.runs != null ? s.runs[i] : 0) == runs)
+			&& (!texture || (s.tw != null ? s.tw[i] : 0) == tw)
+			&& (!plant || (s.pl != null ? s.pl[i] : 0) == plantA && (s.pl != null ? s.pl[TILE * TILE + i] : 0) == plantB);
+	}
+
+	/**
+	 * putCell into the tile's staged copy (made from its newest words on the first cell that changes); false when the cell already
+	 * holds these words. g is masked as putCell writes it.
+	 */
+	private boolean putStaged(int level, int cx, int cz, int g, int c, int cr, int tw, int runs, int plantA, int plantB, boolean crowns, boolean texture,
+		boolean plant) {
 		int tx = Math.floorDiv(cx, TILE), tz = Math.floorDiv(cz, TILE);
 		long key = LodTile.key(level, tx, tz);
 		Snapshot s = this.staged.get(key);
-		boolean crowns = level < this.crownLevels;
-		if (s == null) {
-			s = new Snapshot(level, tx, tz, crowns, level == 0 && LodConfig.TEXTURES, level == 0 && this.plants);
-			// from the newest words: a copy published in the last frames may not be in the live words yet (the GPU's copy)
-			this.readForSave(level, tx, tz, s.g, s.c, s.cr, s.tw, s.runs, s.pl);
-			s.epoch = this.epoch[level][this.slot(tx, tz)];
-			this.staged.put(key, s);
-		}
 		int i = (cz - tz * TILE) * TILE + (cx - tx * TILE);
-		if (crowns) s.runs[i] = runs;
+		if (s == null) {
+			// (the newest words, as readForSave picks them: a copy published in the last frames, which the GPU may not have
+			// written yet, else the live words)
+			long ep = this.epoch[level][this.slot(tx, tz)];
+			Snapshot pub = this.published.get(key);
+			if (pub != null && pub.epoch == ep ? snapshotEquals(pub, i, g, c, cr, tw, runs, plantA, plantB, crowns, texture, plant)
+				: this.liveEquals(this.cellOffset(level, cx, cz) * 4, g, c, cr, tw, runs, plantA, plantB, crowns, texture, plant)) return false;
+			s = new Snapshot(level, tx, tz, crowns, texture, plant);
+			this.readForSave(level, tx, tz, s.g, s.c, s.cr, s.tw, s.runs, s.pl);
+			s.epoch = ep;
+			this.staged.put(key, s);
+		} else if (snapshotEquals(s, i, g, c, cr, tw, runs, plantA, plantB, crowns, texture, plant)) {
+			return false;
+		}
+		if (crowns) {
+			s.runs[i] = runs;
+			s.cr[i] = cr;
+		}
 		if (s.tw != null) s.tw[i] = tw;
 		if (s.pl != null) {
 			s.pl[i] = plantA;
 			s.pl[TILE * TILE + i] = plantB;
-		} else {
-			g &= ~GEOM_PLANT_BITS;
 		}
-		if (crowns) s.cr[i] = cr;
-		else g &= ~GEOM_CROWN_BITS;
 		s.g[i] = g;
 		s.c[i] = c;
+		return true;
 	}
 
 	private final int[] scratchG = new int[TILE * TILE], scratchC = new int[TILE * TILE];

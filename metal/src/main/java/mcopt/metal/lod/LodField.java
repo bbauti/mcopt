@@ -136,9 +136,8 @@ final class LodField {
 		int put = 0;
 		for (int i = 0; i < LodTile.CELLS; i++) {
 			if ((og[i] & LodClip.GEOM_VALID) != 0 || (g[i] & LodClip.GEOM_VALID) == 0) continue;
-			this.clip.putCell(level, x0 + i % LodTile.SIZE, z0 + i / LodTile.SIZE, g[i], c[i], cr != null ? cr[i] : 0, tw != null ? tw[i] : 0,
-				rn != null ? rn[i] : 0, pl != null ? pl[i] : 0, pl != null ? pl[LodTile.CELLS + i] : 0);
-			put++;
+			if (this.clip.putCell(level, x0 + i % LodTile.SIZE, z0 + i / LodTile.SIZE, g[i], c[i], cr != null ? cr[i] : 0, tw != null ? tw[i] : 0,
+				rn != null ? rn[i] : 0, pl != null ? pl[i] : 0, pl != null ? pl[LodTile.CELLS + i] : 0)) put++;
 		}
 		this.completeKeys.add(key);
 		if (put > 0) {
@@ -377,8 +376,11 @@ final class LodField {
 		}
 	}
 
-	/** consume: a patch queued for the tile goes into the words now (and into its file), so the tile is put with it. */
-	private void produce0(long key, int[] g, int[] c, int @org.jspecify.annotations.Nullable [] cr, int @org.jspecify.annotations.Nullable [] tw,
+	/**
+	 * consume: a patch queued for the tile goes into the words now (and into its file), so the tile is put with it. True when the
+	 * words came from the tile's cache file.
+	 */
+	private boolean produce0(long key, int[] g, int[] c, int @org.jspecify.annotations.Nullable [] cr, int @org.jspecify.annotations.Nullable [] tw,
 		int @org.jspecify.annotations.Nullable [] rn, int @org.jspecify.annotations.Nullable [] pl, boolean consume) {
 		int level = LodTile.levelOf(key), tx = LodTile.txOf(key), tz = LodTile.tzOf(key);
 		long start = System.nanoTime();
@@ -416,10 +418,11 @@ final class LodField {
 		}
 		Patch q = consume ? this.queued.remove(key) : null;
 		if (q != null) {
-			applyTo(q, g, c, cr, tw, rn, pl);
-			if (LodConfig.DISK_CACHE) this.save0(key, g, c, cr, tw, rn, pl);
+			// (a generated tile was saved above; a loaded or empty one only needs it if the patch changed a word)
+			if (applyTo(q, g, c, cr, tw, rn, pl) && LodConfig.DISK_CACHE) this.save0(key, g, c, cr, tw, rn, pl);
 			this.patched.incrementAndGet();
 		}
+		return fromDisk;
 	}
 
 	/** Striped locks over the cache's files: a tile's file is read, generated and written by one thread at a time. */
@@ -859,6 +862,7 @@ final class LodField {
 			// cells whose sample point (their corner, as generated) is in the chunk
 			int c0x = Math.ceilDiv(bx, cell), c1x = Math.floorDiv(bx + 15, cell);
 			int c0z = Math.ceilDiv(bz, cell), c1z = Math.floorDiv(bz + 15, cell);
+			boolean changed = false;
 			for (int cz = c0z; cz <= c1z; cz++) {
 				for (int cx = c0x; cx <= c1x; cx++) {
 					int k = (cz * cell - bz) * 16 + (cx * cell - bx);
@@ -867,20 +871,22 @@ final class LodField {
 					int surface = wet ? s.water()[k] : s.height()[k];
 					if (s.crownLo()[k] > surface) {
 						// leaves over air: a crown floating over the ground under it
-						this.clip.putCell(level, cx, cz, LodClip.crownGeomWord(s.crownHi()[k], s.crownHi()[k] - s.crownLo()[k], false) | crownClear(clear, wet),
+						changed |= this.clip.putCell(level, cx, cz, LodClip.crownGeomWord(s.crownHi()[k], s.crownHi()[k] - s.crownLo()[k], false) | crownClear(clear, wet),
 							LodClip.colorWord(s.top()[k], s.side()[k]), LodClip.crownWord(surface, s.groundColor()[k]), s.tex()[k], s.runs()[k], 0, 0);
 					} else if (level == 0) {
 						int pa = s.plantA()[k];
-						this.clip.putCell(level, cx, cz, LodClip.geomWord(Math.max(surface, s.crownHi()[k]), wet) | clear | (s.fringe()[k] && !wet ? LodClip.GEOM_FRINGE : 0)
+						changed |= this.clip.putCell(level, cx, cz, LodClip.geomWord(Math.max(surface, s.crownHi()[k]), wet) | clear | (s.fringe()[k] && !wet ? LodClip.GEOM_FRINGE : 0)
 							| ((pa & 1023) != 0 && !wet ? LodClip.plantBits((pa >> 20 & 3) + 1) : 0),
 							LodClip.colorWord(s.top()[k], s.side()[k]), LodClip.belowWord(s.below()[k]), s.tex()[k], 0, pa, s.plantB()[k]);
 					} else {
 						// coarser cells: their walls are mostly below the top block
-						this.clip.putCell(level, cx, cz, LodClip.geomWord(Math.max(surface, s.crownHi()[k]), wet) | clear,
+						changed |= this.clip.putCell(level, cx, cz, LodClip.geomWord(Math.max(surface, s.crownHi()[k]), wet) | clear,
 							LodClip.colorWord(s.top()[k], LodColors.mix(s.side()[k], s.below()[k], 0.6F)), 0, 0, 0, 0, 0);
 					}
 				}
 			}
+			// (a chunk unloaded or sent again unchanged writes what it wrote when it loaded: nothing to remesh, publish or save)
+			if (!changed) continue;
 			this.touched.add(LodTile.key(level, tx, tz));
 			this.dirtyTiles.add(LodTile.key(level, tx, tz));
 		}
@@ -1022,13 +1028,16 @@ final class LodField {
 		int level = LodTile.levelOf(key), tx = LodTile.txOf(key), tz = LodTile.tzOf(key);
 		if (!this.clip.resident(level, tx, tz)) return false;
 		int x0 = tx * LodTile.SIZE, z0 = tz * LodTile.SIZE;
+		boolean changed = false;
 		for (int i = 0; i < p.cells.size(); i++) {
 			int cell = p.cells.getInt(i);
-			this.clip.putCell(level, x0 + cell % LodTile.SIZE, z0 + cell / LodTile.SIZE, p.g.getInt(i), p.c.getInt(i), p.cr.getInt(i), p.tw.getInt(i),
+			changed |= this.clip.putCell(level, x0 + cell % LodTile.SIZE, z0 + cell / LodTile.SIZE, p.g.getInt(i), p.c.getInt(i), p.cr.getInt(i), p.tw.getInt(i),
 				p.runs.getInt(i), p.pa.getInt(i), p.pb.getInt(i));
 		}
-		this.touched.add(key);
-		this.dirtyTiles.add(key);
+		if (changed) {
+			this.touched.add(key);
+			this.dirtyTiles.add(key);
+		}
 		return true;
 	}
 
@@ -1045,13 +1054,16 @@ final class LodField {
 		if (p != null) this.applyResident(key, p);
 	}
 
-	/** A patch into a tile's words (as putCell keeps them: crowns and plants only where the level has them). */
-	private static void applyTo(Patch p, int[] g, int[] c, int @org.jspecify.annotations.Nullable [] cr, int @org.jspecify.annotations.Nullable [] tw,
+	/** A patch into a tile's words (as putCell keeps them: crowns and plants only where the level has them); true when a word changed. */
+	private static boolean applyTo(Patch p, int[] g, int[] c, int @org.jspecify.annotations.Nullable [] cr, int @org.jspecify.annotations.Nullable [] tw,
 		int @org.jspecify.annotations.Nullable [] rn, int @org.jspecify.annotations.Nullable [] pl) {
+		boolean changed = false;
 		for (int i = 0; i < p.cells.size(); i++) {
 			int cell = p.cells.getInt(i), gw = p.g.getInt(i);
 			if (pl == null) gw &= ~LodClip.GEOM_PLANT_BITS;
 			if (cr == null) gw &= ~LodClip.GEOM_CROWN_BITS;
+			changed |= g[cell] != gw || c[cell] != p.c.getInt(i) || cr != null && cr[cell] != p.cr.getInt(i) || rn != null && rn[cell] != p.runs.getInt(i)
+				|| tw != null && tw[cell] != p.tw.getInt(i) || pl != null && (pl[cell] != p.pa.getInt(i) || pl[LodTile.CELLS + cell] != p.pb.getInt(i));
 			g[cell] = gw;
 			c[cell] = p.c.getInt(i);
 			if (cr != null) cr[cell] = p.cr.getInt(i);
@@ -1062,6 +1074,7 @@ final class LodField {
 				pl[LodTile.CELLS + cell] = p.pb.getInt(i);
 			}
 		}
+		return changed;
 	}
 
 	/** Worker (or the render thread at close): the tile's queued patch into its cache file, under the tile's lock. */
@@ -1083,9 +1096,10 @@ final class LodField {
 			int[] pl = level == 0 && this.clip.plants ? new int[2 * LodTile.CELLS] : null;
 			// a tile with nothing cached isn't generated for a patch outside its window (it may never be drawn), nor at close
 			if (this.noise != null && (!p.generate || this.closed) && !Files.exists(this.file(key))) return;
-			this.produce0(key, g, c, cr, tw, rn, pl, false);
-			applyTo(p, g, c, cr, tw, rn, pl);
-			this.save0(key, g, c, cr, tw, rn, pl);
+			boolean fromDisk = this.produce0(key, g, c, cr, tw, rn, pl, false);
+			// (a file that already has these cells, from an earlier patch or from the tile saved after the chunk loaded, as when
+			// it unloads unchanged: not written again)
+			if (applyTo(p, g, c, cr, tw, rn, pl) || !fromDisk) this.save0(key, g, c, cr, tw, rn, pl);
 		}
 		this.patched.incrementAndGet();
 	}
