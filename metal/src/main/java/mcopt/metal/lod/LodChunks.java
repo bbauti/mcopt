@@ -61,6 +61,30 @@ final class LodChunks {
 		return s.is(BlockTags.LEAVES) || s.is(Blocks.SNOW);
 	}
 
+	/**
+	 * Under a roof: from y down through the roof's blocks to the first air, then through the air to what stands under it (its
+	 * y). A column solid all the way (no air within ROOF_SCAN blocks of the roof) keeps y: the roof is all there is to see.
+	 */
+	private static int underRoof(LevelChunk chunk, BlockPos.MutableBlockPos pos, int px, int pz, int y, int minY) {
+		int k = y, floor = Math.max(minY + 1, y - ROOF_SCAN);
+		while (k > floor && !chunk.getBlockState(pos.set(px, k, pz)).isAir()) k--;
+		if (k <= floor) return y;
+		// sections of only air are skipped whole
+		while (k > minY) {
+			LevelChunkSection sec = chunk.getSection(chunk.getSectionIndex(k));
+			if (sec.hasOnlyAir()) {
+				k = ((k - minY) & ~15) + minY - 1;
+				continue;
+			}
+			if (!chunk.getBlockState(pos.set(px, k, pz)).isAir()) return k;
+			k--;
+		}
+		return y;
+	}
+
+	/** How far down a roof is searched for the air under it (the Nether's roof is 5-40 blocks thick). */
+	private static final int ROOF_SCAN = 96;
+
 	/** The deepest solid run counted (Snapshot.depth). */
 	static final int DEPTH_MAX = 127;
 	/** -Dmcopt.lod.realOccRuns=false: no solid runs (every real column solid all the way down), for the cave fixtures' A/B. */
@@ -93,8 +117,12 @@ final class LodChunks {
 		return DEPTH_MAX;
 	}
 
+	/**
+	 * roof: in a dimension with a roof (the Nether), its top y: each column is read from the first air under the roof's solid
+	 * blocks down, so the far terrain shows the ground under the roof instead of the roof's flat top. Integer.MAX_VALUE: none.
+	 */
 	@SuppressWarnings("unchecked")
-	static Snapshot snapshot(LevelChunk chunk) {
+	static Snapshot snapshot(LevelChunk chunk, int roof) {
 		int minY = chunk.getMinY();
 		BlockState[] top = new BlockState[256], under = new BlockState[256], crown = new BlockState[256], crownLeaf = new BlockState[256];
 		short[] height = new short[256], water = new short[256], crownLo = new short[256], crownHi = new short[256];
@@ -112,6 +140,7 @@ final class LodChunks {
 				int i = z * 16 + x;
 				int px = bx0 + x, pz = bz0 + z;
 				int y = chunk.getHeight(Heightmap.Types.WORLD_SURFACE, x, z);
+				if (roof != Integer.MAX_VALUE) y = underRoof(chunk, pos, px, pz, Math.min(y, roof), minY);
 				BlockState s = chunk.getBlockState(pos.set(px, y, pz));
 				for (int guard = 0; guard < 8 && y > minY && (s.isAir() || decoration(s)); guard++) s = chunk.getBlockState(pos.set(px, --y, pz));
 				crownLo[i] = Short.MIN_VALUE;

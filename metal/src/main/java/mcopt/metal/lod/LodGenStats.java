@@ -28,6 +28,11 @@ final class LodGenStats {
 
 	/** Chunks whose centre lies within the render distance of the camera that the client doesn't have. */
 	static int missing(ClientLevel level, double camX, double camZ, int rd) {
+		return missing(level, camX, camZ, rd, Integer.MAX_VALUE);
+	}
+
+	/** As missing, counting no further than past limit (a yes/no question stops at the first chunks that answer it). */
+	static int missing(ClientLevel level, double camX, double camZ, int rd, int limit) {
 		int pcx = (int) Math.floor(camX) >> 4, pcz = (int) Math.floor(camZ) >> 4;
 		double r2 = rd * 16.0 * rd * 16.0;
 		int missing = 0;
@@ -36,7 +41,7 @@ final class LodGenStats {
 			for (int dx = -rd - 1; dx <= rd + 1; dx++) {
 				double ox = (pcx + dx) * 16 + 8 - camX, oz = (pcz + dz) * 16 + 8 - camZ;
 				if (ox * ox + oz * oz > r2) continue;
-				if (!chunks.hasChunk(pcx + dx, pcz + dz)) missing++;
+				if (!chunks.hasChunk(pcx + dx, pcz + dz) && ++missing > limit) return missing;
 			}
 		}
 		return missing;

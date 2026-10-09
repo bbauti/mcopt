@@ -58,7 +58,8 @@ final class LodYield {
 		if (MODE == 1) {
 			p = serverHasWork(mc);
 		} else {
-			p = LodGenStats.missing(mc.level, camX, camZ, rd) > (MODE == 3 ? 0 : THRESH);
+			int thresh = MODE == 3 ? 0 : THRESH;
+			p = LodGenStats.missing(mc.level, camX, camZ, rd, thresh) > thresh;
 		}
 		pressure = p;
 		sampledFrames.incrementAndGet();

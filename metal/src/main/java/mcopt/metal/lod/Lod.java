@@ -333,8 +333,34 @@ public final class Lod {
 	private void ensureWorld(Minecraft mc) {
 		ClientLevel level = mc.level;
 		MinecraftServer server = mc.getSingleplayerServer();
-		Object owner = level == null || server == null ? null : level;
+		// any world: a singleplayer one is generated ahead from its noise, any other (a server, a flat or modded generator, a
+		// dimension with a roof) is built from the chunks the client receives and kept in the disk cache (LodConfig.CHUNKS_ONLY)
+		Object owner = level == null || server == null && !LodConfig.MULTIPLAYER ? null : level;
 		if (owner == this.worldOwner) return;
+		this.closeWorld();
+		this.worldOwner = owner;
+		if (owner == null) return;
+		this.openWorld(mc, level, server);
+	}
+
+	/**
+	 * The client is leaving its world (Minecraft.disconnect): the far terrain saves what real chunks changed now, while the
+	 * world is still there (the next frame with a level may be a long time away, or never).
+	 */
+	public static void leavingWorld() {
+		Lod l = instance;
+		if (l == null) return;
+		try {
+			l.closeWorld();
+			l.worldOwner = null;
+			activeReach = 0;
+		} catch (RuntimeException e) {
+			System.out.println("mcopt-lod: closing the world's far terrain failed: " + e);
+		}
+	}
+
+	/** The current world's far terrain closed (saved) and its GPU buffers released a few frames from now. */
+	private void closeWorld() {
 		if (this.field != null) {
 			this.field.close();
 			this.field = null;
@@ -355,17 +381,22 @@ public final class Lod {
 			this.releaseLater.add(new long[] {this.frames, this.clip.crownBuf});
 			this.clip = null;
 		}
-		this.worldOwner = owner;
-		if (owner == null) return;
-		ServerLevel sl = server.getLevel(level.dimension());
-		if (sl == null) return;
-		LodNoise noise = LodNoise.of(sl);
-		if (noise == null) {
-			System.out.println("mcopt-lod: no far terrain in " + level.dimension().identifier() + " (not noise-generated, or a ceiling)");
+	}
+
+	private void openWorld(Minecraft mc, ClientLevel level, @Nullable MinecraftServer server) {
+		ServerLevel sl = server == null ? null : server.getLevel(level.dimension());
+		if (server != null && sl == null) return;
+		LodNoise noise = sl == null ? null : LodNoise.of(sl);
+		if (noise == null && !LodConfig.CHUNKS_ONLY) {
+			System.out.println("mcopt-lod: no far terrain in " + level.dimension().identifier() + " (not noise-generated, or a ceiling; -Dmcopt.lod.chunksOnly=true builds it from real chunks)");
+			return;
+		}
+		if (!LodConfig.dimensionAllowed(level.dimension().identifier().toString())) {
+			System.out.println("mcopt-lod: no far terrain in " + level.dimension().identifier() + " (mcopt.lod.dimensions)");
 			return;
 		}
 		Path root = LodConfig.CACHE_DIR != null ? Path.of(LodConfig.CACHE_DIR) : mc.gameDirectory.toPath().resolve("mcopt-lod");
-		String save = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize().getFileName().toString();
+		String save = server != null ? server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize().getFileName().toString() : LodWorlds.serverDir(mc);
 		Path cache = root.resolve(save).resolve(level.dimension().identifier().getNamespace() + "_" + level.dimension().identifier().getPath());
 		// tiles cached under other crown or tree levels lack (or carry) data these levels need: their own directory
 		if (LodConfig.CROWN_LEVELS != 1 || LodConfig.TREE_LEVELS != 1) cache = cache.resolve("c" + LodConfig.CROWN_LEVELS + "t" + LodConfig.TREE_LEVELS);
@@ -382,8 +413,13 @@ public final class Lod {
 			if (this.publish == null) this.publish = new LodPublish(this.ctx);
 			this.clip.publisher = this.publish;
 		}
-		this.field = new LodField(noise, this.clip, cache);
-		if (LodGenBench.ENABLED) LodGenBench.start(noise, this.field);
+		var dim = level.dimensionType();
+		// (a dimension with a roof, the Nether: its columns are read from under the roof)
+		int roof = dim.hasCeiling() && LodConfig.CEILING ? dim.minY() + dim.logicalHeight() - 1 : Integer.MAX_VALUE;
+		this.field = new LodField(noise, this.clip, cache, roof);
+		if (noise == null) System.out.println("mcopt-lod: " + level.dimension().identifier() + (server == null ? " on a server" : " (not noise-generated, or a roof)")
+			+ ": far terrain from the chunks the client receives, kept in " + cache);
+		if (LodGenBench.ENABLED && noise != null) LodGenBench.start(noise, this.field);
 		if (LodYield.ON) LodYield.top = this.clip.levels - 1;
 	}
 
@@ -430,7 +466,8 @@ public final class Lod {
 		int size = LodNative.encSize(enc);
 		int width = size >>> 16, height = size & 0xFFFF;
 		if (attachments > 0 && width > 0 && height > 0) {
-			this.ensureOut(width, height);
+			// (the walk's output; the mesh draws straight into the pass: W x H x 8 bytes it never reads)
+			if (this.mesh == null) this.ensureOut(width, height);
 			long maskBuf = this.maskBufs[(int) (this.frames % RING)];
 			MemoryUtil.memSet(this.maskAddrs[(int) (this.frames % RING)], 0, MASK_MAX * MASK_MAX / 8);
 			if (this.maskOn) {
@@ -461,6 +498,7 @@ public final class Lod {
 				if (pk != null && LodPk.LOAD && sample && !timed) this.cullTimes = false;
 				boolean listsRan = pk != null && pk.lists(this.camX, this.camY, this.camZ, this.viewProj, LodConfig.reachBlocks(), LodPk.LOAD && this.cullTimes,
 					timed);
+				if (listsRan) this.cullValid = false;
 				if (listsRan) {
 					// the position-keyed lists: this frame's rebuilds, the live cull (the live ring, stale sectors), the lists' per-frame pass
 					pk.prepare(this.viewProj, this.camX, this.camY, this.camZ, LodConfig.reachBlocks(), this.forward.x, this.forward.z,
@@ -471,6 +509,9 @@ public final class Lod {
 					LodNative.pkCull(this.lod, enc, mesh.frame, LodMesh.FRAME_BYTES, this.compFrame, COMP_FRAME_BYTES, pk.params, LodPk.PARAMS_BYTES,
 						pkBufs, pk.rebuilding(), pk.liveNow ? 2 : 1, mesh.blocks());
 					pk.encoded(this.camX, this.camY, this.camZ);
+				} else if (this.cullUnchanged(mesh, clip)) {
+					// everything the cull reads is as it was at the last one: its outputs (persistent buffers) are drawn again
+					this.cullsSkipped++;
 				} else {
 					LodNative.meshCull(this.lod, enc, mesh.frame, LodMesh.FRAME_BYTES, this.compFrame, COMP_FRAME_BYTES, table, mesh.arena(), maskBuf, mesh.argsBuf,
 						mesh.instBuf, mesh.plantBuf, mesh.survBuf, mesh.horizonBuf, mesh.listBuf, clip.geomBuf, clip.crownBuf, mesh.blocks(), LodMesh.FENCES);
@@ -502,6 +543,40 @@ public final class Lod {
 		this.statCpuNanos += System.nanoTime() - start;
 		this.sample(w, start);
 		if (LodConfig.STATS) this.stats(w);
+	}
+
+	/**
+	 * -Dmcopt.lod.cullSkip=false: the mesh's GPU cull every frame. On (the default), a frame whose cull would read exactly what
+	 * the last one did (the camera and frame constants byte for byte, the mask, the tile table, the clipmap's words and the
+	 * arena) skips it and draws the last one's survivors: a camera at rest (building, a menu over the world, AFK) costs only
+	 * the draw. Off with the temporal filter (its jitter) and the dissolve (its clock).
+	 */
+	private static final boolean CULL_SKIP = Boolean.parseBoolean(System.getProperty("mcopt.lod.cullSkip", "true")) && LodMesh.DISSOLVE_MS <= 0;
+	private final long[] cullFrame = new long[LodMesh.FRAME_BYTES / 8], cullComp = new long[COMP_FRAME_BYTES / 8];
+	private final int[] cullMask = new int[MASK_MAX * MASK_MAX / 32];
+	private long cullTable = -1, cullClip = -1, cullArena;
+	private boolean cullValid;
+	long cullsSkipped;
+
+	/** Whether the cull's inputs are what the last cull read; if not, they're recorded as this cull's and false is returned. */
+	private boolean cullUnchanged(LodMesh mesh, LodClip clip) {
+		boolean same = CULL_SKIP && this.taa == null && this.cullValid && mesh.tableVersion() == this.cullTable && clip.version == this.cullClip
+			&& mesh.arena() == this.cullArena && same(mesh.frame, this.cullFrame) && same(this.compFrame, this.cullComp)
+			&& java.util.Arrays.equals(this.mask, this.cullMask);
+		if (same) return true;
+		this.cullValid = true;
+		this.cullTable = mesh.tableVersion();
+		this.cullClip = clip.version;
+		this.cullArena = mesh.arena();
+		for (int i = 0; i < this.cullFrame.length; i++) this.cullFrame[i] = MemoryUtil.memGetLong(mesh.frame + i * 8L);
+		for (int i = 0; i < this.cullComp.length; i++) this.cullComp[i] = MemoryUtil.memGetLong(this.compFrame + i * 8L);
+		System.arraycopy(this.mask, 0, this.cullMask, 0, this.mask.length);
+		return false;
+	}
+
+	private static boolean same(long addr, long[] last) {
+		for (int i = 0; i < last.length; i++) if (MemoryUtil.memGetLong(addr + i * 8L) != last[i]) return false;
+		return true;
 	}
 
 	private long settledFrame = -1;
@@ -645,6 +720,15 @@ public final class Lod {
 		double cy = this.camY;
 		// elevation bounds over every resident tile, from its nearest point (never nearer than where far terrain starts)
 		double dMin = Math.max(1, this.nearestFar);
+		if (this.mesh != null && this.taa == null && LodConfig.DUMP == null) {
+			// the mesh draws its own quads: the walk's band (every resident tile's elevation bounds, the rows they reach, the column
+			// fan) and its ColFrame have no reader; only the composite's constants are written
+			this.lastColumns = 0;
+			this.lastR0 = 0;
+			this.lastR1 = height - 1;
+			this.packComp(clip, width, height, 0, height - 1, dMin);
+			return 1;
+		}
 		double tLo = Double.POSITIVE_INFINITY, tHi = Double.NEGATIVE_INFINITY;
 		int top = Integer.MIN_VALUE;
 		for (int l = 0; l < clip.levels; l++) {
@@ -770,6 +854,16 @@ public final class Lod {
 			}
 		}
 
+		this.packComp(clip, width, height, r0, r1, dMin);
+		return columns;
+	}
+
+	/** -Dmcopt.lod.debugView=N: the far terrain's debug coloring (0: none). */
+	private static final int DEBUG_VIEW = Integer.getInteger("mcopt.lod.debugView", 0);
+
+	/** CompFrame: the constants the composite and the mesh's shading read. */
+	private void packComp(LodClip clip, int width, int height, int r0, int r1, double dMin) {
+		int bx = (int) Math.floor(this.camX), by = (int) Math.floor(this.camY), bz = (int) Math.floor(this.camZ);
 		long c = this.compFrame;
 		this.viewProj.getToAddress(c);
 		putD(c + 64, this.A);
@@ -816,8 +910,7 @@ public final class Lod {
 		MemoryUtil.memPutFloat(c + 240, (float) (2 * Math.atan(tanY) / height));
 		MemoryUtil.memPutFloat(c + 244, this.atlasMips);
 		MemoryUtil.memPutFloat(c + 248, LodConfig.TEXTURES && this.atlasMips >= 0 ? 1 : 0);
-		MemoryUtil.memPutFloat(c + 252, Integer.getInteger("mcopt.lod.debugView", 0));
-		return columns;
+		MemoryUtil.memPutFloat(c + 252, DEBUG_VIEW);
 	}
 
 	private static void putD(long at, double[] v) {
@@ -1180,7 +1273,7 @@ public final class Lod {
 			(LodField.CHUNK_TILES ? String.format(", chunk tiles %d (generations skipped %d)", w.chunkTiles.get(), w.chunkSkipped.get()) : "")
 				+ (CHUNK_HOLD ? String.format(", chunks held %d (released %d)", w.heldCount(), w.heldReleased) : ""));
 		StringBuilder gen = new StringBuilder();
-		for (int i = 0; i < 16; i++) {
+		for (int i = 0; i < 16 && w.noise != null; i++) {
 			long n = w.noise.stageNanos.get(i * 4 + 3);
 			if (n == 0) continue;
 			gen.append(String.format(" L%d:%d tiles %.0f/%.0f/%.0f ms", i, n, w.noise.stageNanos.get(i * 4) / 1e6 / n, w.noise.stageNanos.get(i * 4 + 1) / 1e6 / n,
@@ -1190,8 +1283,9 @@ public final class Lod {
 		LodMesh mesh = this.mesh;
 		if (mesh != null) {
 			long n = mesh.meshed.get();
-			System.out.printf("mcopt-lod stats: mesh %d tiles installed, %d meshed (%.2f ms, %.0f quads a tile), %d pending, arena %.1f of %.0f MB%n", mesh.installed, n,
-				n == 0 ? 0 : mesh.meshNanos.get() / 1e6 / n, n == 0 ? 0 : (double) mesh.meshQuads.get() / n, mesh.pending(), mesh.usedMb(), mesh.arenaMb());
+			System.out.printf("mcopt-lod stats: mesh %d tiles installed, %d meshed (%.2f ms, %.0f quads a tile), %d pending, arena %.1f of %.0f MB, %d culls skipped%n",
+				mesh.installed, n, n == 0 ? 0 : mesh.meshNanos.get() / 1e6 / n, n == 0 ? 0 : (double) mesh.meshQuads.get() / n, mesh.pending(), mesh.usedMb(),
+				mesh.arenaMb(), this.cullsSkipped);
 		}
 		LodPk pk = this.pk;
 		if (pk != null) {
@@ -1344,6 +1438,10 @@ public final class Lod {
 		m.put("threads", LodConfig.THREADS);
 		m.put("firstSettleSeconds", w.firstSettledNanos == 0 ? null : (w.firstSettledNanos - w.startNanos) / 1e9);
 		m.put("chunksSummarized", w.chunksSummarized.get());
+		m.put("emptyTiles", w.empty.get());
+		m.put("patchedTiles", w.patched.get());
+		m.put("cullsSkipped", l.cullsSkipped);
+		m.put("quality", LodConfig.QUALITY.name());
 		if (LodField.CHUNK_TILES) {
 			m.put("chunkTiles", w.chunkTiles.get());
 			m.put("chunkSkipped", w.chunkSkipped.get());

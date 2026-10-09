@@ -348,8 +348,16 @@ final class LodMesh implements LodClip.Listener {
 			}
 			this.installOrHold(frame, r);
 		}
-		while (budget-- > 0 && (r = this.results.poll()) != null) this.installOrHold(frame, r);
+		// (and a time budget: each install copies its whole mesh into the arena on this thread)
+		long deadline = System.nanoTime() + INSTALL_NANOS;
+		while (budget-- > 0 && (r = this.results.poll()) != null) {
+			this.installOrHold(frame, r);
+			if (System.nanoTime() > deadline) break;
+		}
 	}
+
+	/** -Dmcopt.lod.installMs=MS: render-thread time a frame may spend installing new tile meshes (default 2). */
+	private static final long INSTALL_NANOS = (long) (Double.parseDouble(System.getProperty("mcopt.lod.installMs", "2")) * 1e6);
 
 	private int publishes;
 
@@ -436,6 +444,7 @@ final class LodMesh implements LodClip.Listener {
 		this.builtVer[level][slot] = r[5];
 		this.installed++;
 		long e = this.tableHost + ((long) level * this.tps * this.tps + slot) * 16;
+		this.tableVersion++;
 		MemoryUtil.memPutInt(e, (int) (at + 1));
 		MemoryUtil.memPutInt(e + 4, tx);
 		MemoryUtil.memPutInt(e + 8, tz);
@@ -498,6 +507,7 @@ final class LodMesh implements LodClip.Listener {
 		this.key[level][slot] = -1;
 		this.publishedVer[level][slot] = 0;
 		MemoryUtil.memSet(this.tableHost + ((long) level * this.tps * this.tps + slot) * 16, 0, 16);
+		this.tableVersion++;
 	}
 
 	private long lastFrame;
@@ -572,10 +582,24 @@ final class LodMesh implements LodClip.Listener {
 	/** This frame's copy of the tile table. */
 	long table(long frame) {
 		this.lastFrame = frame;
-		long b = this.tableBufs[(int) (frame % RING)];
-		MemoryUtil.memCopy(this.tableHost, LodNative.contents(b), this.tableBytes);
+		int i = (int) (frame % RING);
+		long b = this.tableBufs[i];
+		// (a ring slot already holding this version of the table isn't copied again: the whole table is 16 bytes a slot of
+		// every level's window, 80 KB at the defaults, every frame)
+		if (this.tableSlotVersion[i] != this.tableVersion) {
+			MemoryUtil.memCopy(this.tableHost, LodNative.contents(b), this.tableBytes);
+			this.tableSlotVersion[i] = this.tableVersion;
+		}
 		this.current = b;
 		return b;
+	}
+
+	/** Bumped by every change to the tile table (an install or a drop): what the cull reads besides the camera. */
+	private long tableVersion;
+	private final long[] tableSlotVersion = java.util.stream.LongStream.generate(() -> -1).limit(RING).toArray();
+
+	long tableVersion() {
+		return this.tableVersion;
 	}
 
 	private long current;
