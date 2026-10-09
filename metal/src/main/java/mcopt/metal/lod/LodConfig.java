@@ -83,6 +83,11 @@ public final class LodConfig {
 	 */
 	public static final boolean PLANTS = TEXTURES && Boolean.parseBoolean(System.getProperty("mcopt.lod.plants", String.valueOf(QUALITY.plants())));
 	/**
+	 * -Dmcopt.lod.clearWater=false: far water drawn opaque, its color mixed with its floor's by depth. Default: see-through, as
+	 * the game's water is (the bed where the view reaches it, darker and bluer with depth and at grazing angles).
+	 */
+	public static final boolean CLEAR_WATER = Boolean.parseBoolean(System.getProperty("mcopt.lod.clearWater", "true"));
+	/**
 	 * -Dmcopt.lod.treeLevels=N: the N finest levels (at most 2) get the game's own trees (its tree features run on the far
 	 * terrain); coarser levels the biome's impostor canopy. Level 1 needs every chunk's block-exact ground: ~5x the work of
 	 * its tiles. Default 1.

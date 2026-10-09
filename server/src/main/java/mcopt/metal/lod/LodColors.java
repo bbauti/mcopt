@@ -39,6 +39,10 @@ final class LodColors {
 		return a;
 	}
 
+	static int waterOver(int floor, int water, int depth) {
+		return water;
+	}
+
 	static int multiply(int a, int b) {
 		return a;
 	}

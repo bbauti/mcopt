@@ -178,6 +178,11 @@ final class LodColors {
 		return r << 16 | g << 8 | bl;
 	}
 
+	/** Water over its floor as one opaque color, by depth (where nothing looks through it: the ground under a crown). */
+	static int waterOver(int floor, int water, int depth) {
+		return mix(floor, water, Math.min(1.0F, 0.55F + depth / 24.0F));
+	}
+
 	static int multiply(int a, int b) {
 		int r = ((a >> 16) & 255) * ((b >> 16) & 255) / 255;
 		int g = ((a >> 8) & 255) * ((b >> 8) & 255) / 255;

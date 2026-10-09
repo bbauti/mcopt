@@ -63,6 +63,7 @@ public final class LodSettingsScreen extends Screen {
 		buttons.add(this.toggle("Trees", "mcopt.lod.trees", flag("mcopt.lod.trees", true)));
 		buttons.add(this.toggle("Plants", "mcopt.lod.plants", flag("mcopt.lod.plants", !"low".equals(quality))));
 		buttons.add(this.toggle("Block textures", "mcopt.lod.textures", flag("mcopt.lod.textures", true)));
+		buttons.add(this.toggle("Clear water", "mcopt.lod.clearWater", flag("mcopt.lod.clearWater", true)));
 		// (applies now: hides or shows it without a restart)
 		CycleButton<Boolean> show = CycleButton.onOffBuilder(McoptFarTerrain.isDrawEnabled()).create(0, 0, 150, 20, Component.literal("Show now"),
 			(b, v) -> McoptFarTerrain.setDrawEnabled(v));

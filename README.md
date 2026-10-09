@@ -65,6 +65,7 @@ Settings: Options > Video Settings > **Far Terrain (mcopt)...**, or in `config/m
 | `mcopt.lod.toggleKey` | `F6` | `F1`-`F12`, or `none` |
 | `mcopt.lod.threads` | cores - 4 | Generation threads |
 | `mcopt.lod.plants`, `mcopt.lod.trees`, `mcopt.lod.textures` | by quality / `true` | Detail on the nearest far terrain |
+| `mcopt.lod.clearWater` | `true` | See-through water: the bed shows under shallow water, deep water darkens (tiles cached before this version stay opaque until regenerated) |
 | `mcopt.lod.import` | `true` | Read the singleplayer world's saved chunks |
 | `mcopt.lod.cache` | `true` | The disk cache (`mcopt.lod.cacheDir` moves it) |
 

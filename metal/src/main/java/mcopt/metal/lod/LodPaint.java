@@ -8,7 +8,7 @@ import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 
 /**
  * A structure tile (a server's: LodNoise without paint) painted on the client, as LodNoise paints its own tiles: the
- * surface (its blocks' colors under the biome's tint, water over the floor by depth, ice, snow, impostor canopies), then
+ * surface (its blocks' colors under the biome's tint, clear water over its floor, ice, snow, impostor canopies), then
  * where the game's trees were planted their crowns and trunks, then level 0's plants and the ground under crowns. The
  * code follows LodNoise.surfaceMaterials, dressTrees and dressGround step for step: a server's tile looks as one made here.
  */
@@ -54,9 +54,10 @@ final class LodPaint {
 						texTop = ICE;
 					} else {
 						texTop = null;
-						int waterColor = LodColors.top(WATER, b, bx, bz);
-						float f = Math.min(1.0F, 0.55F + depth / 24.0F);
-						topColor = LodColors.mix(topColor, waterColor, f);
+						t.clear[i] = (byte) Math.clamp(depth, 1, 127);
+						sideColor = topColor;
+						t.below[i] = topColor;
+						topColor = LodColors.top(WATER, b, bx, bz);
 					}
 				} else {
 					pos.set(bx, t.ground[i], bz);

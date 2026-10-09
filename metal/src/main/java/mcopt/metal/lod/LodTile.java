@@ -22,7 +22,10 @@ final class LodTile {
 	final short[] height;
 	/** World y of the water surface's top face, or DRY. */
 	final short[] water;
-	/** RGB seen from above (water's own color, already mixed with the floor by depth, where wet). */
+	/**
+	 * RGB seen from above. Where wet: the water's own color when `clear` holds its depth (the floor's top color is then in
+	 * `side`: the GPU looks through the water), else (ice) the top's.
+	 */
 	final int[] top;
 	/**
 	 * RGB of the column's sides: at level 0 the top block's own side, deeper walls take `below`; coarser levels a mix of the
@@ -66,6 +69,8 @@ final class LodTile {
 	 */
 	final BlockState[] belowState;
 	final byte[] impostor;
+	/** Open water seen through (LodClip.depthBits): its depth over the floor, 1-127; 0 where dry, frozen or a crown's. */
+	final byte[] clear;
 	/** The water is known (the game's aquifers asked, levels 0-1): `water` holds it; else the sea fills what lies under its level. */
 	boolean waterKnown;
 	/** Impostor canopies from the biome (LodTrees) where no exact trees are planted. */
@@ -114,6 +119,7 @@ final class LodTile {
 		this.plantColor = new int[n];
 		this.belowState = new BlockState[n];
 		this.impostor = new byte[n];
+		this.clear = new byte[n];
 	}
 
 	/**

@@ -1174,6 +1174,105 @@ static inline bool compShade(constant CompFrame& f, uint2 v, device const uint* 
                              device const uint* texWords, device const PaletteEntry* palette, texture2d<half> atlas, sampler smp,
                              thread CompSurface& s);
 
+// ---- clear water ----
+//
+// A wet cell whose geometry word holds its water's depth (bits 25-31, 1-127; LodClip.depthBits) has the water's own color in
+// its color word's low half and its floor's top color in the high half (0: older data, ice: the low half is the whole look).
+// Its top is seen through as the game's water is: the bed where the pixel's ray reaches it (looked up there, so slopes and
+// shores show, on level 0 with its block's texture), in the light that gets that deep (the game's sky light drops by one a
+// block of water), under the water's color by how far the ray runs through it. -Dmcopt.lod.clearWater=false (no
+// LOD_CLEAR_WATER): the water over its floor in one color by depth, as before.
+#define GEOM_WATER_DEPTH(g) int(((g) >> 25) & 127u)
+#define WATER_ALPHA 0.65     // the water's surface over a bed right under it (the game's water texture's alpha)
+#define WATER_FADE 16.0      // blocks of water a ray crosses for what is left of the bed to fade to 1 / e
+
+// The cell of level L at p (relative to `origin`): its geometry word and index.
+static inline uint compCellAt(constant CompFrame& f, device const uint* geom, int L, float3 p, thread uint& idx) {
+    int ax = (int(floor(p.x)) + f.origin.x) >> L, az = (int(floor(p.z)) + f.origin.z) >> L;
+    int logN = f.origin.w, m = (1 << logN) - 1;
+    idx = uint(L) * (1u << uint(2 * logN)) + uint(((az & m) << logN) | (ax & m));
+    return geom[idx];
+}
+
+// The game's lightmap brightness of sky light `level` (0-15) relative to full sky light (its curve, at the default brightness).
+static inline float compSkyLevel(float level) {
+    float l = clamp(level, 0.0, 15.0) / 15.0;
+    float b = l / (4.0 - 3.0 * l);
+    float nb = 1.0 - b;
+    b = mix(b, 1.0 - nb * nb * nb * nb, 0.5);
+    return mix(b, 0.75, 0.04) / mix(1.0, 0.75, 0.04);
+}
+
+static inline bool compWater(constant CompFrame& f, uint2 v, device const uint* geom, device const uint* color, device const uint* texWords,
+                             device const PaletteEntry* palette, texture2d<half> atlas, sampler smp, thread CompSurface& s) {
+    if (s.face == FACE_BOTTOM || s.face == FACE_PLANT) return false;
+    int L = int((v.y >> 20) & 15u);
+    float3 p = s.rel + f.camFrac.xyz;
+    // the cell the face belongs to: a wall's is behind its plane
+    float3 inward = s.face == FACE_XP ? float3(-0.5, 0, 0) : s.face == FACE_XN ? float3(0.5, 0, 0) : s.face == FACE_ZP ? float3(0, 0, -0.5)
+        : s.face == FACE_ZN ? float3(0, 0, 0.5) : float3(0);
+    uint idx;
+    uint g = compCellAt(f, geom, L, p + inward, idx);
+    int d = GEOM_WATER_DEPTH(g);
+    if ((g & (GEOM_VALID | GEOM_WET | GEOM_CROWN)) != (GEOM_VALID | GEOM_WET) || d == 0) return false;
+    uint cw = color[idx];
+    half3 water = comp565(cw & 0xFFFFu), floorC = comp565(cw >> 16);
+    float surfaceY = float(GEOM_Y(g) - f.origin.y);
+#ifdef LOD_CLEAR_WATER
+    half thick = 0.85h;
+#else
+    half thick = half(min(1.0, 0.55 + float(d) / 24.0));
+#endif
+    if (s.face != FACE_TOP) {
+        // a wall of the water (a cell stepping down to its neighbor): water above the floor, the floor's block under it
+        s.albedo = p.y > surfaceY - float(d) ? mix(floorC, water, thick) : floorC;
+        return true;
+    }
+#ifndef LOD_CLEAR_WATER
+    s.albedo = mix(floorC, water, thick);
+    return true;
+#else
+    float3 D = normalize(s.rel);
+    float down = max(-D.y, 0.02);
+    // the bed where the ray reaches it: from this cell's depth, then from the depth of the cell that lands in
+    float depth = float(d);
+    uint qi = idx;
+    uint gq = compCellAt(f, geom, L, p + D * (depth / down), qi);
+    half3 bed = floorC;
+    bool shore = false;
+    if (qi != idx && (gq & GEOM_VALID) != 0u && (gq & GEOM_CROWN) == 0u) {
+        int dq = GEOM_WATER_DEPTH(gq);
+        float yq = float(GEOM_Y(gq) - f.origin.y);
+        uint cq = color[qi];
+        if ((gq & GEOM_WET) != 0u && dq > 0 && abs(yq - surfaceY) < 0.5) {
+            // the same water: its bed there
+            depth = float(dq);
+            bed = comp565(cq >> 16);
+        } else if ((gq & GEOM_WET) == 0u) {
+            // a shore, or the bed rising out: its top, under what water is over it
+            depth = clamp(surfaceY - yq, 0.0, depth);
+            bed = comp565(cq & 0xFFFFu);
+            shore = true;
+        } else {
+            qi = idx;
+        }
+    } else {
+        qi = idx;
+    }
+    float path = depth / down;
+    float3 q = p + D * path;
+    if (L == 0 && f.quadDepth.y != 0.0 && f.tex.z > 0.0) {
+        // level 0: the bed's block's top texture (a wet cell's texture word names the floor's block as its side)
+        uint tw = texWords[qi];
+        uint id = shore ? (tw & 1023u) : ((tw >> 10) & 1023u);
+        bed = compTexture(f, palette, atlas, smp, id, true, fract(q.xz), q - f.camFrac.xyz, float3(0, 1, 0), bed);
+    }
+    float a = 1.0 - (1.0 - WATER_ALPHA) * exp(-path / WATER_FADE);
+    s.albedo = mix(bed * half(compSkyLevel(15.0 - depth)), water, half(a));
+    return true;
+#endif
+}
+
 static inline bool compSurface(constant CompFrame& f, float4 pos, device const uint2* img, device const uint* geom, device const uint* color,
                                device const uint* crowns, device const uint* texWords, device const PaletteEntry* palette, texture2d<half> atlas,
                                sampler smp, thread CompSurface& s) {
@@ -1208,6 +1307,7 @@ static inline bool compShade(constant CompFrame& f, uint2 v, device const uint* 
         return true;
     }
     bool underCrown = (v.y & REC_UNDER_CROWN) != 0u;
+    if (s.wet && compWater(f, v, geom, color, texWords, palette, atlas, smp, s)) return true;
     if (f.quadDepth.y == 0.0 || level != 0u || s.wet || underCrown && (s.face == FACE_TOP || f.tex.z == 0.0)) return true;
     // near detail on level 0: the cell, from the hit's position (block coordinates relative to `origin`)
     float3 p = s.rel + f.camFrac.xyz;

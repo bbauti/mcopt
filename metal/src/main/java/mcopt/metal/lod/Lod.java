@@ -133,6 +133,8 @@ public final class Lod {
 			// chunk is drawn by both for the frames before its hand-off, the real terrain wins the coplanar tops instead of z-fighting
 			if (HANDOFF_PUSH > 0 && HANDOFF_PUSH < 1) src = "#define SEAM_DEPTH_PUSH " + HANDOFF_PUSH + "\n" + src;
 			if (LodTaaTile.CODES) src = "#define SEAM_TAA_TILE 1\n" + src;
+			// clear water (columns.metal compWater): compiled in unless -Dmcopt.lod.clearWater=false
+			if (LodConfig.CLEAR_WATER) src = "#define LOD_CLEAR_WATER 1\n" + src;
 			if (Boolean.getBoolean("mcopt.lod.thinTex")) src = "#define SEAM_THIN_TEX 1\n" + src;
 			if (Boolean.getBoolean("mcopt.lod.thin")) src = "#define SEAM_THIN 1\n#define SEAM_CROWN_LEVELS " + Math.max(1, LodConfig.CROWN_LEVELS) + "\n" + src;
 			return src;

@@ -553,8 +553,10 @@ final class LodClip {
 	/** The top (a real chunk's) doesn't hide what's behind it: water, glass, a fence, a slab... The mesher counts no occluder there. */
 	static final int GEOM_CLEAR = 1 << 24;
 	/**
-	 * A real chunk's column (-Dmcopt.lod.realOcc): how deep its top solid run reaches (LodChunks.Snapshot.depth), bits 25-31; 0:
-	 * solid all the way down (the generated terrain). The real terrain occludes only for a camera at or over a run's bottom.
+	 * Bits 25-31. A dry real chunk's column (-Dmcopt.lod.realOcc): how deep its top solid run reaches (LodChunks.Snapshot.depth);
+	 * 0: solid all the way down (the generated terrain). The real terrain occludes only for a camera at or over a run's bottom.
+	 * A wet cell: clear water's depth over its floor (1-127; 0: opaque, ice or older data): the color word then holds the
+	 * water's own color (top) and the floor's (side), and the GPU looks through the water (columns.metal compWater).
 	 */
 	static final int GEOM_DEPTH_SHIFT = 25;
 

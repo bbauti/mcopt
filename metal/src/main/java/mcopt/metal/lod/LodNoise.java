@@ -651,10 +651,12 @@ final class LodNoise {
 						topColor = LodColors.top(this.ice, b, bx, bz);
 						texTop = this.ice;
 					} else {
+						// clear water: its own color on top, the floor's under it (the GPU looks through by depth and angle)
 						texTop = null;
-						int waterColor = LodColors.top(this.water, b, bx, bz);
-						float f = Math.min(1.0F, 0.55F + depth / 24.0F);
-						topColor = LodColors.mix(topColor, waterColor, f);
+						t.clear[i] = (byte) Math.clamp(depth, 1, 127);
+						sideColor = topColor;
+						t.below[i] = topColor;
+						topColor = LodColors.top(this.water, b, bx, bz);
 					}
 					t.water[i] = (short) waterTop;
 				} else {

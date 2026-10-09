@@ -38,9 +38,10 @@ final class LodChunks {
 	 * ground's top). Without a crown crownLo is Short.MIN_VALUE and crownHi the column's top.
 	 */
 	/**
-	 * clear: the column's top doesn't hide what's behind it (water, glass, a fence, a slab...): it occludes nothing. depth
-	 * (-Dmcopt.lod.realOcc only, else 0): how far the ground's top solid run reaches down, in blocks (1-127, 127: that deep or
-	 * more; 0: none): under it may be air, a cave or the space under an overhang.
+	 * clear: the column's top doesn't hide what's behind it (water, glass, a fence, a slab...): it occludes nothing. depth: dry
+	 * (-Dmcopt.lod.realOcc only, else 0), how far the ground's top solid run reaches down, in blocks (1-127, 127: that deep or
+	 * more; 0: none): under it may be air, a cave or the space under an overhang; wet, the water's depth over its floor (clear
+	 * water: top is then the water's color, side and below the floor's).
 	 */
 	record Summary(int chunkX, int chunkZ, short[] height, short[] water, int[] top, int[] side, int[] below, boolean[] fringe, short[] crownLo,
 		short[] crownHi, int[] groundColor, int[] tex, int[] runs, int[] plantA, int[] plantB, boolean[] clear, byte[] depth) {
@@ -272,10 +273,14 @@ final class LodChunks {
 				below[i] = s.trunk[i] != null ? LodColors.side(s.trunk[i], b, x, z) : sideColor;
 				fringe[i] = false;
 			}
-			if (s.water[i] != LodTile.DRY) {
-				int depth = s.water[i] - s.height[i];
-				int waterColor = LodColors.top(WATER, b, x, z);
-				color = LodColors.mix(color, waterColor, Math.min(1.0F, 0.55F + depth / 24.0F));
+			int depth = s.water[i] != LodTile.DRY ? s.water[i] - s.height[i] : 0;
+			if (depth > 0) {
+				// clear water (LodClip.depthBits): its own color on top, the floor's under it, looked through on the GPU
+				solidDepth[i] = (byte) Math.min(depth, DEPTH_MAX);
+				sideColor = color;
+				below[i] = color;
+				color = LodColors.top(WATER, b, x, z);
+			} else if (s.water[i] != LodTile.DRY) {
 				sideColor = color;
 			}
 			int surface = s.water[i] != LodTile.DRY ? Math.max(s.water[i], s.height[i]) : s.height[i];
@@ -283,11 +288,13 @@ final class LodChunks {
 			if (LodConfig.TEXTURES) {
 				BlockState sideState = layer ? s.under[i] : s.top[i];
 				BlockState belowState = s.trunk[i] != null && s.crown[i] == null ? s.trunk[i] : layer ? sideState : s.under[i];
-				tex[i] = s.water[i] != LodTile.DRY ? 0 : LodPalette.word(LodPalette.id(s.top[i]), LodPalette.id(sideState), LodPalette.id(belowState));
+				// (under water: the floor's block as the side, whose top sprite the GPU draws through the water)
+				tex[i] = s.water[i] != LodTile.DRY ? LodPalette.word(0, LodPalette.id(s.top[i]), LodPalette.id(s.under[i]))
+					: LodPalette.word(LodPalette.id(s.top[i]), LodPalette.id(sideState), LodPalette.id(belowState));
 			}
 			if (s.crown[i] != null) {
-				// a crown over air: its own colors; the ground keeps its own under it
-				groundColor[i] = color;
+				// a crown over air: its own colors; the ground keeps its own under it (water over its floor in one color)
+				groundColor[i] = depth > 0 ? LodColors.waterOver(sideColor, color, depth) : color;
 				BlockState leaf = s.crownLeaf[i];
 				BlockState topLeaf = leaf != null && leaf.is(BlockTags.LEAVES) ? leaf : Blocks.OAK_LEAVES.defaultBlockState();
 				color = s.crown[i].is(Blocks.SNOW) ? LodColors.top(s.crown[i], b, x, z) : LodColors.top(topLeaf, b, x, z);

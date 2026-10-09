@@ -9,7 +9,9 @@
 #define GEOM_VALID 0x2000u
 #define GEOM_CROWN 0x4000u
 #define GEOM_CLEAR (1u << 24)   // (a real chunk's top that doesn't hide what's behind it: no occluder)
-#define GEOM_DEPTH(g) ((int) (((g) >> 25) & 127u))   // (a real chunk's: how deep its top solid run reaches; 0 all the way)
+// (a dry real chunk's: how deep its top solid run reaches, 0 all the way; a wet cell's: its clear water's depth, drawn as an
+// opaque top the fragment stage looks through)
+#define GEOM_DEPTH(g) ((int) (((g) >> 25) & 127u))
 #define NEG_INF (-100000)
 #define MAX_IV 5
 #define REGION (LM_TILE + 2)
@@ -45,7 +47,8 @@ static void column0(const LmIn *in, int ax, int az, Col *c);
 static void column(const LmIn *in, int ax, int az, Col *c) {
 	column0(in, ax, az, c);
 	int m = (1 << in->logN) - 1;
-	int depth = GEOM_DEPTH(in->geom[((size_t) (az & m) << in->logN) | (size_t) (ax & m)]);
+	uint32_t g = in->geom[((size_t) (az & m) << in->logN) | (size_t) (ax & m)];
+	int depth = (g & GEOM_WET) ? 0 : GEOM_DEPTH(g);
 	c->bot = depth > 0 && c->n > 0 ? c->hi[0] - depth : NEG_INF;
 }
 

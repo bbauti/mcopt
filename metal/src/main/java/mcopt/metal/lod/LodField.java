@@ -422,11 +422,13 @@ final class LodField {
 				// (the wet flag marks a water top: a crown's top is leaves)
 				g[i] = LodClip.crownGeomWord(t.canopyHi[i] + 1, t.canopyHi[i] + 1 - t.canopyLo[i], false);
 				c[i] = LodClip.colorWord(t.crownTop[i], t.crownSide[i]);
-				cr[i] = LodClip.crownWord(surface, t.top[i]);
+				// (clear water under a crown: the crown word holds one color, the water over its floor)
+				cr[i] = LodClip.crownWord(surface, wet && t.clear[i] > 0 ? LodColors.waterOver(t.side[i], t.top[i], t.clear[i]) : t.top[i]);
 				if (rn != null) rn[i] = t.crownRuns[i];
 				continue;
 			}
-			g[i] = LodClip.geomWord(surface, wet) | (t.fringe[i] && !wet && t.level == 0 ? LodClip.GEOM_FRINGE : 0);
+			g[i] = LodClip.geomWord(surface, wet) | (t.fringe[i] && !wet && t.level == 0 ? LodClip.GEOM_FRINGE : 0)
+				| (wet ? LodClip.depthBits(t.clear[i]) : 0);
 			c[i] = LodClip.colorWord(t.top[i], t.side[i]);
 			BlockState plant = t.plantLower[i];
 			if (pl != null && plant != null && !wet && t.level == 0) {
