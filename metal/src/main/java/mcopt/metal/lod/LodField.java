@@ -120,9 +120,13 @@ final class LodField {
 		this.held.clear();
 		for (Thread t : this.threads) t.interrupt();
 		// (a worker's job in flight, a save or a generation, finishes before the last saves here; then what it handed back)
+		// (2 seconds for all of them: a tile's generation takes milliseconds, and an exit never waits longer than that)
+		long until = System.nanoTime() + 2_000_000_000L;
 		for (Thread t : this.threads) {
+			long left = (until - System.nanoTime()) / 1_000_000L;
+			if (left <= 0) break;
 			try {
-				t.join(2000);
+				t.join(left);
 			} catch (InterruptedException e) {
 				Thread.currentThread().interrupt();
 				break;
