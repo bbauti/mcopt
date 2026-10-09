@@ -261,6 +261,14 @@ final class LodField {
 			}
 			boolean wet = t.water[i] != LodTile.DRY && t.water[i] > t.height[i];
 			int surface = wet ? t.water[i] : t.height[i];
+			if (!wet && t.height[i] <= t.voidY && t.canopyHi[i] < t.canopyLo[i]) {
+				// nothing solid in the column (void): no cell
+				g[i] = 0;
+				c[i] = 0;
+				if (cr != null) cr[i] = 0;
+				if (rn != null) rn[i] = 0;
+				continue;
+			}
 			if (cr != null && t.canopyHi[i] >= t.canopyLo[i] && !t.standing[i] && t.canopyHi[i] + 1 > surface) {
 				// (the wet flag marks a water top: a crown's top is leaves)
 				g[i] = LodClip.crownGeomWord(t.canopyHi[i] + 1, t.canopyHi[i] + 1 - t.canopyLo[i], false);

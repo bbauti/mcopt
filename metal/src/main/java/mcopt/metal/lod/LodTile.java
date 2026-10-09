@@ -64,6 +64,11 @@ final class LodTile {
 	boolean waterKnown;
 	/** Impostor canopies from the biome (LodTrees) where no exact trees are planted. */
 	boolean impostorTrees = true;
+	/**
+	 * Columns whose ground is at or under this y found no solid at all (the generator's bottom: the End's void between its
+	 * islands): they're left out (no cell) instead of drawn as a floor there. Set by LodNoise.
+	 */
+	int voidY = Integer.MIN_VALUE;
 	int source;
 
 	/** A clipmap tile: tile (tx, tz) of level `level`. */
