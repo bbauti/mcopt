@@ -29,10 +29,7 @@ final class LodPalette {
 	static synchronized void bind(long address) {
 		table = address;
 		MemoryUtil.memSet(address, 0, (long) MAX * STRIDE * 4);
-		// (0 is "none": states remembered as past a full table aren't written there)
-		IDS.forEach((state, n) -> {
-			if (n != 0) write(state, n);
-		});
+		IDS.forEach(LodPalette::write);
 	}
 
 	/** The block's number (0 when the table is full, or for air and fluids: they keep the flat color). */
@@ -85,17 +82,13 @@ final class LodPalette {
 		}
 	}
 
-	/**
-	 * After a resource reload: every number's entry written again from its state's new look (the atlas moved its sprites).
-	 * Numbers stay as they are (cells name them).
-	 */
+	/** After a resource reload: each number's entry written again from its state's new look (the atlas moved its sprites; cells keep numbers). */
 	static synchronized void rewrite() {
-		if (table == 0) return;
 		STATES.forEach((n, state) -> write(state, n));
 	}
 
 	private static void write(BlockState state, int n) {
-		if (table == 0) return;
+		if (table == 0 || n == 0) return;   // (0 is "none": states remembered as past a full table aren't written there)
 		LodColors.Look l = LodColors.look(state);
 		long at = table + (long) n * STRIDE * 4;
 		for (int i = 0; i < 4; i++) {

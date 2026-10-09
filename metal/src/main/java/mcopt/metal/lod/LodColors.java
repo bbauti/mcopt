@@ -69,10 +69,9 @@ final class LodColors {
 	}
 
 	/**
-	 * Colors set for blocks by id, over what their textures give (for modded blocks whose models the averaging can't read:
-	 * dynamic or connected textures): {top, side} RGB, -1 keeping the computed one. An override is the color as drawn, untinted.
-	 * From config/mcopt-lod-colors.properties (modid:block=RRGGBB or modid:block=RRGGBB,RRGGBB for top and side) and
-	 * McoptFarTerrain.setBlockColor.
+	 * Colors set by block id over what the textures give (modded blocks whose models the averaging can't read: dynamic or
+	 * connected textures): {top, side} RGB as drawn, untinted; -1 keeps the computed one. From McoptFarTerrain.setBlockColor
+	 * and config/mcopt-lod-colors.properties (modid:block=RRGGBB, or modid:block=RRGGBB,RRGGBB for top and side).
 	 */
 	private static final ConcurrentHashMap<String, int[]> OVERRIDES = new ConcurrentHashMap<>(loadOverrides());
 
@@ -105,31 +104,29 @@ final class LodColors {
 		java.util.Map<String, int[]> out = new java.util.HashMap<>();
 		java.nio.file.Path f = net.fabricmc.loader.api.FabricLoader.getInstance().getConfigDir().resolve("mcopt-lod-colors.properties");
 		if (!java.nio.file.Files.isRegularFile(f)) return out;
-		java.util.List<String> lines;
+		// (lines split at their '=' here: java.util.Properties would split modid:block at its ':')
 		try {
-			lines = java.nio.file.Files.readAllLines(f, java.nio.charset.StandardCharsets.UTF_8);
+			for (String line : java.nio.file.Files.readAllLines(f, java.nio.charset.StandardCharsets.UTF_8)) {
+				// (a byte order mark some editors put first is no part of the key)
+				String t = line.replace("\uFEFF", "").strip();
+				if (t.isEmpty() || t.startsWith("#") || t.startsWith("!")) continue;
+				int eq = t.indexOf('=');
+				if (eq <= 0) {
+					System.out.println("mcopt-lod: " + f.getFileName() + ": '" + t + "' isn't block=RRGGBB (ignored)");
+					continue;
+				}
+				String k = t.substring(0, eq).strip();
+				String[] v = t.substring(eq + 1).split(",");
+				try {
+					int top = rgb(v[0]), side = v.length > 1 ? rgb(v[1]) : top;
+					out.put(k.contains(":") ? k : "minecraft:" + k, new int[] {top, side});
+				} catch (NumberFormatException e) {
+					System.out.println("mcopt-lod: " + f.getFileName() + ": " + k + " isn't RRGGBB or RRGGBB,RRGGBB (ignored)");
+				}
+			}
 		} catch (java.io.IOException e) {
 			System.out.println("mcopt-lod: can't read " + f + ": " + e);
 			return out;
-		}
-		// (lines split at their '=' here: java.util.Properties would split modid:block at its ':')
-		for (String line : lines) {
-			// (a byte order mark some editors put first is no part of the key)
-			String t = line.replace("\uFEFF", "").strip();
-			if (t.isEmpty() || t.startsWith("#") || t.startsWith("!")) continue;
-			int eq = t.indexOf('=');
-			if (eq <= 0) {
-				System.out.println("mcopt-lod: " + f.getFileName() + ": '" + t + "' isn't block=RRGGBB (ignored)");
-				continue;
-			}
-			String k = t.substring(0, eq).strip();
-			String[] v = t.substring(eq + 1).split(",");
-			try {
-				int top = rgb(v[0]), side = v.length > 1 ? rgb(v[1]) : top;
-				out.put(k.contains(":") ? k : "minecraft:" + k, new int[] {top, side});
-			} catch (NumberFormatException e) {
-				System.out.println("mcopt-lod: " + f.getFileName() + ": " + k + " isn't RRGGBB or RRGGBB,RRGGBB (ignored)");
-			}
 		}
 		System.out.println("mcopt-lod: " + out.size() + " block colors from " + f.getFileName());
 		return out;
