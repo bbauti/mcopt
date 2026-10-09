@@ -1,0 +1,7 @@
+{
+	"required": false,
+	"package": "mcopt.metal.mixin.ui",
+	"compatibilityLevel": "JAVA_25",
+	"client": ["LodVideoSettingsMixin"],
+	"injectors": { "defaultRequire": 0 }
+}

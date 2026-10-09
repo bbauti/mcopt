@@ -212,6 +212,40 @@ public final class Lod {
 		if (refreshQueue.size() < 65536) refreshQueue.add(net.minecraft.world.level.ChunkPos.pack(chunkX, chunkZ));
 	}
 
+	/**
+	 * The reach the fog and far plane go to. Generated far terrain fills its whole reach; built only from real chunks (a server,
+	 * a roof), it reaches as far as what's been seen, so the fog stays at the farthest tile with anything in it (never nearer
+	 * than the render distance): a new server looks as it does without far terrain instead of showing the render distance's
+	 * edge against the sky.
+	 */
+	private float reach(Minecraft mc) {
+		double reach = LodConfig.reachBlocks();
+		LodField w = this.field;
+		LodClip clip = this.clip;
+		if (w == null || clip == null || w.noise != null) return (float) reach;
+		if (this.frames - this.dataReachFrame >= 30 || this.dataReachFrame < 0) {
+			this.dataReachFrame = this.frames;
+			double far = 0;
+			for (int l = 0; l < clip.levels; l++) {
+				int span = clip.span(l);
+				long[] keys = clip.slotKey[l];
+				for (int s = 0; s < keys.length; s++) {
+					long k = keys[s];
+					if (k == -1L || clip.slotMax[l][s] <= -512) continue;
+					double x0 = (double) LodTile.txOf(k) * span, z0 = (double) LodTile.tzOf(k) * span;
+					double fx = Math.max(Math.abs(x0 - this.camX), Math.abs(x0 + span - this.camX)), fz = Math.max(Math.abs(z0 - this.camZ), Math.abs(z0 + span - this.camZ));
+					far = Math.max(far, Math.sqrt(fx * fx + fz * fz));
+				}
+			}
+			this.dataReach = far;
+		}
+		double rd = mc.options.getEffectiveRenderDistance() * 16.0;
+		return (float) Math.clamp(this.dataReach, rd, reach);
+	}
+
+	private double dataReach;
+	private long dataReachFrame = -1;
+
 	/** A block's far-terrain colors from now on (McoptFarTerrain.setBlockColor). */
 	public static void setBlockColor(String blockId, int topRgb, int sideRgb) {
 		LodColors.setOverride(blockId, topRgb, sideRgb);
@@ -371,7 +405,7 @@ public final class Lod {
 			shadeReach(0);
 			if (this.field == null) return;
 		} else {
-			activeReach = (float) LodConfig.reachBlocks();
+			activeReach = this.reach(mc);
 		}
 		shadeReach(activeReach);
 		this.camX = camera.pos.x;
