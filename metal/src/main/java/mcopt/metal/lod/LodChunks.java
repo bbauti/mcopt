@@ -111,10 +111,7 @@ final class LodChunks {
 		return DEPTH_MAX;
 	}
 
-	/**
-	 * Where a snapshot's blocks come from: a chunk of the game's, or another mod's saved terrain (LodVoxyImport, LodDhImport).
-	 * x and z are the column within the chunk (0-15), y the world's.
-	 */
+	/** Where a snapshot's blocks come from: a game chunk or another mod's saved terrain (LodVoxyImport, LodDhImport); x, z: 0-15, y the world's. */
 	interface Source {
 		int minY();
 
@@ -310,15 +307,13 @@ final class LodChunks {
 			hi = Math.max(hi, surface[i] - 1);
 		}
 		if (hi <= minY) return;
-		int secFirst = Math.max(0, (Math.max(minY, lo - 64) - minY) >> 4);
-		int secLast = Math.min(chunk.getSectionsCount() - 1, (hi - minY) >> 4);
+		int secFirst = Math.max(0, (Math.max(minY, lo - 64) - minY) >> 4), secLast = Math.min(chunk.getSectionsCount() - 1, (hi - minY) >> 4);
 		if (secLast < secFirst) return;
 		PalettedContainer<BlockState>[] sections = new PalettedContainer[secLast - secFirst + 1];
 		for (int k = 0; k < sections.length; k++) {
 			LevelChunkSection sec = chunk.getSection(secFirst + k);
 			sections[k] = sec.hasOnlyAir() ? null : sec.getStates().copy();
 		}
-		BlockState air = Blocks.AIR.defaultBlockState();
 		STATS.execute(() -> spanStats(new Source() {
 			@Override
 			public int minY() {
@@ -332,7 +327,7 @@ final class LodChunks {
 
 			@Override
 			public BlockState state(int x, int y, int z) {
-				return emptySection(y) ? air : sections[((y - minY) >> 4) - secFirst].get(x, (y - minY) & 15, z);
+				return emptySection(y) ? Blocks.AIR.defaultBlockState() : sections[((y - minY) >> 4) - secFirst].get(x, (y - minY) & 15, z);
 			}
 
 			@Override
@@ -358,35 +353,29 @@ final class LodChunks {
 				int i = z * 16 + x, y = topY[i], floor = Math.max(minY, y - 64);
 				if (y <= minY) continue;
 				STAT_COLUMNS.increment();
-				int open = 0;
 				// walking down: in a solid run (not leaves), then the gap under it
 				boolean enclosed = false, leaves = false, inSolid = false, inLeaves = false;
-				int gapTop = Integer.MIN_VALUE, runTop = y;
+				int open = 0, gapTop = Integer.MIN_VALUE, runTop = y;
 				for (int k = y; k >= floor; k--) {
 					BlockState b = src.state(x, k, z);
-					boolean air = b.isAir() || decoration(b);
-					if (air) {
+					if (b.isAir() || decoration(b)) {
 						if ((inSolid || inLeaves) && gapTop == Integer.MIN_VALUE) gapTop = k;
 						continue;
 					}
-					boolean leaf = b.is(BlockTags.LEAVES);
-					boolean water = b.getFluidState().is(FluidTags.WATER);
+					boolean leaf = b.is(BlockTags.LEAVES), water = b.getFluidState().is(FluidTags.WATER);
 					if (gapTop != Integer.MIN_VALUE) {
 						int gap = gapTop - k;
 						if (gap >= 2 && !water) {
 							if (inLeaves) {
 								leaves = true;
+							} else if (x > 0 && topY[i - 1] < gapTop || x < 15 && topY[i + 1] < gapTop || z > 0 && topY[i - 16] < gapTop
+								|| z < 15 && topY[i + 16] < gapTop) {
+								// open: a neighbor column's top lies under the gap's top (in the chunk; edge columns see less)
+								open++;
+								STAT_THICK.add(runTop - gapTop);
+								STAT_GAP.add(gap);
 							} else {
-								// open when a neighbor column's top lies under the gap's top (in the chunk; edge columns see less)
-								boolean seen = x > 0 && topY[i - 1] < gapTop || x < 15 && topY[i + 1] < gapTop || z > 0 && topY[i - 16] < gapTop
-									|| z < 15 && topY[i + 16] < gapTop;
-								if (seen) {
-									open++;
-									STAT_THICK.add(runTop - gapTop);
-									STAT_GAP.add(gap);
-								} else {
-									enclosed = true;
-								}
+								enclosed = true;
 							}
 						}
 						gapTop = Integer.MIN_VALUE;
