@@ -585,7 +585,7 @@ public final class Lod {
 		w.flushTouched();
 		this.partNanos[2] += System.nanoTime() - t2;
 		boolean probeOn = this.probe(start);
-		if (!LodConfig.DRAW || !drawEnabled || !probeOn || !MetalBridge.inRenderPass(this.encoder)) {
+		if (!LodConfig.DRAW || !probeOn || !MetalBridge.inRenderPass(this.encoder)) {
 			this.statCpuNanos += System.nanoTime() - start;
 			this.sample(w, start);
 			if (LodConfig.STATS) this.stats(w);
@@ -612,7 +612,8 @@ public final class Lod {
 				if (pub != null) pub.encode(enc, clip);
 				this.partNanos[3] += System.nanoTime() - t3;
 			}
-			int columns = this.packFrames(clip, width, height, rd);
+			// (hidden: the tiles' meshes still install and publish above, so nothing piles up; only the cull and draw are left out)
+			int columns = drawEnabled ? this.packFrames(clip, width, height, rd) : 0;
 			LodMesh mesh = this.mesh;
 			if (columns > 0 && mesh != null) {
 				boolean gbuffer = false;
