@@ -1,7 +1,5 @@
 package mcopt.metal.lod;
 
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -378,8 +376,11 @@ public final class LodRemote {
 			int[] st = new int[1024];
 			Path file = stampFile(s.field, r);
 			if (Files.isRegularFile(file)) {
-				try (DataInputStream in = new DataInputStream(Files.newInputStream(file))) {
-					for (int i = 0; i < 1024; i++) st[i] = in.readInt();
+				try {
+					// (one read: through a DataInputStream it was 1024 of 4 bytes, on the render thread)
+					byte[] b = Files.readAllBytes(file);
+					if (b.length != 4096) throw new IOException("a stamp file of " + b.length + " bytes");
+					java.nio.ByteBuffer.wrap(b).asIntBuffer().get(st);   // (big-endian, as DataOutputStream wrote them)
 				} catch (IOException e) {
 					java.util.Arrays.fill(st, 0);
 				}
@@ -392,7 +393,17 @@ public final class LodRemote {
 		return f.cache.resolve("chunks").resolve("r." + (int) (region >> 32) + "." + (int) region + ".st");
 	}
 
-	/** Every 10 s (or now): the regions whose times changed, to the cache. */
+	/**
+	 * The stamp files' writes, on one thread in order (a region's newer times land after its older ones): each was 1024 writes of
+	 * 4 bytes, a mkdirs and a rename on the render thread, for every region the server's chunks changed, every 10 s.
+	 */
+	private static final java.util.concurrent.ExecutorService STAMP_IO = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+		Thread t = new Thread(r, "mcopt-lod-stamps");
+		t.setDaemon(true);
+		return t;
+	});
+
+	/** Every 10 s (or now: written before this returns, at most 2 s): the regions whose times changed, to the cache. */
 	private static void saveStamps(Session s, boolean now) {
 		if (s.stampsDirty.isEmpty() || !now && System.nanoTime() - s.lastStampSave < 10_000_000_000L) return;
 		s.lastStampSave = System.nanoTime();
@@ -401,16 +412,27 @@ public final class LodRemote {
 			it.remove();
 			int[] st = s.stamps.get(region);
 			if (st == null) continue;
+			byte[] b = new byte[4096];
+			java.nio.ByteBuffer.wrap(b).asIntBuffer().put(st);
 			Path file = stampFile(s.field, region);
-			try {
-				Files.createDirectories(file.getParent());
-				Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
-				try (DataOutputStream out = new DataOutputStream(Files.newOutputStream(tmp))) {
-					for (int v : st) out.writeInt(v);
+			STAMP_IO.execute(() -> {
+				try {
+					Files.createDirectories(file.getParent());
+					Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
+					Files.write(tmp, b);
+					Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+				} catch (IOException e) {
+					System.out.println("mcopt-lod: can't save " + file + ": " + e);
 				}
-				Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
-			} catch (IOException e) {
-				System.out.println("mcopt-lod: can't save " + file + ": " + e);
+			});
+		}
+		if (now) {
+			try {
+				STAMP_IO.submit(() -> {}).get(2, java.util.concurrent.TimeUnit.SECONDS);
+			} catch (java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException e) {
+				System.out.println("mcopt-lod: chunk stamps not all saved: " + e);
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
 			}
 		}
 	}
