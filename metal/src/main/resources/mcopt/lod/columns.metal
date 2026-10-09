@@ -1957,6 +1957,12 @@ static inline void meshCullBlock(constant MeshFrame& f, device const uint4* tabl
         if (nx * nx + nz * nz > pk->liveFar * pk->liveFar) return;
     }
     if (f.opts.x != 0 && ((f.opts.x >> L) & 1) == 0) return;
+    if (MODE == 0) {
+        // a cheap reject before the level choice, the table walk and the header read: the block's column at every height a
+        // word can hold, wholly outside a side of the view (the frustum tests below, on boxes inside this one, fail too)
+        float ex0 = float((bx * B << L) - f.origin.x) - f.cam.x, ez0 = float((bz * B << L) - f.origin.z) - f.cam.z, es = float(B << L);
+        if (!meshInFrustum(f, float3(ex0, float(-512 - f.origin.y) - f.cam.y, ez0), float3(ex0 + es, float(65535 - 512 - f.origin.y) - f.cam.y, ez0 + es))) return;
+    }
     // opts.w: the harness's stand-in for the real terrain (level 0's blocks where the real terrain draws, nothing else)
     bool fake = f.opts.w != 0;
     // the real terrain as an occluder (horizon bit 16): level 0's blocks the real terrain draws (the hand-off mask) raise the

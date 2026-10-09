@@ -40,13 +40,43 @@ final class LodPalette {
 		synchronized (LodPalette.class) {
 			id = IDS.get(state);
 			if (id != null) return id;
+			// a state that looks exactly like another of its block (leaves' distance and persistence, a waterlogged copy, a
+			// fence's connections...) shares its number: the 1023 numbers go to what looks different, not to every state
+			String look = lookKey(state);
+			Integer same = look == null ? null : BY_LOOK.get(look);
+			if (same != null) {
+				IDS.put(state, same);
+				return same;
+			}
 			int n = NEXT.get();
-			if (n >= MAX) return 0;
+			if (n >= MAX) {
+				if (!fullLogged) {
+					fullLogged = true;
+					System.out.println("mcopt-lod: the far terrain's block palette is full (" + (MAX - 1) + " looks): blocks met from now on are drawn with flat colors");
+				}
+				return 0;
+			}
 			NEXT.incrementAndGet();
 			write(state, n);
 			STATES.put(n, state);
 			IDS.put(state, n);
+			if (look != null) BY_LOOK.put(look, n);
 			return n;
+		}
+	}
+
+	/** Numbers by look: a block and everything its palette entry holds (null when the look can't be had yet). */
+	private static final ConcurrentHashMap<String, Integer> BY_LOOK = new ConcurrentHashMap<>();
+	private static boolean fullLogged;
+
+	private static @org.jspecify.annotations.Nullable String lookKey(BlockState state) {
+		try {
+			LodColors.Look l = LodColors.look(state);
+			return System.identityHashCode(state.getBlock()) + "/" + state.getBlock().getDescriptionId() + "/" + java.util.Arrays.toString(l.topUv()) + "/"
+				+ java.util.Arrays.toString(l.sideUv()) + "/" + l.top() + "/" + l.side() + "/" + java.util.Arrays.toString(l.profile()) + "/" + l.topTint() + "/"
+				+ l.sideTint() + "/" + l.constant() + "/" + l.cross();
+		} catch (RuntimeException e) {
+			return null;
 		}
 	}
 

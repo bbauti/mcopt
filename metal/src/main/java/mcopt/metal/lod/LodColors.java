@@ -63,8 +63,65 @@ final class LodColors {
 		} catch (RuntimeException e) {
 			l = FALLBACK;
 		}
+		l = override(state, l);
 		LOOKS.put(state, l);
 		return l;
+	}
+
+	/**
+	 * Colors set for blocks by id, over what their textures give (for modded blocks whose models the averaging can't read:
+	 * dynamic or connected textures): {top, side} RGB, -1 keeping the computed one. An override is the color as drawn, untinted.
+	 * From config/mcopt-lod-colors.properties (modid:block=RRGGBB or modid:block=RRGGBB,RRGGBB for top and side) and
+	 * McoptFarTerrain.setBlockColor.
+	 */
+	private static final ConcurrentHashMap<String, int[]> OVERRIDES = new ConcurrentHashMap<>(loadOverrides());
+
+	private static Look override(BlockState state, Look l) {
+		if (OVERRIDES.isEmpty()) return l;
+		int[] o = OVERRIDES.get(net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString());
+		if (o == null) return l;
+		int top = o[0] >= 0 ? o[0] : l.top(), side = o[1] >= 0 ? o[1] : l.side();
+		return new Look(top, side, o[0] >= 0 ? TINT_NONE : l.topTint(), o[1] >= 0 ? TINT_NONE : l.sideTint(), l.constant(), l.topUv(), l.sideUv(), l.cross(),
+			l.profile());
+	}
+
+	/** A block's colors from now on (tiles already made keep theirs until made again); -1 keeps the computed color. */
+	static void setOverride(String blockId, int top, int side) {
+		String id = blockId.contains(":") ? blockId : "minecraft:" + blockId;
+		OVERRIDES.put(id, new int[] {top < 0 ? -1 : top & 0xFFFFFF, side < 0 ? -1 : side & 0xFFFFFF});
+		LOOKS.keySet().removeIf(s -> net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(s.getBlock()).toString().equals(id));
+	}
+
+	private static java.util.Map<String, int[]> loadOverrides() {
+		java.util.Map<String, int[]> out = new java.util.HashMap<>();
+		java.nio.file.Path f = net.fabricmc.loader.api.FabricLoader.getInstance().getConfigDir().resolve("mcopt-lod-colors.properties");
+		if (!java.nio.file.Files.isRegularFile(f)) return out;
+		java.util.Properties p = new java.util.Properties();
+		try (var r = java.nio.file.Files.newBufferedReader(f)) {
+			p.load(r);
+		} catch (java.io.IOException e) {
+			System.out.println("mcopt-lod: can't read " + f + ": " + e);
+			return out;
+		}
+		for (String k : p.stringPropertyNames()) {
+			String[] v = p.getProperty(k).split(",");
+			try {
+				int top = rgb(v[0]), side = v.length > 1 ? rgb(v[1]) : top;
+				out.put(k.contains(":") ? k.strip() : "minecraft:" + k.strip(), new int[] {top, side});
+			} catch (NumberFormatException e) {
+				System.out.println("mcopt-lod: " + f.getFileName() + ": " + k + " isn't RRGGBB or RRGGBB,RRGGBB (ignored)");
+			}
+		}
+		System.out.println("mcopt-lod: " + out.size() + " block colors from " + f.getFileName());
+		return out;
+	}
+
+	private static int rgb(String s) {
+		String t = s.strip();
+		if (t.equals("-") || t.isEmpty()) return -1;
+		if (t.startsWith("#")) t = t.substring(1);
+		if (t.startsWith("0x") || t.startsWith("0X")) t = t.substring(2);
+		return Integer.parseInt(t, 16) & 0xFFFFFF;
 	}
 
 	/** The color of a block's top seen at a column in biome b. */

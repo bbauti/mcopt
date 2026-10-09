@@ -33,7 +33,43 @@ Shows an fps counter in the top-left corner (hidden with F1 or F3; fn + F1 or fn
 - The perf profile is on by default.
 - `profile=none` in `~/Library/Application Support/minecraft/config/mcopt.properties` (in Prism, the instance's
   `minecraft/config` folder) turns it off. The first launch writes that file.
-- Far terrain is an experimental opt-in: `mcopt.lod=true` in the same file, for Macs with 10 or more GPU cores.
+- Far terrain is an experimental opt-in: `mcopt.lod=true` in the same file. See [Far terrain](#far-terrain).
+
+## Far terrain
+
+mcopt's LODs: terrain past the render distance, out to 512 chunks by default, drawn by its Metal renderer.
+
+- **Singleplayer:** generated ahead from the world's own noise (its density functions, biomes, surface rules and trees,
+  datapacks included), so new terrain is there before you reach it; the chunks you load replace the estimate with what's
+  really there.
+- **Servers, flat and modded generators, the Nether:** built from the chunks the client receives (under the Nether's roof)
+  and kept on disk per server and dimension: what you've seen once is there next time.
+- **Kept on disk:** `mcopt-lod/` in the game folder, compressed. Places you've seen from close by stay when you see them
+  from farther away. Saved every few seconds and when you leave the world.
+- **F6** hides and shows it while playing.
+
+Settings, in `config/mcopt.properties` (restart to apply):
+
+| Setting | Default | |
+|---|---|---|
+| `mcopt.lod` | `false` | Far terrain on |
+| `mcopt.lod.quality` | `auto` | `low`, `medium`, `high`, `ultra`; `auto` picks `low` under 10 GPU cores, `high` up to 29, `ultra` from 30 |
+| `mcopt.lod.radius` | by quality (256 / 384 / 512 / 1024) | Reach in chunks |
+| `mcopt.lod.multiplayer` | `true` | Far terrain on servers |
+| `mcopt.lod.chunksOnly` | `true` | Far terrain where it can't be generated (servers, flat and modded generators, the Nether) |
+| `mcopt.lod.ceiling` | `true` | The Nether seen under its roof |
+| `mcopt.lod.dimensions` / `mcopt.lod.excludeDimensions` | (all) | Comma-separated dimension ids, e.g. `minecraft:the_end` |
+| `mcopt.lod.toggleKey` | `F6` | `F1`-`F12`, or `none` |
+| `mcopt.lod.threads` | cores - 4 | Generation threads |
+| `mcopt.lod.plants`, `mcopt.lod.trees`, `mcopt.lod.textures` | by quality / `true` | Detail on the nearest far terrain |
+| `mcopt.lod.cache` | `true` | The disk cache (`mcopt.lod.cacheDir` moves it) |
+
+Modded blocks get their colors from their own textures. For blocks whose models can't be read that way (dynamic or
+connected textures), `config/mcopt-lod-colors.properties` sets them: `modid:block=RRGGBB` or `modid:block=RRGGBB,RRGGBB`
+(top, sides).
+
+For mod developers: `mcopt.api.McoptFarTerrain` (is it drawing, its reach, hide/show, re-read a chunk, set a block's
+colors). Safe to call with far terrain off.
 
 ## Numbers
 
@@ -56,7 +92,9 @@ For the most fps: Options > Video Settings, VSync off and Max Framerate Unlimite
   `mcopt.metal=false` to `config/mcopt.properties` (or launch with `-Dmcopt.metal=false`).
 - Distant Horizons runs on the Metal renderer next to mcopt's own terrain. With DH set to its OpenGL renderer, mcopt
   switches its renderer off for it.
-- Far terrain is experimental. On Macs with fewer than 10 GPU cores, it costs most of the fps.
+- Far terrain is experimental. On Macs with fewer than 10 GPU cores, `quality=auto` picks `low`; it still costs fps
+  there.
+- On a server, far terrain only shows what you've already seen there (the client has no seed to generate from).
 
 ## Plans
 

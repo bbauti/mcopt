@@ -161,6 +161,72 @@ public final class Lod {
 		}
 	}
 
+	/** Whether far terrain draws (McoptFarTerrain.setDrawEnabled, the toggle key); off, it keeps generating but isn't drawn. */
+	private static volatile boolean drawEnabled = true;
+	/** Chunks other mods asked to be read again (McoptFarTerrain.refreshChunk), as ChunkPos.pack keys; taken on the render thread. */
+	private static final java.util.concurrent.ConcurrentLinkedQueue<Long> refreshQueue = new java.util.concurrent.ConcurrentLinkedQueue<>();
+	/**
+	 * -Dmcopt.lod.toggleKey=KEY: a key that hides and shows far terrain while playing (F1-F12, or none); default F6 (no
+	 * vanilla binding). Read while no screen is open.
+	 */
+	private static final int TOGGLE_KEY = toggleKeyCode(System.getProperty("mcopt.lod.toggleKey", "F6"));
+	private boolean toggleWasDown;
+
+	private static int toggleKeyCode(String name) {
+		String n = name.strip().toUpperCase(java.util.Locale.ROOT);
+		if (n.matches("F([1-9]|1[0-2])")) {
+			try {
+				return com.mojang.blaze3d.platform.InputConstants.class.getField("KEY_" + n).getInt(null);
+			} catch (ReflectiveOperationException e) {
+				return -1;
+			}
+		}
+		if (!n.equals("NONE") && !n.isEmpty()) System.out.println("mcopt-lod: toggleKey " + name + " isn't F1-F12 or none: no toggle key");
+		return -1;
+	}
+
+	private void toggleKey(Minecraft mc) {
+		if (TOGGLE_KEY < 0 || mc.gui.screen() != null) {
+			this.toggleWasDown = false;
+			return;
+		}
+		boolean down = com.mojang.blaze3d.platform.InputConstants.isKeyDown(TOGGLE_KEY);
+		if (down && !this.toggleWasDown) {
+			drawEnabled = !drawEnabled;
+			System.out.println("mcopt-lod: far terrain " + (drawEnabled ? "shown" : "hidden") + " (toggle key)");
+		}
+		this.toggleWasDown = down;
+	}
+
+	public static void setDrawEnabled(boolean on) {
+		drawEnabled = on;
+	}
+
+	public static boolean drawEnabled() {
+		return drawEnabled;
+	}
+
+	/** Any thread: the chunk is read into the far terrain again at the next frame (if the client has it). */
+	public static void refreshChunk(int chunkX, int chunkZ) {
+		if (instance == null) return;
+		if (refreshQueue.size() < 65536) refreshQueue.add(net.minecraft.world.level.ChunkPos.pack(chunkX, chunkZ));
+	}
+
+	/** A block's far-terrain colors from now on (McoptFarTerrain.setBlockColor). */
+	public static void setBlockColor(String blockId, int topRgb, int sideRgb) {
+		LodColors.setOverride(blockId, topRgb, sideRgb);
+	}
+
+	/** Render thread: the chunks McoptFarTerrain.refreshChunk asked for. */
+	private void refreshChunks(Minecraft mc) {
+		Long k;
+		while ((k = refreshQueue.poll()) != null) {
+			if (mc.level == null || this.field == null) continue;
+			LevelChunk c = mc.level.getChunkSource().getChunk(net.minecraft.world.level.ChunkPos.getX(k), net.minecraft.world.level.ChunkPos.getZ(k), false);
+			if (c != null && LodConfig.CHUNKS) this.field.chunk(c);
+		}
+	}
+
 	/** Reach in blocks while far terrain draws in the current level, else 0 (the camera's far plane and the fog follow it). */
 	public static float activeReach() {
 		return activeReach;
@@ -298,12 +364,15 @@ public final class Lod {
 	private void begin(CameraRenderState camera) {
 		Minecraft mc = Minecraft.getInstance();
 		this.ensureWorld(mc);
-		if (this.field == null) {
+		this.toggleKey(mc);
+		if (this.field == null || !drawEnabled) {
+			// (hidden: the fog and far plane are the game's; the field keeps up with the camera, so showing it again is instant)
 			activeReach = 0;
 			shadeReach(0);
-			return;
+			if (this.field == null) return;
+		} else {
+			activeReach = (float) LodConfig.reachBlocks();
 		}
-		activeReach = (float) LodConfig.reachBlocks();
 		shadeReach(activeReach);
 		this.camX = camera.pos.x;
 		this.camY = camera.pos.y;
@@ -434,6 +503,7 @@ public final class Lod {
 		w.frame = this.frames;
 		while (!this.releaseLater.isEmpty() && this.frames - this.releaseLater.peek()[0] >= RING) LodNative.release(this.releaseLater.poll()[1]);
 		w.integrate();
+		if (!refreshQueue.isEmpty()) this.refreshChunks(mc);
 		if (LodMesh.REAL_OCC && !this.edited.isEmpty()) this.resnapshot(mc, start);
 		long t1 = System.nanoTime();
 		this.partNanos[0] += t1 - start;
@@ -455,7 +525,7 @@ public final class Lod {
 		}
 		this.partNanos[2] += System.nanoTime() - t2;
 		boolean probeOn = this.probe(start);
-		if (!LodConfig.DRAW || !probeOn || !MetalBridge.inRenderPass(this.encoder)) {
+		if (!LodConfig.DRAW || !drawEnabled || !probeOn || !MetalBridge.inRenderPass(this.encoder)) {
 			this.statCpuNanos += System.nanoTime() - start;
 			this.sample(w, start);
 			if (LodConfig.STATS) this.stats(w);

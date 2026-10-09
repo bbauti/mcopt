@@ -35,6 +35,9 @@ To check it's working: press F3 (fn + F3 on a Mac keyboard); the bottom right sa
 
 The first launch writes config/mcopt.properties in your game folder (in Prism, the instance's minecraft/config
 folder); profile=none there turns the perf profile off.
+Far terrain (experimental): mcopt.lod=true in that file. mcopt.lod.quality=auto|low|medium|high|ultra sets its cost
+(auto picks by your Mac's GPU). It works in singleplayer (generated ahead) and on servers (from what you've seen there,
+kept on disk). F6 hides and shows it.
 To switch mcopt's renderer off, add mcopt.metal=false to that file (or launch with -Dmcopt.metal=false).
 
 Licence: Apache-2.0 (LICENSE, NOTICE).
