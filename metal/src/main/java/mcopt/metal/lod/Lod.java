@@ -354,7 +354,12 @@ public final class Lod {
 	public static void beginLevel(CameraRenderState camera) {
 		Lod l = get();
 		if (l == null) return;
-		l.begin(camera);
+		if (mcopt.metal.FrameLog.ON) mcopt.metal.FrameLog.begin(mcopt.metal.FrameLog.LOD);
+		try {
+			l.begin(camera);
+		} finally {
+			if (mcopt.metal.FrameLog.ON) mcopt.metal.FrameLog.end(mcopt.metal.FrameLog.LOD);
+		}
 	}
 
 	/** End of the level's opaque phase (after the real terrain and solid features): the far terrain. */
@@ -362,6 +367,7 @@ public final class Lod {
 		Lod l = instance;
 		if (l == null || !l.haveFrame) return;
 		l.haveFrame = false;
+		if (mcopt.metal.FrameLog.ON) mcopt.metal.FrameLog.begin(mcopt.metal.FrameLog.LOD);
 		try {
 			l.draw();
 		} catch (RuntimeException e) {
@@ -370,6 +376,8 @@ public final class Lod {
 			activeReach = 0;
 			System.out.println("mcopt-lod: far terrain stopped: " + e);
 			e.printStackTrace(System.out);
+		} finally {
+			if (mcopt.metal.FrameLog.ON) mcopt.metal.FrameLog.end(mcopt.metal.FrameLog.LOD);
 		}
 	}
 
@@ -1559,7 +1567,12 @@ public final class Lod {
 		Lod l = instance;
 		if (l == null) prewarm();
 		if (l == null || l.field == null || !LodConfig.CHUNKS || chunk == null) return;
-		l.field.chunk(chunk);
+		if (mcopt.metal.FrameLog.ON) mcopt.metal.FrameLog.begin(mcopt.metal.FrameLog.LOD);
+		try {
+			l.field.chunk(chunk);
+		} finally {
+			if (mcopt.metal.FrameLog.ON) mcopt.metal.FrameLog.end(mcopt.metal.FrameLog.LOD);
+		}
 	}
 
 	/**

@@ -13,7 +13,8 @@ import java.util.List;
  * Measurement only (-Dmcopt.own.int.frameLog=true): one row per submitted frame, written to framelog-<launch time>.csv in the working directory
  * when the game exits. Per frame: when it ended (epoch ms), its wall time (submit to submit), the render thread's wait time per site
  * (WaitStats' sites: in-flight limit, fence, nextDrawable, pacer, drain), time in timed regions of the render thread (client tick,
- * frame extract, frame render, vanilla's section scheduling, translucent resort scheduling, our terrain's per-frame event apply),
+ * frame extract, frame render, vanilla's section scheduling, translucent resort scheduling, our terrain's per-frame event apply,
+ * texture ticks, the far terrain's frame and chunk snapshots: lodUs),
  * the render thread's CPU time and allocation, GC collections and their time, our terrain's events applied (publish, resort,
  * release, clear), and the submit index (GpuTimes' key, for the GPU span with -Dmcopt.metal.gpuTimes). Render thread only; fixed
  * arrays, nothing allocated per frame.
@@ -25,8 +26,8 @@ public final class FrameLog {
 	 * framelog-<time>-flags.txt with the mcopt.* options it ran with (the A/B runs' only record of which was which).
 	 */
 	private static final String STAMP = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
-	public static final int TICK = 0, EXTRACT = 1, RENDER = 2, COMPILE = 3, RESORT_SCHED = 4, OWN_BEGIN = 5, TEXTURES = 6;
-	private static final String[] REGIONS = {"tickUs", "extractUs", "renderUs", "compileUs", "resortSchedUs", "ownBeginUs", "texTickUs"};
+	public static final int TICK = 0, EXTRACT = 1, RENDER = 2, COMPILE = 3, RESORT_SCHED = 4, OWN_BEGIN = 5, TEXTURES = 6, LOD = 7;
+	private static final String[] REGIONS = {"tickUs", "extractUs", "renderUs", "compileUs", "resortSchedUs", "ownBeginUs", "texTickUs", "lodUs"};
 	public static final int PUBLISH = 0, RESORT = 1, RELEASE = 2, CLEAR = 3;
 	private static final String[] EVENTS = {"publish", "resort", "release", "clear"};
 	private static final String[] WAITS = {"inflightUs", "fenceUs", "drawableUs", "paceUs", "drainUs"};
@@ -38,11 +39,11 @@ public final class FrameLog {
 	private static final long[] endMs = ON ? new long[CAP] : null;
 	private static final int[] wallUs = ON ? new int[CAP] : null, cpuUs = ON ? new int[CAP] : null, allocKb = ON ? new int[CAP] : null;
 	private static final int[] gcCount = ON ? new int[CAP] : null, gcMs = ON ? new int[CAP] : null, submit = ON ? new int[CAP] : null;
-	private static final int[][] waitUs = ON ? new int[5][CAP] : null, regionUs = ON ? new int[7][CAP] : null, events = ON ? new int[4][CAP] : null;
+	private static final int[][] waitUs = ON ? new int[5][CAP] : null, regionUs = ON ? new int[8][CAP] : null, events = ON ? new int[4][CAP] : null;
 	private static final int[][] ops = ON ? new int[12][CAP] : null;
 	private static final long[] curOps = new long[12];
 
-	private static final long[] curWait = new long[5], curRegion = new long[7], regionStart = new long[7];
+	private static final long[] curWait = new long[5], curRegion = new long[8], regionStart = new long[8];
 	private static final int[] curEvents = new int[4];
 	private static final java.lang.management.ThreadMXBean THREADS = ManagementFactory.getThreadMXBean();
 	private static final List<GarbageCollectorMXBean> GCS = ManagementFactory.getGarbageCollectorMXBeans();
@@ -120,7 +121,7 @@ public final class FrameLog {
 			gcMs[i] = lastGcCount < 0 ? 0 : (int) (gct - lastGcMs);
 			submit[i] = (int) submitIndex;
 			for (int s = 0; s < 5; s++) waitUs[s][i] = (int) (curWait[s] / 1000);
-			for (int r = 0; r < 7; r++) regionUs[r][i] = (int) (curRegion[r] / 1000);
+			for (int r = 0; r < 8; r++) regionUs[r][i] = (int) (curRegion[r] / 1000);
 			for (int e = 0; e < 4; e++) events[e][i] = curEvents[e];
 			try (org.lwjgl.system.MemoryStack stack = org.lwjgl.system.MemoryStack.stackPush()) {
 				long c = stack.ncalloc(4, 3, 4);
@@ -225,7 +226,7 @@ public final class FrameLog {
 				b.append(endMs[i]).append(',').append(submit[i]).append(',').append(wallUs[i]).append(',').append(cpuUs[i]).append(',').append(allocKb[i])
 					.append(',').append(gcCount[i]).append(',').append(gcMs[i]);
 				for (int s = 0; s < 5; s++) b.append(',').append(waitUs[s][i]);
-				for (int r = 0; r < 7; r++) b.append(',').append(regionUs[r][i]);
+				for (int r = 0; r < 8; r++) b.append(',').append(regionUs[r][i]);
 				for (int e = 0; e < 4; e++) b.append(',').append(events[e][i]);
 				for (int o = 0; o < 12; o++) b.append(',').append(ops[o][i]);
 				w.write(b.append('\n').toString());
