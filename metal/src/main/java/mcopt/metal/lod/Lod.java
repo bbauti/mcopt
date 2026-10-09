@@ -395,8 +395,26 @@ public final class Lod {
 		}
 	}
 
+	/** The block models the palette's entries were read from (a new set: the resources were reloaded). */
+	private @Nullable Object models;
+
 	private void begin(CameraRenderState camera) {
 		Minecraft mc = Minecraft.getInstance();
+		Object models;
+		try {
+			models = mc.getModelManager().getBlockStateModelSet();
+		} catch (NullPointerException e) {
+			models = this.models;   // (not loaded yet)
+		}
+		if (models != this.models) {
+			if (this.models != null) {
+				// a resource pack changed: the sprites moved in the atlas, the averages changed
+				LodColors.reloaded();
+				LodPalette.rewrite();
+				System.out.println("mcopt-lod: resources reloaded: block textures read again (far terrain made before keeps its colors)");
+			}
+			this.models = models;
+		}
 		this.ensureWorld(mc);
 		this.toggleKey(mc);
 		if (this.field == null || !drawEnabled) {

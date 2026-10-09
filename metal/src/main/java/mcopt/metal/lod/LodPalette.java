@@ -80,6 +80,15 @@ final class LodPalette {
 		}
 	}
 
+	/**
+	 * After a resource reload: every number's entry written again from its state's new look (the atlas moved its sprites).
+	 * Numbers stay as they are (cells name them).
+	 */
+	static synchronized void rewrite() {
+		if (table == 0) return;
+		STATES.forEach((n, state) -> write(state, n));
+	}
+
 	private static void write(BlockState state, int n) {
 		if (table == 0) return;
 		LodColors.Look l = LodColors.look(state);

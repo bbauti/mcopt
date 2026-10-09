@@ -85,6 +85,13 @@ final class LodColors {
 			l.profile());
 	}
 
+	/** The resources were reloaded (a resource pack changed): every look is read again from the new models and textures. */
+	static void reloaded() {
+		LOOKS.clear();
+		TEXTURES.clear();
+		PROFILES.clear();
+	}
+
 	/** A block's colors from now on (tiles already made keep theirs until made again); -1 keeps the computed color. */
 	static void setOverride(String blockId, int top, int side) {
 		String id = blockId.contains(":") ? blockId : "minecraft:" + blockId;
