@@ -167,13 +167,14 @@ final class LodVoxyImport implements Runnable {
 		}
 	}
 
-	/** What the import depends on: Voxy's files, their sizes and times. */
+	/** What the import depends on: Voxy's data files (tables, logs, MANIFEST), their sizes and times. */
 	private static String signature(Path dir) throws IOException {
 		StringBuilder sb = new StringBuilder();
 		try (var s = Files.list(dir)) {
 			for (Path p : s.sorted().toList()) {
 				String n = p.getFileName().toString();
-				if (n.equals("LOCK") || n.startsWith("LOG")) continue;
+				// (what RocksDB rewrites on every open, data changed or not: the lock, its logs, its options, its identity)
+				if (n.equals("LOCK") || n.startsWith("LOG") || n.startsWith("OPTIONS-") || n.equals("IDENTITY") || n.equals("CURRENT")) continue;
 				sb.append(n).append(':').append(Files.size(p)).append(':').append(Files.getLastModifiedTime(p).toMillis()).append(';');
 			}
 		}
@@ -204,8 +205,14 @@ final class LodVoxyImport implements Runnable {
 			this.fallbackBiome, states, biomeIds);
 		// the finest level's sections, by column of sections (32 x 32 blocks)
 		Map<Long, List<long[]>> columns = new HashMap<>();
-		// (level 0 only: the key's top four bits)
-		var all = db.family("world_sections", k -> k.length == 8 && (k[0] & 0xF0) == 0);
+		// level 0 only (the key's top four bits), within the reach (its x and z): what's kept in memory is only that
+		double reach = LodConfig.reachBlocks() + 64, camX = this.field.camX, camZ = this.field.camZ;
+		var all = db.family("world_sections", k -> {
+			if (k.length != 8 || (k[0] & 0xF0) != 0) return false;
+			long key = ByteBuffer.wrap(k).getLong();
+			int sx = (int) (key << 36 >> 40), sz = (int) (key << 12 >> 40);
+			return Math.hypot(sx * 32 + 16 - camX, sz * 32 + 16 - camZ) <= reach;
+		});
 		for (LodRocks.Key k : all.keySet()) {
 			byte[] b = k.bytes();
 			if (b.length != 8) continue;
@@ -214,7 +221,6 @@ final class LodVoxyImport implements Runnable {
 			int sx = (int) (key << 36 >> 40), sy = (int) (key << 4 >> 56), sz = (int) (key << 12 >> 40);
 			columns.computeIfAbsent((long) sx << 32 | sz & 0xFFFFFFFFL, c -> new ArrayList<>()).add(new long[] {key, sy});
 		}
-		double reach = LodConfig.reachBlocks() + 64;
 		List<Long> order = new ArrayList<>(columns.keySet());
 		double cx = this.field.camX, cz = this.field.camZ;
 		order.sort(java.util.Comparator.comparingDouble(c -> Math.hypot((int) (c >> 32) * 32 + 16 - cx, (int) (long) c * 32 + 16 - cz)));
