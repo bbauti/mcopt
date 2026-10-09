@@ -14,7 +14,8 @@ import java.util.List;
  * when the game exits. Per frame: when it ended (epoch ms), its wall time (submit to submit), the render thread's wait time per site
  * (WaitStats' sites: in-flight limit, fence, nextDrawable, pacer, drain), time in timed regions of the render thread (client tick,
  * frame extract, frame render, vanilla's section scheduling, translucent resort scheduling, our terrain's per-frame event apply,
- * texture ticks, the far terrain's frame and chunk snapshots: lodUs),
+ * texture ticks, the far terrain's frame and chunk snapshots: lodUs) and the bytes the render thread allocated in each (the
+ * columns at the end, tickB...: where the allocation that drives the young collections comes from),
  * the render thread's CPU time and allocation, GC collections and their time, our terrain's events applied (publish, resort,
  * release, clear), and the submit index (GpuTimes' key, for the GPU span with -Dmcopt.metal.gpuTimes). Render thread only; fixed
  * arrays, nothing allocated per frame.
@@ -40,12 +41,15 @@ public final class FrameLog {
 	private static final int[] wallUs = ON ? new int[CAP] : null, cpuUs = ON ? new int[CAP] : null, allocKb = ON ? new int[CAP] : null;
 	private static final int[] gcCount = ON ? new int[CAP] : null, gcMs = ON ? new int[CAP] : null, submit = ON ? new int[CAP] : null;
 	private static final int[][] waitUs = ON ? new int[5][CAP] : null, regionUs = ON ? new int[8][CAP] : null, events = ON ? new int[4][CAP] : null;
+	private static final int[][] regionB = ON ? new int[8][CAP] : null;
 	private static final int[][] ops = ON ? new int[12][CAP] : null;
 	private static final long[] curOps = new long[12];
 
 	private static final long[] curWait = new long[5], curRegion = new long[8], regionStart = new long[8];
+	private static final long[] curRegionB = new long[8], regionStartB = new long[8];
 	private static final int[] curEvents = new int[4];
 	private static final java.lang.management.ThreadMXBean THREADS = ManagementFactory.getThreadMXBean();
+	private static final com.sun.management.ThreadMXBean ALLOC = THREADS instanceof com.sun.management.ThreadMXBean t ? t : null;
 	private static final List<GarbageCollectorMXBean> GCS = ManagementFactory.getGarbageCollectorMXBeans();
 	private static int n;
 	private static long lastNs, lastCpu = -1, lastAlloc = -1, lastGcCount = -1, lastGcMs;
@@ -67,14 +71,21 @@ public final class FrameLog {
 
 	/** Start of a timed region on the render thread (nesting of the same region is not supported: the outer one counts). */
 	public static void begin(int region) {
-		if (regionStart[region] == 0) regionStart[region] = System.nanoTime();
+		if (regionStart[region] != 0) return;
+		regionStart[region] = System.nanoTime();
+		regionStartB[region] = allocated();
 	}
 
 	public static void end(int region) {
 		long s = regionStart[region];
 		if (s == 0) return;
 		curRegion[region] += System.nanoTime() - s;
+		curRegionB[region] += allocated() - regionStartB[region];
 		regionStart[region] = 0;
+	}
+
+	private static long allocated() {
+		return ALLOC != null ? ALLOC.getCurrentThreadAllocatedBytes() : 0;
 	}
 
 	public static void event(int kind) {
@@ -104,7 +115,7 @@ public final class FrameLog {
 		long now = System.nanoTime();
 		if (renderThread == null) renderThread = Thread.currentThread();
 		long cpu = THREADS.getCurrentThreadCpuTime();
-		long alloc = THREADS instanceof com.sun.management.ThreadMXBean t ? t.getCurrentThreadAllocatedBytes() : 0;
+		long alloc = allocated();
 		long gcc = 0, gct = 0;
 		for (int i = 0, k = GCS.size(); i < k; i++) {
 			GarbageCollectorMXBean g = GCS.get(i);
@@ -122,6 +133,7 @@ public final class FrameLog {
 			submit[i] = (int) submitIndex;
 			for (int s = 0; s < 5; s++) waitUs[s][i] = (int) (curWait[s] / 1000);
 			for (int r = 0; r < 8; r++) regionUs[r][i] = (int) (curRegion[r] / 1000);
+			for (int r = 0; r < 8; r++) regionB[r][i] = (int) Math.min(Integer.MAX_VALUE, curRegionB[r]);
 			for (int e = 0; e < 4; e++) events[e][i] = curEvents[e];
 			try (org.lwjgl.system.MemoryStack stack = org.lwjgl.system.MemoryStack.stackPush()) {
 				long c = stack.ncalloc(4, 3, 4);
@@ -132,6 +144,7 @@ public final class FrameLog {
 		}
 		java.util.Arrays.fill(curWait, 0);
 		java.util.Arrays.fill(curRegion, 0);
+		java.util.Arrays.fill(curRegionB, 0);
 		java.util.Arrays.fill(curEvents, 0);
 		java.util.Arrays.fill(curOps, 0);
 		lastNs = now;
@@ -219,6 +232,7 @@ public final class FrameLog {
 			for (String s : REGIONS) h.append(',').append(s);
 			for (String s : EVENTS) h.append(',').append(s);
 			for (String s : OPS) h.append(',').append(s);
+			for (String s : REGIONS) h.append(',').append(s, 0, s.length() - 2).append('B');
 			w.write(h.append('\n').toString());
 			StringBuilder b = new StringBuilder(256);
 			for (int i = 0; i < n; i++) {
@@ -229,6 +243,7 @@ public final class FrameLog {
 				for (int r = 0; r < 8; r++) b.append(',').append(regionUs[r][i]);
 				for (int e = 0; e < 4; e++) b.append(',').append(events[e][i]);
 				for (int o = 0; o < 12; o++) b.append(',').append(ops[o][i]);
+				for (int r = 0; r < 8; r++) b.append(',').append(regionB[r][i]);
 				w.write(b.append('\n').toString());
 			}
 		} catch (IOException e) {
