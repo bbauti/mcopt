@@ -1267,19 +1267,47 @@ final class LodField {
 	/** -Dmcopt.lod.saveSeconds=S: how often tiles real chunks changed go back to the disk cache (default 5). */
 	private static final long SAVE_NANOS = (long) (Double.parseDouble(System.getProperty("mcopt.lod.saveSeconds", "5")) * 1e9);
 	private long lastSave = System.nanoTime();
+	/**
+	 * -Dmcopt.lod.saveFrameMs: the render thread's time a frame for a save round's read-backs (0.5 ms). A round used to read back
+	 * every dirty tile in the frame it came due: ~350 after a join at RD 32, 20-40 us each, so a 7-14 ms frame (1-3 ms every 5 s
+	 * while flying). A tile stays in dirtyTiles until it's read back, so beforeRecenter still saves those leaving their window.
+	 */
+	private static final long SAVE_FRAME_NANOS = (long) (Double.parseDouble(System.getProperty("mcopt.lod.saveFrameMs", "0.5")) * 1e6);
+	/**
+	 * The save round under way: the tiles dirty when it came due, read back over the next frames (SAVE_FRAME_NANOS each). A tile
+	 * dirtied again meanwhile is read back once with its newest words; one dirtied after the round started waits for the next.
+	 */
+	private final java.util.ArrayDeque<Long> saveRound = new java.util.ArrayDeque<>();
 
 	/**
-	 * Every few seconds: tiles real chunks changed go back to the disk cache (read back from the clipmap, saved on a worker);
-	 * all: now, on this thread. Returns how many were saved or queued.
+	 * Every few seconds: tiles real chunks changed go back to the disk cache (read back from the clipmap over the next frames, saved
+	 * on a worker); all: every one now, on this thread. Returns how many were saved or queued.
 	 */
 	int saveDirty(boolean all) {
-		if (!LodConfig.DISK_CACHE || this.dirtyTiles.isEmpty() && this.patches.isEmpty()) return 0;
+		if (!LodConfig.DISK_CACHE) return 0;
+		int n = 0;
+		if (all) {
+			this.saveRound.clear();
+			if (this.dirtyTiles.isEmpty() && this.patches.isEmpty()) return 0;
+			n += this.flushPatches(true);
+			for (long key : this.dirtyTiles) n += this.saveTile(key, true) ? 1 : 0;
+			this.dirtyTiles.clear();
+			return n;
+		}
 		long now = System.nanoTime();
-		if (!all && now - this.lastSave < SAVE_NANOS) return 0;
-		this.lastSave = now;
-		int n = this.flushPatches(all);
-		for (long key : this.dirtyTiles) n += this.saveTile(key, all) ? 1 : 0;
-		this.dirtyTiles.clear();
+		if (this.saveRound.isEmpty()) {
+			if (this.dirtyTiles.isEmpty() && this.patches.isEmpty() || now - this.lastSave < SAVE_NANOS) return 0;
+			this.lastSave = now;
+			n += this.flushPatches(false);
+			this.saveRound.addAll(this.dirtyTiles);
+		}
+		while (!this.saveRound.isEmpty()) {
+			long key = this.saveRound.poll();
+			// (saved since: beforeRecenter saves the tiles leaving their window)
+			if (!this.dirtyTiles.remove(key)) continue;
+			n += this.saveTile(key, false) ? 1 : 0;
+			if (System.nanoTime() - now > SAVE_FRAME_NANOS) break;
+		}
 		return n;
 	}
 
