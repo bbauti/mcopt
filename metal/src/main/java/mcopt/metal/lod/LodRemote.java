@@ -40,23 +40,48 @@ public final class LodRemote {
 
 	/** -Dmcopt.lod.server=false: never ask a server for far terrain. */
 	static final boolean ON = Boolean.parseBoolean(System.getProperty("mcopt.lod.server", "true"));
+	/** Most tiles asked and not answered yet: the server works them in order, so the rest wait here, nearest first. */
+	private static final int IN_FLIGHT = 384;
+	/** An ask unanswered this long is taken as dropped, and a tile the server declined is asked again after this (ns). */
+	private static final long TIMEOUT_NS = 60_000_000_000L, RETRY_NS = 20_000_000_000L;
 
 	private static boolean registered;
-	/** Render thread: the field asking, its dimension, and the biomes its tiles name. */
-	private static @Nullable LodField field;
-	private static @Nullable String dimension;
-	private static volatile @Nullable Registry<Biome> biomes;
-	private static volatile @Nullable Holder<Biome> fallbackBiome;
-	/** Tiles to ask for (any thread adds), and those asked and not answered yet. */
-	private static final ConcurrentLinkedQueue<Long> wanted = new ConcurrentLinkedQueue<>();
-	private static final Set<Long> asked = ConcurrentHashMap.newKeySet();
-	/** Saved chunks: regions asked for (this session), and per region the save times of the chunks the cache has. */
-	private static final Set<Long> regionsAsked = ConcurrentHashMap.newKeySet();
-	private static final ConcurrentHashMap<Long, int[]> stamps = new ConcurrentHashMap<>();
-	private static final Set<Long> stampsDirty = ConcurrentHashMap.newKeySet();
 	private static final ConcurrentHashMap<String, BlockState> stateCache = new ConcurrentHashMap<>();
-	private static long lastStampSave = System.nanoTime();
-	static long tilesReceived, chunksReceived, bytesReceived;
+	static final java.util.concurrent.atomic.AtomicLong tilesReceived = new java.util.concurrent.atomic.AtomicLong(),
+		chunksReceived = new java.util.concurrent.atomic.AtomicLong(), bytesReceived = new java.util.concurrent.atomic.AtomicLong();
+
+	/**
+	 * One field's conversation with the server (a dimension, from open to close). Tasks on the workers hold their session, so
+	 * what finishes after the player moved on lands in the old one and goes nowhere.
+	 */
+	private static final class Session {
+		final LodField field;
+		final String dimension;
+		final Registry<Biome> biomes;
+		final Holder<Biome> fallback;
+		/** Tiles to ask for (any thread adds; `queued` dedupes), those asked and not answered (when), and those declined (until when). */
+		final ConcurrentLinkedQueue<Long> wanted = new ConcurrentLinkedQueue<>();
+		final Set<Long> queued = ConcurrentHashMap.newKeySet();
+		final ConcurrentHashMap<Long, Long> asked = new ConcurrentHashMap<>(), retryAt = new ConcurrentHashMap<>();
+		/** Saved chunks: regions asked for, and per region the save times of the chunks the cache has. */
+		final Set<Long> regionsAsked = ConcurrentHashMap.newKeySet();
+		final ConcurrentHashMap<Long, int[]> stamps = new ConcurrentHashMap<>();
+		final Set<Long> stampsDirty = ConcurrentHashMap.newKeySet();
+		long lastStampSave = System.nanoTime(), lastScan, lastHello;
+		/** The Hello went out; the server answered (the next frame scans the resident tiles then). */
+		boolean helloSent, scanNow;
+		volatile boolean closed;
+
+		Session(LodField field, String dimension, Registry<Biome> biomes, Holder<Biome> fallback) {
+			this.field = field;
+			this.dimension = dimension;
+			this.biomes = biomes;
+			this.fallback = fallback;
+		}
+	}
+
+	/** Render thread writes; workers read. */
+	private static volatile @Nullable Session session;
 
 	private LodRemote() {
 	}
@@ -87,63 +112,129 @@ public final class LodRemote {
 	/** Render thread: a field opened on a server; it asks whether the server has far terrain for this dimension. */
 	static void open(LodField f, String dim) {
 		if (!registered) return;
-		reset();
-		if (!ClientPlayNetworking.canSend(LodNet.Hello.TYPE)) return;
+		session = null;
 		Minecraft mc = Minecraft.getInstance();
 		if (mc.level == null) return;
 		Registry<Biome> reg = mc.level.registryAccess().lookupOrThrow(Registries.BIOME);
-		biomes = reg;
-		fallbackBiome = reg.get(Biomes.PLAINS).map(h -> (Holder<Biome>) h).orElse(null);
-		field = f;
-		dimension = dim;
-		ClientPlayNetworking.send(new LodNet.Hello(LodNet.PROTOCOL, dim));
+		Holder<Biome> fallback = reg.get(Biomes.PLAINS).map(h -> (Holder<Biome>) h).orElse(null);
+		if (fallback == null) return;
+		Session s = new Session(f, dim, reg, fallback);
+		session = s;
+		hello(s);
+	}
+
+	/** Asks the server about the session's dimension (again once a second until the connection can carry it). */
+	private static void hello(Session s) {
+		s.lastHello = System.nanoTime();
+		if (!ClientPlayNetworking.canSend(LodNet.Hello.TYPE)) return;
+		ClientPlayNetworking.send(new LodNet.Hello(LodNet.PROTOCOL, s.dimension));
+		s.helloSent = true;
 	}
 
 	/** Render thread: the field is closing (the world or the dimension changes). */
 	static void close(LodField f) {
-		if (field != f) return;
-		saveStamps(true);
-		if (dimension != null && registered && ClientPlayNetworking.canSend(LodNet.TileReq.TYPE)) {
+		Session s = session;
+		if (s == null || s.field != f) return;
+		s.closed = true;
+		saveStamps(s, true);
+		if (ClientPlayNetworking.canSend(LodNet.TileReq.TYPE)) {
 			// (what the server still has queued for this dimension isn't wanted any more)
-			ClientPlayNetworking.send(new LodNet.TileReq(dimension, true, new long[0]));
+			ClientPlayNetworking.send(new LodNet.TileReq(s.dimension, true, new long[0]));
 		}
-		reset();
+		session = null;
 	}
 
-	private static void reset() {
-		field = null;
-		dimension = null;
-		wanted.clear();
-		asked.clear();
-		regionsAsked.clear();
-		stamps.clear();
-		stampsDirty.clear();
-	}
-
-	/** Any thread: the field needs this tile and has only part of it, or none: ask the server (once a session). */
+	/** Any thread: the field needs this tile and has only part of it, or none: ask the server. */
 	static void want(LodField f, long key) {
-		if (f.remote == null || !asked.add(key)) return;
-		wanted.add(key);
+		Session s = session;
+		if (s == null || s.field != f || f.remote == null) return;
+		want(s, key);
+	}
+
+	private static void want(Session s, long key) {
+		if (s.asked.containsKey(key) || !s.queued.add(key)) return;
+		s.wanted.add(key);
 	}
 
 	/** Render thread, once a frame: the asks gathered since the last frame, and the regions around the camera. */
 	static void frame(LodField f, double camX, double camZ) {
-		if (field != f || dimension == null) return;
+		Session s = session;
+		if (s == null || s.field != f) return;
+		long now = System.nanoTime();
+		if (!s.helloSent && now - s.lastHello > 1_000_000_000L) hello(s);
 		Link link = f.remote;
 		if (link == null) return;
-		if (!wanted.isEmpty()) {
-			long[] keys = new long[Math.min(LodNet.MAX_KEYS, wanted.size())];
-			int n = 0;
-			Long k;
-			while (n < keys.length && (k = wanted.poll()) != null) keys[n++] = k;
-			if (n > 0) ClientPlayNetworking.send(new LodNet.TileReq(dimension, false, n == keys.length ? keys : java.util.Arrays.copyOf(keys, n)));
+		if (link.generate()) {
+			if (s.scanNow || now - s.lastScan > 1_000_000_000L) {
+				s.scanNow = false;
+				s.lastScan = now;
+				scan(s, link, camX, camZ, now);
+			}
+			send(s, camX, camZ);
 		}
-		if (link.chunks() && f.frame % 20 == 0) askRegions(f, link, camX, camZ);
-		saveStamps(false);
+		if (link.chunks() && f.frame % 20 == 0) askRegions(s, link, camX, camZ);
+		saveStamps(s, false);
+	}
+
+	/**
+	 * Once a second: asks the server lost (unanswered too long), and the resident tiles still missing data that nobody asked
+	 * for (made before the server answered, declined a while ago, or first seen past the server's reach and now within it).
+	 */
+	private static void scan(Session s, Link link, double camX, double camZ, long now) {
+		s.asked.entrySet().removeIf(e -> now - e.getValue() > TIMEOUT_NS);
+		s.retryAt.entrySet().removeIf(e -> now >= e.getValue());
+		LodClip clip = s.field.clip;
+		for (int l = 0; l < clip.levels; l++) {
+			for (long k : clip.slotKey[l]) {
+				if (k == -1L || s.field.completeKeys.contains(k) || s.asked.containsKey(k) || s.queued.contains(k) || s.retryAt.containsKey(k)) continue;
+				if (!serves(link, k, camX, camZ)) continue;
+				want(s, k);
+			}
+		}
+	}
+
+	private static boolean serves(Link link, long key, double camX, double camZ) {
+		int level = LodTile.levelOf(key);
+		double span = LodTile.SIZE << level;
+		return LodNet.serves(link.radius(), level, LodTile.txOf(key) * span + span / 2 - camX, LodTile.tzOf(key) * span + span / 2 - camZ);
+	}
+
+	/** The wanted tiles the server serves, nearest first, as many as may be in flight. */
+	private static void send(Session s, double camX, double camZ) {
+		int room = Math.min(LodNet.MAX_KEYS, IN_FLIGHT - s.asked.size());
+		if (room <= 0 || s.wanted.isEmpty()) return;
+		Link link = s.field.remote;
+		if (link == null) return;
+		java.util.ArrayList<Long> list = new java.util.ArrayList<>();
+		Long k;
+		while ((k = s.wanted.poll()) != null) list.add(k);
+		long now = System.nanoTime();
+		long[] keys = new long[Math.min(room, list.size())];
+		int n = 0;
+		// (by distance in tiles of their own level: each level's nearest first, the finest ahead at the same distance)
+		list.sort(java.util.Comparator.comparingDouble(key -> {
+			int level = LodTile.levelOf(key);
+			double span = LodTile.SIZE << level;
+			return (Math.hypot(LodTile.txOf(key) * span + span / 2 - camX, LodTile.tzOf(key) * span + span / 2 - camZ) / span) + level * 0.5;
+		}));
+		LodClip clip = s.field.clip;
+		for (long key : list) {
+			if (n < keys.length && serves(link, key, camX, camZ) && clip.inWindow(LodTile.levelOf(key), LodTile.txOf(key), LodTile.tzOf(key))) {
+				s.queued.remove(key);
+				s.asked.put(key, now);
+				keys[n++] = key;
+			} else if (n < keys.length) {
+				// (past the server's reach, or out of the window, for now: the scan asks again when it's needed and within)
+				s.queued.remove(key);
+			} else {
+				s.wanted.add(key);
+			}
+		}
+		if (n > 0) ClientPlayNetworking.send(new LodNet.TileReq(s.dimension, false, n == keys.length ? keys : java.util.Arrays.copyOf(keys, n)));
 	}
 
 	/** The regions within reach the server hasn't been asked about, nearest first, a few at a time. */
-	private static void askRegions(LodField f, Link link, double camX, double camZ) {
+	private static void askRegions(Session s, Link link, double camX, double camZ) {
 		int reachRegions = (int) Math.ceil(Math.min(link.radius() * 16.0, LodConfig.reachBlocks()) / 512.0);
 		int crx = Math.floorDiv((int) Math.floor(camX), 512), crz = Math.floorDiv((int) Math.floor(camZ), 512);
 		long[] batch = new long[64];
@@ -154,45 +245,44 @@ public final class LodRemote {
 				for (int dx = -r; dx <= r && n < batch.length; dx++) {
 					if (Math.max(Math.abs(dx), Math.abs(dz)) != r) continue;
 					long key = (long) (crx + dx) << 32 | (crz + dz) & 0xFFFFFFFFL;
-					if (regionsAsked.add(key)) batch[n++] = key;
+					if (s.regionsAsked.add(key)) batch[n++] = key;
 				}
 			}
 		}
-		if (n > 0) ClientPlayNetworking.send(new LodNet.RegionReq(dimension, java.util.Arrays.copyOf(batch, n)));
+		if (n > 0) ClientPlayNetworking.send(new LodNet.RegionReq(s.dimension, java.util.Arrays.copyOf(batch, n)));
 	}
 
 	// ---- handlers (render thread) ----
 
 	private static void dimInfo(LodNet.DimInfo p) {
-		LodField f = field;
-		if (f == null || p.protocol() != LodNet.PROTOCOL || !p.dimension().equals(dimension)) return;
+		Session s = session;
+		if (s == null || p.protocol() != LodNet.PROTOCOL || !p.dimension().equals(s.dimension)) return;
+		LodField f = s.field;
 		f.remote = new Link(p.dimension(), p.generate(), p.chunks(), p.seaLevel(), p.radius());
+		// (the next frame scans the resident tiles: those made before the server answered are asked then)
+		s.scanNow = true;
 		System.out.println("mcopt-lod: the server makes far terrain for " + p.dimension() + " (generated " + p.generate() + ", saved chunks " + p.chunks()
 			+ ", out to " + p.radius() + " chunks)");
-		// the tiles already resident and not complete: asked now (they were made before the server answered)
-		if (p.generate()) {
-			LodClip clip = f.clip;
-			for (int l = 0; l < clip.levels; l++) {
-				for (long k : clip.slotKey[l]) if (k != -1L && !f.completeKeys.contains(k)) want(f, k);
-			}
-		}
 	}
 
 	private static void tile(LodNet.Tile p) {
-		LodField f = field;
+		Session s = session;
+		LodField f = s != null ? s.field : null;
 		Link link = f != null ? f.remote : null;
-		if (f == null || link == null || !p.dimension().equals(dimension)) return;
+		if (s == null || link == null || !p.dimension().equals(s.dimension)) return;
 		long key = p.key();
-		asked.remove(key);
-		if (p.data().length == 0) return;
-		tilesReceived++;
-		bytesReceived += p.data().length;
-		Registry<Biome> reg = biomes;
-		Holder<Biome> fallback = fallbackBiome;
-		if (reg == null || fallback == null) return;
+		s.asked.remove(key);
+		if (p.data().length == 0) {
+			// declined (past its reach, or its queue full): asked again after a while if still needed
+			s.retryAt.put(key, System.nanoTime() + RETRY_NS);
+			return;
+		}
+		tilesReceived.incrementAndGet();
+		bytesReceived.addAndGet(p.data().length);
 		f.submit(() -> {
+			if (s.closed) return;
 			int level = LodTile.levelOf(key), tx = LodTile.txOf(key), tz = LodTile.tzOf(key);
-			LodTile t = LodStructure.decodeTile(p.data(), level, tx, tz, LodRemote::state, name -> biome(reg, name), fallback);
+			LodTile t = LodStructure.decodeTile(p.data(), level, tx, tz, LodRemote::state, name -> biome(s.biomes, name), s.fallback);
 			if (t == null) return;
 			LodPaint.paint(t, link.seaLevel());
 			int[] g = new int[LodTile.CELLS], c = new int[LodTile.CELLS];
@@ -202,44 +292,45 @@ public final class LodRemote {
 			int[] pl = level == 0 && f.clip.plants ? new int[2 * LodTile.CELLS] : null;
 			LodField.pack(t, g, c, cr, rn, pl);
 			if (tw != null) System.arraycopy(t.tex, 0, tw, 0, LodTile.CELLS);
-			f.post(() -> f.remoteTile(key, g, c, cr, tw, rn, pl));
+			f.post(() -> {
+				if (!s.closed) f.remoteTile(key, g, c, cr, tw, rn, pl);
+			});
 		});
 	}
 
 	private static void manifest(LodNet.Manifest p) {
-		LodField f = field;
-		if (f == null || f.remote == null || !p.dimension().equals(dimension) || p.stamps().length != 1024) return;
+		Session s = session;
+		if (s == null || s.field.remote == null || !p.dimension().equals(s.dimension) || p.stamps().length != 1024) return;
 		long region = (long) p.rx() << 32 | p.rz() & 0xFFFFFFFFL;
-		int[] have = stampsOf(f, region);
+		int[] have = stampsOf(s, region);
 		long[] want = new long[1024];
 		int n = 0;
 		for (int i = 0; i < 1024; i++) {
 			if (p.stamps()[i] == 0 || p.stamps()[i] <= have[i]) continue;
 			want[n++] = ChunkPos.pack(p.rx() * 32 + (i & 31), p.rz() * 32 + (i >> 5));
 		}
-		if (n > 0) ClientPlayNetworking.send(new LodNet.ChunkReq(dimension, java.util.Arrays.copyOf(want, n)));
+		if (n > 0) ClientPlayNetworking.send(new LodNet.ChunkReq(s.dimension, java.util.Arrays.copyOf(want, n)));
 	}
 
 	private static void chunks(LodNet.Chunks p) {
-		LodField f = field;
-		if (f == null || f.remote == null || !p.dimension().equals(dimension)) return;
-		bytesReceived += p.data().length;
-		Registry<Biome> reg = biomes;
-		Holder<Biome> fallback = fallbackBiome;
-		if (reg == null || fallback == null) return;
+		Session s = session;
+		if (s == null || s.field.remote == null || !p.dimension().equals(s.dimension)) return;
+		bytesReceived.addAndGet(p.data().length);
+		LodField f = s.field;
 		f.submit(() -> {
+			if (s.closed) return;
 			try {
 				LodStructure.In in = new LodStructure.In(LodStructure.inflate(p.data()));
 				int count = in.i32();
-				for (int k = 0; k < count; k++) {
+				for (int k = 0; k < count && !s.closed; k++) {
 					int stamp = in.i32();
-					LodChunks.Snapshot s = LodStructure.decodeChunk(in, LodRemote::state, name -> biome(reg, name), fallback);
-					f.imported(LodChunks.summarize(s));
-					chunksReceived++;
-					long region = (long) Math.floorDiv(s.chunkX(), 32) << 32 | Math.floorDiv(s.chunkZ(), 32) & 0xFFFFFFFFL;
-					int[] have = stampsOf(f, region);
-					have[(s.chunkZ() & 31) * 32 + (s.chunkX() & 31)] = stamp;
-					stampsDirty.add(region);
+					LodChunks.Snapshot c = LodStructure.decodeChunk(in, LodRemote::state, name -> biome(s.biomes, name), s.fallback);
+					f.imported(LodChunks.summarize(c));
+					chunksReceived.incrementAndGet();
+					long region = (long) Math.floorDiv(c.chunkX(), 32) << 32 | Math.floorDiv(c.chunkZ(), 32) & 0xFFFFFFFFL;
+					int[] have = stampsOf(s, region);
+					have[(c.chunkZ() & 31) * 32 + (c.chunkX() & 31)] = stamp;
+					s.stampsDirty.add(region);
 				}
 			} catch (java.util.zip.DataFormatException | RuntimeException e) {
 				System.out.println("mcopt-lod: a server's chunks unreadable: " + e);
@@ -268,18 +359,18 @@ public final class LodRemote {
 
 	// ---- the save times of the chunks the cache has, per region (cache/chunks/rX.Z.st) ----
 
-	private static int[] stampsOf(LodField f, long region) {
-		return stamps.computeIfAbsent(region, r -> {
-			int[] s = new int[1024];
-			Path file = stampFile(f, r);
+	private static int[] stampsOf(Session s, long region) {
+		return s.stamps.computeIfAbsent(region, r -> {
+			int[] st = new int[1024];
+			Path file = stampFile(s.field, r);
 			if (Files.isRegularFile(file)) {
 				try (DataInputStream in = new DataInputStream(Files.newInputStream(file))) {
-					for (int i = 0; i < 1024; i++) s[i] = in.readInt();
+					for (int i = 0; i < 1024; i++) st[i] = in.readInt();
 				} catch (IOException e) {
-					java.util.Arrays.fill(s, 0);
+					java.util.Arrays.fill(st, 0);
 				}
 			}
-			return s;
+			return st;
 		});
 	}
 
@@ -288,21 +379,20 @@ public final class LodRemote {
 	}
 
 	/** Every 10 s (or now): the regions whose times changed, to the cache. */
-	private static void saveStamps(boolean now) {
-		LodField f = field;
-		if (f == null || stampsDirty.isEmpty() || !now && System.nanoTime() - lastStampSave < 10_000_000_000L) return;
-		lastStampSave = System.nanoTime();
-		for (var it = stampsDirty.iterator(); it.hasNext();) {
+	private static void saveStamps(Session s, boolean now) {
+		if (s.stampsDirty.isEmpty() || !now && System.nanoTime() - s.lastStampSave < 10_000_000_000L) return;
+		s.lastStampSave = System.nanoTime();
+		for (var it = s.stampsDirty.iterator(); it.hasNext();) {
 			long region = it.next();
 			it.remove();
-			int[] s = stamps.get(region);
-			if (s == null) continue;
-			Path file = stampFile(f, region);
+			int[] st = s.stamps.get(region);
+			if (st == null) continue;
+			Path file = stampFile(s.field, region);
 			try {
 				Files.createDirectories(file.getParent());
 				Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
 				try (DataOutputStream out = new DataOutputStream(Files.newOutputStream(tmp))) {
-					for (int v : s) out.writeInt(v);
+					for (int v : st) out.writeInt(v);
 				}
 				Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
 			} catch (IOException e) {

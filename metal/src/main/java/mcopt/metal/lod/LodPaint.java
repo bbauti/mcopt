@@ -19,11 +19,34 @@ final class LodPaint {
 	}
 
 	static void paint(LodTile t, int seaLevel) {
+		plants(t);
 		surface(t, seaLevel);
 		// (trees planted: LodNoise dresses them and the ground only then)
 		if (!t.impostorTrees) {
 			trees(t, seaLevel);
 			ground(t);
+		}
+	}
+
+	/**
+	 * Plants as this client draws them: a server tells them by their blocks alone (anything without collision), this side
+	 * by their models (crossed quads), as LodForest does here.
+	 */
+	private static void plants(LodTile t) {
+		for (int i = 0; i < t.cells(); i++) {
+			BlockState p = t.plantLower[i];
+			if (p == null) continue;
+			if (!LodColors.look(p).cross()) {
+				t.plantLower[i] = null;
+				t.plantUpper[i] = null;
+				t.plantBlocks[i] = 0;
+				continue;
+			}
+			BlockState u = t.plantUpper[i];
+			if (u != null && !LodColors.look(u).cross()) {
+				t.plantUpper[i] = null;
+				t.plantBlocks[i] = 1;
+			}
 		}
 	}
 

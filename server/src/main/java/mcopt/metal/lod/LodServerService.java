@@ -90,7 +90,12 @@ public final class LodServerService {
 		Dim(ServerLevel level, String id) {
 			this.level = level;
 			this.id = id;
-			LodNoise n = cfg.generate ? LodNoise.of(level) : null;
+			LodNoise n = null;
+			try {
+				n = cfg.generate ? LodNoise.of(level) : null;
+			} catch (RuntimeException | LinkageError e) {
+				System.out.println("[mcopt-server] can't generate far terrain for " + id + " (its generator isn't one we read): " + e);
+			}
 			if (n != null) n.paint = false;
 			this.noise = n;
 			this.forest = n != null && LodConfig.TREES ? new LodForest(n) : null;
@@ -105,10 +110,11 @@ public final class LodServerService {
 
 	/** One player's asks and what is ready to send them. */
 	private static final class Peer {
-		final ServerPlayer player;
+		/** The player's entity (a new one after each respawn: the latest request's). */
+		volatile ServerPlayer player;
 		volatile @Nullable String dimension;
 		final LinkedHashSet<Long> tiles = new LinkedHashSet<>();
-		final ArrayDeque<long[]> regions = new ArrayDeque<>();
+		final LinkedHashSet<Long> regions = new LinkedHashSet<>();
 		final LinkedHashSet<Long> chunks = new LinkedHashSet<>();
 		final ArrayDeque<CustomPacketPayload> outbox = new ArrayDeque<>();
 		int outBytes;
@@ -117,6 +123,12 @@ public final class LodServerService {
 
 		Peer(ServerPlayer player) {
 			this.player = player;
+		}
+
+		void clear() {
+			this.tiles.clear();
+			this.regions.clear();
+			this.chunks.clear();
 		}
 	}
 
@@ -170,7 +182,16 @@ public final class LodServerService {
 	// ---- requests (server thread) ----
 
 	private static Peer peer(ServerPlayer p) {
-		return peers.computeIfAbsent(p.getUUID(), k -> new Peer(p));
+		Peer peer = peers.computeIfAbsent(p.getUUID(), k -> new Peer(p));
+		if (peer.player != p) peer.player = p;
+		return peer;
+	}
+
+	/** The player's peer if they said hello, its entity brought up to date (respawns make a new one). */
+	private static @Nullable Peer known(ServerPlayer p) {
+		Peer peer = peers.get(p.getUUID());
+		if (peer != null && peer.player != p) peer.player = p;
+		return peer;
 	}
 
 	private static void hello(ServerPlayer player, LodNet.Hello p) {
@@ -181,9 +202,7 @@ public final class LodServerService {
 		Peer peer = peer(player);
 		synchronized (peer) {
 			peer.dimension = id;
-			peer.tiles.clear();
-			peer.regions.clear();
-			peer.chunks.clear();
+			peer.clear();
 			peer.outbox.clear();
 			peer.outBytes = 0;
 		}
@@ -197,12 +216,17 @@ public final class LodServerService {
 	}
 
 	private static void tileReq(ServerPlayer player, LodNet.TileReq p) {
-		Peer peer = peers.get(player.getUUID());
+		Peer peer = known(player);
 		if (peer == null || !p.dimension().equals(peer.dimension)) return;
 		synchronized (peer) {
-			if (p.reset()) peer.tiles.clear();
+			// (a reset: the client left this dimension, nothing it asked is wanted)
+			if (p.reset()) peer.clear();
 			for (long k : p.keys()) {
-				if (peer.tiles.size() >= cfg.queue) break;
+				if (peer.tiles.size() >= cfg.queue) {
+					// declined: the client asks again later
+					if (!peer.tiles.contains(k)) send(peer, new LodNet.Tile(p.dimension(), k, new byte[0]));
+					continue;
+				}
 				peer.tiles.add(k);
 			}
 		}
@@ -210,16 +234,19 @@ public final class LodServerService {
 	}
 
 	private static void regionReq(ServerPlayer player, LodNet.RegionReq p) {
-		Peer peer = peers.get(player.getUUID());
+		Peer peer = known(player);
 		if (peer == null || !p.dimension().equals(peer.dimension) || !cfg.chunks) return;
 		synchronized (peer) {
-			if (peer.regions.size() < 4096) peer.regions.add(p.regions());
+			for (long r : p.regions()) {
+				if (peer.regions.size() >= 4096) break;
+				peer.regions.add(r);
+			}
 		}
 		wake();
 	}
 
 	private static void chunkReq(ServerPlayer player, LodNet.ChunkReq p) {
-		Peer peer = peers.get(player.getUUID());
+		Peer peer = known(player);
 		if (peer == null || !p.dimension().equals(peer.dimension) || !cfg.chunks) return;
 		synchronized (peer) {
 			for (long k : p.chunks()) {
@@ -260,7 +287,7 @@ public final class LodServerService {
 	private static int size(CustomPacketPayload p) {
 		if (p instanceof LodNet.Tile t) return t.data().length + 64;
 		if (p instanceof LodNet.Chunks c) return c.data().length + 64;
-		if (p instanceof LodNet.Manifest) return 2048;
+		if (p instanceof LodNet.Manifest m) return m.stamps().length * 5 + 64;
 		return 64;
 	}
 
@@ -298,22 +325,37 @@ public final class LodServerService {
 
 	/** One unit of work for one player, players in turn: a region's times, then a tile, then a batch of chunks. */
 	private static boolean step() {
-		List<Peer> list = new ArrayList<>(peers.values());
-		if (list.isEmpty()) return false;
-		list.sort(java.util.Comparator.comparingInt(p -> p.turn));
-		for (Peer peer : list) {
+		// (by turns taken, read once: other workers bump them meanwhile)
+		Peer[] list = peers.values().toArray(new Peer[0]);
+		if (list.length == 0) return false;
+		long[] order = new long[list.length];
+		for (int i = 0; i < list.length; i++) order[i] = (long) list[i].turn << 32 | i;
+		java.util.Arrays.sort(order);
+		for (long o : order) {
+			Peer peer = list[(int) o];
 			String dimId = peer.dimension;
 			if (dimId == null) continue;
 			Dim d = dims.get(dimId);
 			if (d == null) continue;
-			long[] regions;
+			long[] regions = null;
 			long tile = Long.MIN_VALUE;
 			long[] chunks = null;
 			synchronized (peer) {
+				// (a player who left the dimension without a word: what they asked about it isn't wanted)
+				if (!dimId.equals(peer.player.level().dimension().identifier().toString())) {
+					peer.clear();
+					continue;
+				}
 				// (a player whose outbox holds more than two seconds' worth waits for it to drain)
 				if (peer.outBytes > cfg.kbps * 2048L) continue;
-				regions = peer.regions.poll();
-				if (regions == null) {
+				if (!peer.regions.isEmpty()) {
+					regions = new long[Math.min(16, peer.regions.size())];
+					var ri = peer.regions.iterator();
+					for (int i = 0; i < regions.length; i++) {
+						regions[i] = ri.next();
+						ri.remove();
+					}
+				} else {
 					var it = peer.tiles.iterator();
 					if (it.hasNext()) {
 						tile = it.next();
@@ -350,7 +392,8 @@ public final class LodServerService {
 	private static void tile(Peer peer, Dim d, long key) {
 		int level = LodTile.levelOf(key), tx = LodTile.txOf(key), tz = LodTile.tzOf(key);
 		int span = LodTile.SIZE << level;
-		if (d.noise == null || level < 0 || level > 15 || !near(peer, tx * (double) span + span / 2.0, tz * (double) span + span / 2.0, span)) {
+		var pos = peer.player.position();
+		if (d.noise == null || !LodNet.serves(cfg.radius, level, tx * (double) span + span / 2.0 - pos.x, tz * (double) span + span / 2.0 - pos.z)) {
 			send(peer, new LodNet.Tile(d.id, key, new byte[0]));
 			return;
 		}
@@ -480,11 +523,12 @@ public final class LodServerService {
 	// ---- the cache's owner, settings ----
 
 	/**
-	 * The cache belongs to this world's seed and this version's structure (generator.txt): any other moves it aside (deleted
-	 * in the background). The token names the world to clients (a hash, never the seed).
+	 * The cache belongs to this world's seed, this version's structure and the generator's switches (generator.txt): any
+	 * other moves it aside (deleted in the background). The token names the world to clients (a hash, never the seed).
 	 */
 	private static long claim(Path dir, long seed) {
-		String want = "seed " + seed + " structure " + LodStructure.VERSION + " mcopt " + VERSION;
+		String want = "seed " + seed + " structure " + LodStructure.VERSION + " mcopt " + VERSION + " trees " + LodConfig.TREES + " " + LodConfig.TREE_LEVELS
+			+ " plants " + LodConfig.PLANTS + " crowns " + LodConfig.CROWN_LEVELS + " fine " + LodConfig.FINE_DENSITY + " " + LodConfig.FINE_LEVELS;
 		Path marker = dir.resolve("generator.txt");
 		try {
 			if (Files.isRegularFile(marker) && !Files.readString(marker).strip().equals(want)) {
@@ -553,10 +597,20 @@ public final class LodServerService {
 					queue=4096
 					# Far terrain waits while the server's average tick takes longer than this (ms).
 					lagMs=40
+					# The generator: the game's trees, on how many levels (2: on level 1 too, as clients on Ultra draw them; more
+					# work), and plants on level 0. Changing these makes the server's cache anew.
+					trees=true
+					treeLevels=1
+					plants=true
 					""", StandardCharsets.UTF_8);
 			} catch (IOException e) {
 				System.out.println("[mcopt-server] can't write " + f + ": " + e);
 			}
+		}
+		// the generator's switches, as the client's -D flags name them (LodConfig reads them; a -D flag given wins)
+		for (String k : new String[] {"trees", "treeLevels", "plants", "crownLevels", "fineDensity", "fineLevels"}) {
+			String v = p.getProperty(k);
+			if (v != null && System.getProperty("mcopt.lod." + k) == null) System.setProperty("mcopt.lod." + k, v.strip());
 		}
 		int cores = Runtime.getRuntime().availableProcessors();
 		int threads = Integer.parseInt(p.getProperty("threads", "0").strip());

@@ -20,9 +20,26 @@ import net.minecraft.resources.Identifier;
  */
 public final class LodNet {
 	/** The protocol: a side that sees another refuses to talk. */
-	public static final int PROTOCOL = 1;
+	public static final int PROTOCOL = 2;
 	/** Most keys a request carries (serverbound payloads stay under 32 KB). */
 	public static final int MAX_KEYS = 3000;
+	/**
+	 * How far from the player a level-0 tile is made (blocks, past its own size); level L's reach doubles with L. A client's
+	 * window holds a level that far (half the largest preset's 2048 cells, and a tile more): no client needs more of the
+	 * finest tiles, which are the costliest to make and keep.
+	 */
+	public static final int LEVEL0_REACH = 1024 + 128;
+
+	/**
+	 * Whether a server serving `radius` chunks makes the tile of `level` whose center is (dx, dz) blocks from the player
+	 * (both sides ask this: the client doesn't ask what the server won't make).
+	 */
+	public static boolean serves(int radius, int level, double dx, double dz) {
+		if (level < 0 || level > 15) return false;
+		double span = LodTile.SIZE << level;
+		double r = Math.min(radius * 16.0, LEVEL0_REACH * Math.pow(2, level)) + span;
+		return Math.abs(dx) <= r && Math.abs(dz) <= r;
+	}
 
 	private LodNet() {
 	}

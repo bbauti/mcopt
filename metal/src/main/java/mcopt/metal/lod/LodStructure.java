@@ -21,8 +21,8 @@ import org.jspecify.annotations.Nullable;
  * bytes of every value's lowest byte, then the next...: neighbors share their high bytes), the whole deflated.
  */
 final class LodStructure {
-	/** The format: a reader refuses any other. */
-	static final int VERSION = 1;
+	/** The format: a reader refuses any other (2: a tile's plants are any block without collision; the client keeps its own). */
+	static final int VERSION = 2;
 
 	private LodStructure() {
 	}
@@ -75,7 +75,8 @@ final class LodStructure {
 
 	/**
 	 * A structure tile from bytes, for tile (level, tx, tz); states and biomes by name through the client's lookups (an
-	 * unknown block reads as null: no data there; an unknown biome as fallback). Null when the bytes aren't this format.
+	 * unknown block reads as stone or leaves, or none for a plant; an unknown biome as fallback). Null when the bytes aren't
+	 * this format.
 	 */
 	static @Nullable LodTile decodeTile(byte[] bytes, int level, int tx, int tz, Function<String, @Nullable BlockState> stateOf,
 		Function<String, @Nullable Holder<Biome>> biomeOf, Holder<Biome> fallback) {
@@ -99,11 +100,12 @@ final class LodStructure {
 			in.shorts(t.canopyHi, n);
 			short[] idx = new short[n];
 			in.shorts(idx, n);
-			for (int i = 0; i < n; i++) t.state[i] = at(states, idx[i]);
+			// (a block this client doesn't know (a server's mod): stone for the ground, oak leaves for a tree, so the cell keeps a look)
+			for (int i = 0; i < n; i++) t.state[i] = known(states, idx[i], STONE);
 			in.shorts(idx, n);
-			for (int i = 0; i < n; i++) t.belowState[i] = at(states, idx[i]);
+			for (int i = 0; i < n; i++) t.belowState[i] = known(states, idx[i], STONE);
 			in.shorts(idx, n);
-			for (int i = 0; i < n; i++) t.canopyState[i] = at(states, idx[i]);
+			for (int i = 0; i < n; i++) t.canopyState[i] = known(states, idx[i], LEAVES);
 			in.shorts(idx, n);
 			for (int i = 0; i < n; i++) t.trunk[i] = at(states, idx[i]);
 			in.shorts(idx, n);
@@ -122,7 +124,7 @@ final class LodStructure {
 			in.bytes(flags, n);
 			for (int i = 0; i < n; i++) {
 				t.standing[i] = (flags[i] & 1) != 0;
-				// a tree whose blocks this client doesn't know: no tree (the ground stays)
+				// a tree without its top block: no tree (the ground stays)
 				if (t.canopyHi[i] >= t.canopyLo[i] && t.canopyState[i] == null) {
 					t.canopyHi[i] = Short.MIN_VALUE;
 					t.standing[i] = false;
@@ -239,6 +241,16 @@ final class LodStructure {
 
 	static String biomeName(Holder<Biome> b) {
 		return b.unwrapKey().map(k -> k.identifier().toString()).orElse("");
+	}
+
+	private static final BlockState STONE = net.minecraft.world.level.block.Blocks.STONE.defaultBlockState(),
+		LEAVES = net.minecraft.world.level.block.Blocks.OAK_LEAVES.defaultBlockState();
+
+	/** The block at palette index i; `unknown` where the name was sent but isn't a block here. */
+	private static @Nullable BlockState known(BlockState[] states, short i, BlockState unknown) {
+		if (i == 0) return null;
+		BlockState s = at(states, i);
+		return s != null ? s : unknown;
 	}
 
 	private static <T> @Nullable T at(T[] table, int index) {

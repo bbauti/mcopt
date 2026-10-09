@@ -96,28 +96,16 @@ final class LodField {
 	 */
 	void remoteTile(long key, int[] g, int[] c, int @org.jspecify.annotations.Nullable [] cr, int @org.jspecify.annotations.Nullable [] tw,
 		int @org.jspecify.annotations.Nullable [] rn, int @org.jspecify.annotations.Nullable [] pl) {
-		int level = LodTile.levelOf(key), tx = LodTile.txOf(key), tz = LodTile.tzOf(key);
-		this.completeKeys.add(key);
-		if (this.clip.resident(level, tx, tz)) {
-			int[] og = new int[LodTile.CELLS], oc = new int[LodTile.CELLS];
-			this.clip.readForSave(level, tx, tz, og, oc, null, null, null, null);
-			// cell by cell through the staged copy (a put would race the GPU's copies of the tile's last publishes)
-			int x0 = tx * LodTile.SIZE, z0 = tz * LodTile.SIZE;
-			for (int i = 0; i < LodTile.CELLS; i++) {
-				if ((og[i] & LodClip.GEOM_VALID) != 0 || (g[i] & LodClip.GEOM_VALID) == 0) continue;
-				this.clip.putCell(level, x0 + i % LodTile.SIZE, z0 + i / LodTile.SIZE, g[i], c[i], cr != null ? cr[i] : 0, tw != null ? tw[i] : 0,
-					rn != null ? rn[i] : 0, pl != null ? pl[i] : 0, pl != null ? pl[LodTile.CELLS + i] : 0);
-			}
-			this.touched.add(key);
-			this.dirtyTiles.add(key);
-			return;
-		}
+		if (this.mergeResident(key, g, c, cr, tw, rn, pl)) return;
+		// (not complete without the cache: asked again when the tile is made)
 		if (!LodConfig.DISK_CACHE) return;
 		this.jobs.add(new Job(SAVE_PRIORITY, this.seq.incrementAndGet(), SAVE_KEY, () -> {
 			synchronized (this.lock(key)) {
 				int[] og = new int[LodTile.CELLS], oc = new int[LodTile.CELLS];
 				int[] ocr = cr != null ? new int[LodTile.CELLS] : null, otw = tw != null ? new int[LodTile.CELLS] : null;
 				int[] orn = rn != null ? new int[LodTile.CELLS] : null, opl = pl != null ? new int[2 * LodTile.CELLS] : null;
+				// (complete once the merged file is written: its trailer says so)
+				this.completeKeys.add(key);
 				if (this.load(key, og, oc, ocr, otw, orn, opl)) {
 					fillMissing(og, oc, ocr, otw, orn, opl, g, c, cr, tw, rn, pl);
 					this.save0(key, og, oc, ocr, otw, orn, opl);
@@ -125,7 +113,33 @@ final class LodField {
 					this.save0(key, g, c, cr, tw, rn, pl);
 				}
 			}
+			// a load of the tile that began before this write took the old file: what's resident takes the cells too
+			this.post(() -> this.mergeResident(key, g, c, cr, tw, rn, pl));
 		}));
+	}
+
+	/** Render thread: a server's tile into the cells of the resident tile that have no data; false when it isn't resident. */
+	private boolean mergeResident(long key, int[] g, int[] c, int @org.jspecify.annotations.Nullable [] cr, int @org.jspecify.annotations.Nullable [] tw,
+		int @org.jspecify.annotations.Nullable [] rn, int @org.jspecify.annotations.Nullable [] pl) {
+		int level = LodTile.levelOf(key), tx = LodTile.txOf(key), tz = LodTile.tzOf(key);
+		if (!this.clip.resident(level, tx, tz)) return false;
+		int[] og = new int[LodTile.CELLS], oc = new int[LodTile.CELLS];
+		this.clip.readForSave(level, tx, tz, og, oc, null, null, null, null);
+		// cell by cell through the staged copy (a put would race the GPU's copies of the tile's last publishes)
+		int x0 = tx * LodTile.SIZE, z0 = tz * LodTile.SIZE;
+		int put = 0;
+		for (int i = 0; i < LodTile.CELLS; i++) {
+			if ((og[i] & LodClip.GEOM_VALID) != 0 || (g[i] & LodClip.GEOM_VALID) == 0) continue;
+			this.clip.putCell(level, x0 + i % LodTile.SIZE, z0 + i / LodTile.SIZE, g[i], c[i], cr != null ? cr[i] : 0, tw != null ? tw[i] : 0,
+				rn != null ? rn[i] : 0, pl != null ? pl[i] : 0, pl != null ? pl[LodTile.CELLS + i] : 0);
+			put++;
+		}
+		this.completeKeys.add(key);
+		if (put > 0) {
+			this.touched.add(key);
+			this.dirtyTiles.add(key);
+		}
+		return true;
 	}
 
 	/** The cells of (og...) with no data take (g...)'s. */
