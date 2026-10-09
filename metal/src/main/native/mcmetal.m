@@ -1780,16 +1780,15 @@ static void paceWatch(id<CAMetalDrawable> drawable) {
 // a frame and paceAdapt took presents for late (bbauti's external 100 Hz monitor: 93 presents/s, the margin at PACE_EXTRA_MAX
 // within a second). The margin starts over on a new display. Returns its Hz when the display changed (-1: unknown), else 0.
 double mc_pace_follow(double x, double y) {
-	CVDisplayLinkRef link = paceLink;
-	if (!link) return 0;
+	if (!paceLink) return 0;
 	CGDirectDisplayID d;
 	uint32_t n = 0;
 	if (CGGetDisplaysWithPoint(CGPointMake(x, y), 1, &d, &n) != kCGErrorSuccess || n == 0 || d == paceDisplay) return 0;
-	if (CVDisplayLinkSetCurrentCGDisplay(link, d) != kCVReturnSuccess) return 0;
+	if (CVDisplayLinkSetCurrentCGDisplay(paceLink, d) != kCVReturnSuccess) return 0;
 	paceDisplay = d;
 	paceExtra = 0;
 	paceFloor = INFINITY;
-	CVTime t = CVDisplayLinkGetNominalOutputVideoRefreshPeriod(link);
+	CVTime t = CVDisplayLinkGetNominalOutputVideoRefreshPeriod(paceLink);
 	return t.timeValue > 0 && !(t.flags & kCVTimeIsIndefinite) ? (double) t.timeScale / t.timeValue : -1;
 }
 #pragma clang diagnostic pop
