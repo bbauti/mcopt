@@ -1174,6 +1174,7 @@ static inline bool compShade(constant CompFrame& f, uint2 v, device const uint* 
                              device const uint* texWords, device const PaletteEntry* palette, texture2d<half> atlas, sampler smp,
                              thread CompSurface& s);
 
+#ifdef LOD_WATER
 // ---- clear water ----
 //
 // A wet cell whose geometry word holds its water's depth (bits 25-31, 1-127; LodClip.depthBits) has the water's own color in
@@ -1181,7 +1182,8 @@ static inline bool compShade(constant CompFrame& f, uint2 v, device const uint* 
 // Its top is seen through as the game's water is: the bed where the pixel's ray reaches it (looked up there, so slopes and
 // shores show, on level 0 with its block's texture), in the light that gets that deep (the game's sky light drops by one a
 // block of water), under the water's color by how far the ray runs through it. -Dmcopt.lod.clearWater=false (no
-// LOD_CLEAR_WATER): the water over its floor in one color by depth, as before.
+// LOD_CLEAR_WATER): the water over its floor in one color by depth, as before. All of it only with LOD_WATER: should this
+// code not compile on some Mac, Lod compiles the file again without it (the water then looks as its color word's low half).
 #define GEOM_WATER_DEPTH(g) int(((g) >> 25) & 127u)
 #define WATER_ALPHA 0.65     // the water's surface over a bed right under it (the game's water texture's alpha)
 #define WATER_FADE 16.0      // blocks of water a ray crosses for what is left of the bed to fade to 1 / e
@@ -1272,6 +1274,7 @@ static inline bool compWater(constant CompFrame& f, uint2 v, device const uint* 
     return true;
 #endif
 }
+#endif
 
 static inline bool compSurface(constant CompFrame& f, float4 pos, device const uint2* img, device const uint* geom, device const uint* color,
                                device const uint* crowns, device const uint* texWords, device const PaletteEntry* palette, texture2d<half> atlas,
@@ -1307,7 +1310,9 @@ static inline bool compShade(constant CompFrame& f, uint2 v, device const uint* 
         return true;
     }
     bool underCrown = (v.y & REC_UNDER_CROWN) != 0u;
+#ifdef LOD_WATER
     if (s.wet && compWater(f, v, geom, color, texWords, palette, atlas, smp, s)) return true;
+#endif
     if (f.quadDepth.y == 0.0 || level != 0u || s.wet || underCrown && (s.face == FACE_TOP || f.tex.z == 0.0)) return true;
     // near detail on level 0: the cell, from the hit's position (block coordinates relative to `origin`)
     float3 p = s.rel + f.camFrac.xyz;

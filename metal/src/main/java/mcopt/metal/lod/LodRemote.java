@@ -67,7 +67,7 @@ public final class LodRemote {
 		final Set<Long> regionsAsked = ConcurrentHashMap.newKeySet();
 		final ConcurrentHashMap<Long, int[]> stamps = new ConcurrentHashMap<>();
 		final Set<Long> stampsDirty = ConcurrentHashMap.newKeySet();
-		long lastStampSave = System.nanoTime(), lastScan, lastHello;
+		long lastStampSave = System.nanoTime(), lastScan, lastHello, lastSend;
 		/** The Hello went out; the server answered (the next frame scans the resident tiles then). */
 		boolean helloSent, scanNow;
 		volatile boolean closed;
@@ -199,38 +199,52 @@ public final class LodRemote {
 		return LodNet.serves(link.radius(), level, LodTile.txOf(key) * span + span / 2 - camX, LodTile.tzOf(key) * span + span / 2 - camZ);
 	}
 
-	/** The wanted tiles the server serves, nearest first, as many as may be in flight. */
+	/**
+	 * The wanted tiles the server serves, nearest first, as many as may be in flight. Sorted only when there's room for a
+	 * batch (32) or a second has passed: not every frame while the server works through what's in flight.
+	 */
 	private static void send(Session s, double camX, double camZ) {
 		int room = Math.min(LodNet.MAX_KEYS, IN_FLIGHT - s.asked.size());
-		if (room <= 0 || s.wanted.isEmpty()) return;
+		long now = System.nanoTime();
+		if (room <= 0 || s.wanted.isEmpty() || room < 32 && now - s.lastSend < 1_000_000_000L) return;
 		Link link = s.field.remote;
 		if (link == null) return;
-		java.util.ArrayList<Long> list = new java.util.ArrayList<>();
+		s.lastSend = now;
+		long[] keys = new long[s.queued.size() + 16];
+		int count = 0;
 		Long k;
-		while ((k = s.wanted.poll()) != null) list.add(k);
-		long now = System.nanoTime();
-		long[] keys = new long[Math.min(room, list.size())];
-		int n = 0;
-		// (by distance in tiles of their own level: each level's nearest first, the finest ahead at the same distance)
-		list.sort(java.util.Comparator.comparingDouble(key -> {
+		while ((k = s.wanted.poll()) != null) {
+			if (count == keys.length) keys = java.util.Arrays.copyOf(keys, count * 2);
+			keys[count++] = k;
+		}
+		// (by distance in tiles of their own level, each level's nearest first, the finest ahead at the same distance: the
+		// priority's float bits over the key's index, sorted as longs)
+		long[] order = new long[count];
+		for (int i = 0; i < count; i++) {
+			long key = keys[i];
 			int level = LodTile.levelOf(key);
 			double span = LodTile.SIZE << level;
-			return (Math.hypot(LodTile.txOf(key) * span + span / 2 - camX, LodTile.tzOf(key) * span + span / 2 - camZ) / span) + level * 0.5;
-		}));
+			float pri = (float) (Math.hypot(LodTile.txOf(key) * span + span / 2 - camX, LodTile.tzOf(key) * span + span / 2 - camZ) / span + level * 0.5);
+			order[i] = (long) Float.floatToIntBits(pri) << 32 | i;
+		}
+		java.util.Arrays.sort(order);
+		long[] out = new long[Math.min(room, count)];
+		int n = 0;
 		LodClip clip = s.field.clip;
-		for (long key : list) {
-			if (n < keys.length && serves(link, key, camX, camZ) && clip.inWindow(LodTile.levelOf(key), LodTile.txOf(key), LodTile.tzOf(key))) {
+		for (long o : order) {
+			long key = keys[(int) o];
+			if (n < out.length && serves(link, key, camX, camZ) && clip.inWindow(LodTile.levelOf(key), LodTile.txOf(key), LodTile.tzOf(key))) {
 				s.queued.remove(key);
 				s.asked.put(key, now);
-				keys[n++] = key;
-			} else if (n < keys.length) {
+				out[n++] = key;
+			} else if (n < out.length) {
 				// (past the server's reach, or out of the window, for now: the scan asks again when it's needed and within)
 				s.queued.remove(key);
 			} else {
 				s.wanted.add(key);
 			}
 		}
-		if (n > 0) ClientPlayNetworking.send(new LodNet.TileReq(s.dimension, false, n == keys.length ? keys : java.util.Arrays.copyOf(keys, n)));
+		if (n > 0) ClientPlayNetworking.send(new LodNet.TileReq(s.dimension, false, n == out.length ? out : java.util.Arrays.copyOf(out, n)));
 	}
 
 	/** The regions within reach the server hasn't been asked about, nearest first, a few at a time. */

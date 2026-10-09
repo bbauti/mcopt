@@ -142,6 +142,11 @@ final class LodField {
 		return true;
 	}
 
+	/** A crown cell's GEOM_CLEAR and depth bits: over water the depth bits are the water's, which a crown word doesn't carry. */
+	private static int crownClear(int clear, boolean wet) {
+		return wet ? clear & ~LodClip.depthBits(127) : clear;
+	}
+
 	/** The cells of (og...) with no data take (g...)'s. */
 	private static void fillMissing(int[] og, int[] oc, int @org.jspecify.annotations.Nullable [] ocr, int @org.jspecify.annotations.Nullable [] otw,
 		int @org.jspecify.annotations.Nullable [] orn, int @org.jspecify.annotations.Nullable [] opl, int[] g, int[] c, int @org.jspecify.annotations.Nullable [] cr,
@@ -844,7 +849,7 @@ final class LodField {
 					int surface = wet ? s.water()[k] : s.height()[k];
 					if (s.crownLo()[k] > surface) {
 						// leaves over air: a crown floating over the ground under it
-						this.clip.putCell(level, cx, cz, LodClip.crownGeomWord(s.crownHi()[k], s.crownHi()[k] - s.crownLo()[k], false) | clear,
+						this.clip.putCell(level, cx, cz, LodClip.crownGeomWord(s.crownHi()[k], s.crownHi()[k] - s.crownLo()[k], false) | crownClear(clear, wet),
 							LodClip.colorWord(s.top()[k], s.side()[k]), LodClip.crownWord(surface, s.groundColor()[k]), s.tex()[k], s.runs()[k], 0, 0);
 					} else if (level == 0) {
 						int pa = s.plantA()[k];
@@ -943,7 +948,7 @@ final class LodField {
 				int surface = wet ? s.water()[k] : s.height()[k];
 				p.cells.add((cz - z0) * LodTile.SIZE + (cx - x0));
 				if (s.crownLo()[k] > surface) {
-					p.g.add(LodClip.crownGeomWord(s.crownHi()[k], s.crownHi()[k] - s.crownLo()[k], false) | clear);
+					p.g.add(LodClip.crownGeomWord(s.crownHi()[k], s.crownHi()[k] - s.crownLo()[k], false) | crownClear(clear, wet));
 					p.c.add(LodClip.colorWord(s.top()[k], s.side()[k]));
 					p.cr.add(LodClip.crownWord(surface, s.groundColor()[k]));
 					p.runs.add(s.runs()[k]);
@@ -1085,7 +1090,7 @@ final class LodField {
 				int surface = wet ? s.water()[k] : s.height()[k];
 				int gw, cw, crw, runs = 0, pa = 0, pb = 0;
 				if (s.crownLo()[k] > surface) {
-					gw = LodClip.crownGeomWord(s.crownHi()[k], s.crownHi()[k] - s.crownLo()[k], false) | clear;
+					gw = LodClip.crownGeomWord(s.crownHi()[k], s.crownHi()[k] - s.crownLo()[k], false) | crownClear(clear, wet);
 					cw = LodClip.colorWord(s.top()[k], s.side()[k]);
 					crw = LodClip.crownWord(surface, s.groundColor()[k]);
 					runs = s.runs()[k];

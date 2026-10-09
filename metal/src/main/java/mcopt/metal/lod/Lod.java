@@ -121,7 +121,20 @@ public final class Lod {
 		this.taaTile = LodTaaTile.ON ? new LodTaaTile(this.ctx) : null;
 	}
 
-	private static String source() {
+	/**
+	 * The far terrain's library: columns.metal with its water (LOD_WATER), else, if that doesn't compile on this Mac, without
+	 * it (water then shows its own color): a mistake there costs the water's look, not the whole far terrain.
+	 */
+	private static long createLibrary(long ctx) {
+		try {
+			return LodNative.create(ctx, source(true));
+		} catch (RuntimeException e) {
+			System.out.println("mcopt-lod: far terrain's water shading didn't compile; drawn without it: " + e.getMessage());
+			return LodNative.create(ctx, source(false));
+		}
+	}
+
+	private static String source(boolean water) {
 		try (InputStream in = Lod.class.getResourceAsStream("/mcopt/lod/columns.metal")) {
 			if (in == null) throw new IllegalStateException("columns.metal missing");
 			String src = new String(in.readAllBytes(), StandardCharsets.UTF_8);
@@ -133,8 +146,8 @@ public final class Lod {
 			// chunk is drawn by both for the frames before its hand-off, the real terrain wins the coplanar tops instead of z-fighting
 			if (HANDOFF_PUSH > 0 && HANDOFF_PUSH < 1) src = "#define SEAM_DEPTH_PUSH " + HANDOFF_PUSH + "\n" + src;
 			if (LodTaaTile.CODES) src = "#define SEAM_TAA_TILE 1\n" + src;
-			// clear water (columns.metal compWater): compiled in unless -Dmcopt.lod.clearWater=false
-			if (LodConfig.CLEAR_WATER) src = "#define LOD_CLEAR_WATER 1\n" + src;
+			// the water's shading (columns.metal compWater), see-through unless -Dmcopt.lod.clearWater=false
+			if (water) src = "#define LOD_WATER 1\n" + (LodConfig.CLEAR_WATER ? "#define LOD_CLEAR_WATER 1\n" : "") + src;
 			if (Boolean.getBoolean("mcopt.lod.thinTex")) src = "#define SEAM_THIN_TEX 1\n" + src;
 			if (Boolean.getBoolean("mcopt.lod.thin")) src = "#define SEAM_THIN 1\n#define SEAM_CROWN_LEVELS " + Math.max(1, LodConfig.CROWN_LEVELS) + "\n" + src;
 			return src;
@@ -158,9 +171,8 @@ public final class Lod {
 			Object encoder = MetalBridge.encoder(((FrontendCommandEncoder) RenderSystem.getDevice().createCommandEncoder()).backend());
 			if (encoder == null) return;
 			long ctx = MetalBridge.ctx(encoder);
-			String src = source();
 			prewarmCtx = ctx;
-			prewarm = java.util.concurrent.CompletableFuture.supplyAsync(() -> LodNative.create(ctx, src), task -> {
+			prewarm = java.util.concurrent.CompletableFuture.supplyAsync(() -> createLibrary(ctx), task -> {
 				Thread t = new Thread(task, "mcopt-lod-shaders");
 				t.setDaemon(true);
 				t.start();
@@ -182,7 +194,7 @@ public final class Lod {
 				// (compiled again below: the error is reported from there)
 			}
 		}
-		return LodNative.create(ctx, source());
+		return createLibrary(ctx);
 	}
 
 	private static @Nullable Lod get() {
