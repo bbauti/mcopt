@@ -135,10 +135,7 @@ final class LodNoise {
 	final WorldGenerationContext context;
 	private final ThreadLocal<Worker> workers;
 	private final BlockState snow = Blocks.SNOW_BLOCK.defaultBlockState(), ice = Blocks.ICE.defaultBlockState(), water = Blocks.WATER.defaultBlockState();
-	/**
-	 * Colors and texture words too (the client's far terrain); false: the structure alone (a server's: heights, blocks,
-	 * biomes, trees, water), with what the client needs to paint it (LodTile.belowState, impostor). No client class is touched.
-	 */
+	/** false: the structure alone, no colors (a server's: no client class used), and what the client paints from (LodTile.belowState, impostor). */
 	boolean paint = true;
 
 	/** Per thread: the sampler contexts hold caches and buffers. */
@@ -450,10 +447,8 @@ final class LodNoise {
 				if (t.canopyHi[i] < t.canopyLo[i]) continue;
 				if (!this.paint) {
 					// (the structure: a tree standing in its column raises it; the colors are the client's)
-					if (t.standing[i] || t.level >= LodConfig.CROWN_LEVELS) {
-						t.height[i] = (short) Math.max(t.height[i], t.canopyHi[i] + 1);
-						t.standing[i] = true;
-					}
+					t.standing[i] |= t.level >= LodConfig.CROWN_LEVELS;
+					if (t.standing[i]) t.height[i] = (short) Math.max(t.height[i], t.canopyHi[i] + 1);
 					continue;
 				}
 				BlockState top = t.canopyState[i];
@@ -622,18 +617,12 @@ final class LodNoise {
 				if (!this.paint) {
 					// the structure: the water, the block under the top, an impostor canopy's height (the colors are the client's)
 					t.belowState[i] = below;
-					if (wet) {
-						t.water[i] = (short) waterTop;
-					} else {
-						t.water[i] = LodTile.DRY;
-						if (LodConfig.TREES && t.impostorTrees) {
-							int canopy = LodTrees.canopy(biomes[i], surface, bx, bz, c);
-							if (canopy > 0) {
-								int raised = Math.min(this.maxY, h[i] + canopy);
-								t.impostor[i] = (byte) Math.clamp(raised - h[i], 0, 127);
-								h[i] = (short) raised;
-							}
-						}
+					t.water[i] = wet ? (short) waterTop : LodTile.DRY;
+					int canopy = !wet && LodConfig.TREES && t.impostorTrees ? LodTrees.canopy(biomes[i], surface, bx, bz, c) : 0;
+					if (canopy > 0) {
+						int raised = Math.min(this.maxY, h[i] + canopy);
+						t.impostor[i] = (byte) Math.clamp(raised - h[i], 0, 127);
+						h[i] = (short) raised;
 					}
 					continue;
 				}
@@ -653,10 +642,11 @@ final class LodNoise {
 					} else {
 						// clear water: its own color on top, the floor's under it (the GPU looks through by depth and angle)
 						texTop = null;
+						int waterColor = LodColors.top(this.water, b, bx, bz);
 						t.clear[i] = (byte) Math.clamp(depth, 1, 127);
 						sideColor = topColor;
 						t.below[i] = topColor;
-						topColor = LodColors.top(this.water, b, bx, bz);
+						topColor = waterColor;
 					}
 					t.water[i] = (short) waterTop;
 				} else {

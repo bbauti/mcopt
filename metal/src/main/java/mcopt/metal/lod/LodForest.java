@@ -109,7 +109,7 @@ final class LodForest {
 	}
 
 	/** Whether a placed feature places trees (or huge mushrooms or fungi), itself or through the features it picks from. */
-	static boolean placesTrees(net.minecraft.world.level.levelgen.placement.PlacedFeature feature) {
+	static boolean placesTrees(PlacedFeature feature) {
 		try {
 			return placesTrees(feature.feature(), 0);
 		} catch (RuntimeException e) {
@@ -117,13 +117,11 @@ final class LodForest {
 		}
 	}
 
-	private static boolean placesTrees(net.minecraft.core.Holder<net.minecraft.world.level.levelgen.feature.Feature> h, int depth) {
+	private static boolean placesTrees(Holder<net.minecraft.world.level.levelgen.feature.Feature> h, int depth) {
 		var f = h.value();
-		if (f instanceof net.minecraft.world.level.levelgen.feature.TreeFeature || f instanceof net.minecraft.world.level.levelgen.feature.HugeBrownMushroomFeature
-			|| f instanceof net.minecraft.world.level.levelgen.feature.HugeRedMushroomFeature || f instanceof net.minecraft.world.level.levelgen.feature.HugeFungusFeature) {
-			return true;
-		}
-		return depth < 4 && f.getSubFeatures().anyMatch(s -> s != h && placesTrees(s, depth + 1));
+		return f instanceof net.minecraft.world.level.levelgen.feature.TreeFeature || f instanceof net.minecraft.world.level.levelgen.feature.HugeBrownMushroomFeature
+			|| f instanceof net.minecraft.world.level.levelgen.feature.HugeRedMushroomFeature || f instanceof net.minecraft.world.level.levelgen.feature.HugeFungusFeature
+			|| depth < 4 && f.getSubFeatures().anyMatch(s -> s != h && placesTrees(s, depth + 1));
 	}
 
 	/** Features that grow small plants on the surface (not under water, not in caves, not on trees). */

@@ -94,9 +94,8 @@ final class LodNativeNoise {
 	static final java.util.concurrent.atomic.AtomicLongArray sizeCalls = new java.util.concurrent.atomic.AtomicLongArray(6), sizeValues = new java.util.concurrent.atomic.AtomicLongArray(6);
 
 	/**
-	 * -Dmcopt.lod.nativeNoise.stats=true (or -Dmcopt.lod.stats): the call counters and their log line. Off, no counter is
-	 * touched: they were shared atomics bumped on every point sample by every worker (and every server worldgen thread with
-	 * mcopt.gen.nativeNoise), one contended cache line in the hottest loop.
+	 * -Dmcopt.lod.nativeNoise.stats=true (or -Dmcopt.lod.stats): the call counters and their log line. Off, none is touched:
+	 * shared atomics bumped per point sample by every worker and server worldgen thread, a contended cache line, hottest loop.
 	 */
 	static final boolean COUNT = Boolean.getBoolean("mcopt.lod.nativeNoise.stats") || Boolean.getBoolean("mcopt.lod.stats")
 		|| System.getProperty("mcopt.lod.genBench") != null;

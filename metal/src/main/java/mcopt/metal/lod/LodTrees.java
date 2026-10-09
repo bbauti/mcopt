@@ -29,8 +29,7 @@ final class LodTrees {
 
 	private static Profile derive(Holder<Biome> biome) {
 		String name = biome.unwrapKey().map(k -> k.identifier().getPath()).orElse("");
-		String namespace = biome.unwrapKey().map(k -> k.identifier().getNamespace()).orElse("minecraft");
-		if (!"minecraft".equals(namespace)) return modded(biome, name);
+		if (biome.unwrapKey().map(k -> !"minecraft".equals(k.identifier().getNamespace())).orElse(false)) return modded(biome, name);
 		BlockState oak = Blocks.OAK_LEAVES.defaultBlockState(), spruce = Blocks.SPRUCE_LEAVES.defaultBlockState(), birch = Blocks.BIRCH_LEAVES.defaultBlockState();
 		return switch (name) {
 			case "forest", "flower_forest" -> new Profile(0.72F, 6, oak);
@@ -61,15 +60,13 @@ final class LodTrees {
 	 * as its name suggests (forests, jungles, taigas, savannas...), with the leaves its name suggests (oak otherwise).
 	 */
 	private static Profile modded(Holder<Biome> biome, String name) {
-		boolean trees;
 		try {
 			var steps = biome.value().getGenerationSettings().features();
 			int veg = net.minecraft.world.level.levelgen.GenerationStep.Decoration.VEGETAL_DECORATION.ordinal();
-			trees = veg < steps.size() && steps.get(veg).stream().anyMatch(h -> LodForest.placesTrees(h.value()));
+			if (veg >= steps.size() || steps.get(veg).stream().noneMatch(h -> LodForest.placesTrees(h.value()))) return NONE;
 		} catch (RuntimeException e) {
-			trees = false;
+			return NONE;
 		}
-		if (!trees) return NONE;
 		String n = name.toLowerCase(java.util.Locale.ROOT);
 		BlockState leaves = has(n, "taiga", "spruce", "pine", "conifer", "boreal", "fir", "snowy") ? Blocks.SPRUCE_LEAVES.defaultBlockState()
 			: has(n, "birch", "aspen") ? Blocks.BIRCH_LEAVES.defaultBlockState()
