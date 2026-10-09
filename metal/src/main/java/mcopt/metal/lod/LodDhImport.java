@@ -64,6 +64,8 @@ final class LodDhImport implements Runnable {
 	 * short session, and starting over each time it never finished). By detail level: level 0 is read, coarser ones aren't.
 	 */
 	private long rowsDone, resumeRow, rowsXz, rowsFar, lastReport;
+	/** A save imported before, read again for -Dmcopt.lod.spanStats only. */
+	private boolean measure;
 	private final long[] rowsByLevel = new long[16];
 	private String signature = "";
 
@@ -199,6 +201,16 @@ final class LodDhImport implements Runnable {
 				String note = doneText.lines().skip(1).findFirst().orElse("").strip();
 				System.out.println("mcopt-lod: Distant Horizons' save " + this.db + " was imported before" + (note.isEmpty() ? "" : " (" + note + ")")
 					+ "; delete " + this.done + " to import it again");
+				if (!LodChunks.SPAN_STATS) return;
+				// -Dmcopt.lod.spanStats: read again for the span stats only (nothing imported, no progress saved)
+				this.measure = true;
+				System.out.println("mcopt-lod: reading Distant Horizons' save again for the span stats (nothing is imported)");
+				try (LodSqlite sql = new LodSqlite(this.db)) {
+					this.importAll(sql);
+				}
+				if (this.stopped) return;
+				LodChunks.logSpanStats();
+				System.out.println("mcopt-lod: span stats: Distant Horizons' save read (" + this.chunks.get() + " chunks, a quarter of them measured)");
 				return;
 			}
 			this.signature = signature;
@@ -243,6 +255,7 @@ final class LodDhImport implements Runnable {
 	}
 
 	private void saveProgress() {
+		if (this.measure) return;
 		try {
 			Files.createDirectories(this.done.getParent());
 			Files.writeString(this.done, this.signature + " " + Math.max(this.rowsDone, this.resumeRow) + "\n");
@@ -299,7 +312,8 @@ final class LodDhImport implements Runnable {
 			if (now - this.lastReport > 30_000_000_000L) {
 				this.lastReport = now;
 				this.saveProgress();
-				System.out.println(String.format(java.util.Locale.ROOT, "mcopt-lod: Distant Horizons import: row %d, %d chunks imported%n", index, this.chunks.get()).stripTrailing());
+				System.out.println(String.format(java.util.Locale.ROOT, "mcopt-lod: Distant Horizons import: row %d, %d chunks %s%n", index, this.chunks.get(),
+					this.measure ? "read (span stats)" : "imported").stripTrailing());
 			}
 			if (row[cLevel] instanceof Long lv && lv >= 0 && lv < this.rowsByLevel.length) this.rowsByLevel[(int) (long) lv]++;
 			if (!(row[cLevel] instanceof Long lv) || lv != 0 || !(row[cX] instanceof Long px) || !(row[cZ] instanceof Long pz)) {
@@ -345,7 +359,9 @@ final class LodDhImport implements Runnable {
 					this.stopped = true;
 					return false;
 				}
-				this.field.imported(LodChunks.summarize(LodChunks.snapshot(src, chunkX, chunkZ, this.field.roof, false)));
+				// (a quarter of the chunks: a DH column answers a block by going through its runs)
+				if (LodChunks.SPAN_STATS && ((chunkX + chunkZ) & 3) == 0) LodChunks.spanStats(src);
+				if (!this.measure) this.field.imported(LodChunks.summarize(LodChunks.snapshot(src, chunkX, chunkZ, this.field.roof, false)));
 				this.chunks.incrementAndGet();
 			}
 			this.rowsDone++;

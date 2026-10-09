@@ -171,6 +171,7 @@ final class LodChunks {
 			}
 		};
 		Snapshot s = snapshot(src, chunk.getPos().x(), chunk.getPos().z(), roof, RUNS);
+		if (SPAN_STATS) spanStatsLater(chunk);
 		// the sections the runs can reach, copied (the walk runs on a worker)
 		if (s.runFrom() == null) return s;
 		int runLo = Integer.MAX_VALUE, runHi = Integer.MIN_VALUE;
@@ -277,7 +278,6 @@ final class LodChunks {
 				biome[i] = src.biome(x, y, z);
 			}
 		}
-		if (SPAN_STATS) spanStats(src, minY);
 		return new Snapshot(chunkX, chunkZ, top, under, height, water, biome, crown, crownLeaf, crownLo, crownHi, crownRuns, trunk, above, runFrom, null, 0,
 			minY);
 	}
@@ -288,9 +288,19 @@ final class LodChunks {
 	 * under its top: solid runs (not leaves, not water) with an air gap of 2 or more blocks under them and solid under the gap.
 	 * Such a gap is open when a neighbor column in the chunk has its top under the gap's top (seen from that side), else
 	 * enclosed (a cave pocket, which far terrain would leave solid). Leaf crowns (leaves over air, which far terrain already
-	 * draws) are counted on their own. Logged every 30 s while chunks come in. ~16k block reads a chunk while on.
+	 * draws) are counted on their own. Logged every 30 s while chunks come in. ~16k block reads a chunk while on: the game's
+	 * chunks are walked on a thread of its own (spanStatsLater), the imports' on their thread (LodDhImport also measures a save
+	 * it imported before, without importing it again).
 	 */
 	static final boolean SPAN_STATS = Boolean.getBoolean("mcopt.lod.spanStats");
+	/** The game's chunks' walks (one thread, low priority; chunks past 256 waiting aren't counted). */
+	private static final java.util.concurrent.ThreadPoolExecutor STATS = SPAN_STATS ? new java.util.concurrent.ThreadPoolExecutor(1, 1, 0,
+		java.util.concurrent.TimeUnit.SECONDS, new java.util.concurrent.ArrayBlockingQueue<>(256), r -> {
+			Thread t = new Thread(r, "mcopt-lod span stats");
+			t.setDaemon(true);
+			t.setPriority(Thread.MIN_PRIORITY);
+			return t;
+		}, new java.util.concurrent.ThreadPoolExecutor.DiscardPolicy()) : null;
 	private static final java.util.concurrent.atomic.LongAdder STAT_CHUNKS = new java.util.concurrent.atomic.LongAdder(),
 		STAT_COLUMNS = new java.util.concurrent.atomic.LongAdder(), STAT_OPEN1 = new java.util.concurrent.atomic.LongAdder(),
 		STAT_OPEN2 = new java.util.concurrent.atomic.LongAdder(), STAT_ENCLOSED = new java.util.concurrent.atomic.LongAdder(),
@@ -298,7 +308,65 @@ final class LodChunks {
 		STAT_GAP = new java.util.concurrent.atomic.LongAdder();
 	private static final java.util.concurrent.atomic.AtomicLong STAT_LOG_AT = new java.util.concurrent.atomic.AtomicLong(System.nanoTime() + 30_000_000_000L);
 
-	private static void spanStats(Source src, int minY) {
+	/** The calling thread (the game's chunk, render thread): copies of the sections the walk reaches, walked on STATS. */
+	@SuppressWarnings("unchecked")
+	private static void spanStatsLater(net.minecraft.world.level.chunk.ChunkAccess chunk) {
+		if (STATS.getQueue().remainingCapacity() == 0) return;
+		int minY = chunk.getMinY();
+		int[] surface = new int[256];
+		int lo = Integer.MAX_VALUE, hi = Integer.MIN_VALUE;
+		for (int i = 0; i < 256; i++) {
+			int y = chunk.getHeight(Heightmap.Types.WORLD_SURFACE, i & 15, i >> 4);
+			surface[i] = y;
+			lo = Math.min(lo, y - 1);
+			hi = Math.max(hi, y - 1);
+		}
+		if (hi <= minY) return;
+		int secFirst = Math.max(0, (Math.max(minY, lo - 64) - minY) >> 4);
+		int secLast = Math.min(chunk.getSectionsCount() - 1, (hi - minY) >> 4);
+		if (secLast < secFirst) return;
+		PalettedContainer<BlockState>[] sections = new PalettedContainer[secLast - secFirst + 1];
+		for (int k = 0; k < sections.length; k++) {
+			LevelChunkSection sec = chunk.getSection(secFirst + k);
+			sections[k] = sec.hasOnlyAir() ? null : sec.getStates().copy();
+		}
+		BlockState air = Blocks.AIR.defaultBlockState();
+		STATS.execute(() -> spanStats(new Source() {
+			@Override
+			public int minY() {
+				return minY;
+			}
+
+			@Override
+			public int surface(int x, int z) {
+				return surface[z * 16 + x];
+			}
+
+			@Override
+			public BlockState state(int x, int y, int z) {
+				int si = ((y - minY) >> 4) - secFirst;
+				if (y < minY || si < 0 || si >= sections.length || sections[si] == null) return air;
+				return sections[si].get(x, (y - minY) & 15, z);
+			}
+
+			@Override
+			public boolean emptySection(int y) {
+				int si = ((y - minY) >> 4) - secFirst;
+				return y < minY || si < 0 || si >= sections.length || sections[si] == null;
+			}
+
+			@Override
+			public Holder<Biome> biome(int x, int y, int z) {
+				throw new UnsupportedOperationException();
+			}
+		}));
+	}
+
+	private static final int[][] SIDES = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+
+	/** One chunk's columns into the counts (any thread). */
+	static void spanStats(Source src) {
+		int minY = src.minY();
 		int[] topY = new int[256];
 		for (int i = 0; i < 256; i++) topY[i] = src.surface(i & 15, i >> 4) - 1;
 		for (int z = 0; z < 16; z++) {
@@ -328,8 +396,7 @@ final class LodChunks {
 							} else {
 								// open when a neighbor column's top lies under the gap's top (in the chunk; edge columns see less)
 								boolean seen = false;
-								int[][] d = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-								for (int[] n : d) {
+								for (int[] n : SIDES) {
 									int nx = x + n[0], nz = z + n[1];
 									if (nx >= 0 && nz >= 0 && nx < 16 && nz < 16 && topY[nz * 16 + nx] < gapTop) seen = true;
 								}
@@ -357,14 +424,17 @@ final class LodChunks {
 		}
 		STAT_CHUNKS.increment();
 		long now = System.nanoTime(), at = STAT_LOG_AT.get();
-		if (now > at && STAT_LOG_AT.compareAndSet(at, now + 30_000_000_000L)) {
-			double cols = Math.max(1, STAT_COLUMNS.sum());
-			long spans = Math.max(1, STAT_OPEN1.sum());
-			System.out.println(String.format(java.util.Locale.ROOT, "mcopt-lod span stats: %d chunks, %.0f columns: %.2f%% with a solid span over an open gap"
-				+ " (%.2f%% two or more; spans %.1f blocks thick over %.1f-block gaps on average), %.2f%% over enclosed gaps only, %.2f%% leaf crowns",
-				STAT_CHUNKS.sum(), cols, 100 * STAT_OPEN1.sum() / cols, 100 * STAT_OPEN2.sum() / cols, (double) STAT_THICK.sum() / spans,
-				(double) STAT_GAP.sum() / spans, 100 * STAT_ENCLOSED.sum() / cols, 100 * STAT_LEAVES.sum() / cols));
-		}
+		if (now > at && STAT_LOG_AT.compareAndSet(at, now + 30_000_000_000L)) logSpanStats();
+	}
+
+	/** The counts so far, in the log. */
+	static void logSpanStats() {
+		double cols = Math.max(1, STAT_COLUMNS.sum());
+		long spans = Math.max(1, STAT_OPEN1.sum());
+		System.out.println(String.format(java.util.Locale.ROOT, "mcopt-lod span stats: %d chunks, %.0f columns: %.2f%% with a solid span over an open gap"
+			+ " (%.2f%% two or more; spans %.1f blocks thick over %.1f-block gaps on average), %.2f%% over enclosed gaps only, %.2f%% leaf crowns",
+			STAT_CHUNKS.sum(), cols, 100 * STAT_OPEN1.sum() / cols, 100 * STAT_OPEN2.sum() / cols, (double) STAT_THICK.sum() / spans,
+			(double) STAT_GAP.sum() / spans, 100 * STAT_ENCLOSED.sum() / cols, 100 * STAT_LEAVES.sum() / cols));
 	}
 
 	private static final BlockState WATER = Blocks.WATER.defaultBlockState();

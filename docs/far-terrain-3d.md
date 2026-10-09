@@ -24,7 +24,8 @@ todavía no lo sabemos para un mundo real; `mcopt.lod.spanStats=true` lo mide (v
     cada 32 bloques y descartan a propósito los bolsones flotantes.
   - Los niveles gruesos toman una muestra por celda (la esquina): no hay mezcla.
 - **Tres partes del GPU asumen una superficie por columna:**
-  - el cull del horizonte (todo lo que está bajo el tope se da por sólido hasta abajo);
+  - el cull del horizonte: cada celda tapa como si fuera sólida desde abajo hasta el tope de su primer intervalo (el suelo;
+    bajo una copa, el suelo de abajo, no la copa). Con un span suspendido ya es correcto, solo que el alero no ayuda a tapar;
   - el color de cada píxel, que se busca por posición en una palabra de color por celda;
   - los detalles cercanos (AO, textura de paredes según la profundidad desde el tope, agua, plantas).
 
@@ -70,8 +71,8 @@ y aparte las copas de hojas. Ese porcentaje es f, y decide cuánto cuesta todo l
   - **Imports:** DH ya trae runs por columna; Voxy trae vóxeles. Ambos pasan por el mismo resumen.
   - **Ruido, niveles 0-1:** la columna de densidad ya está calculada; en vez del primer cruce se toman los dos primeros.
   - **Servidor:** un campo más en el formato de tile (subir `PROTOCOL`/`VERSION`).
-- Lo que no cambia: mallador (ya genera estas caras), cull del horizonte (el suelo sigue siendo el que tapa), formato de quad,
-  memoria del nivel 0.
+- Lo que no cambia: mallador (ya genera estas caras), cull del horizonte (`lodmesh.c` ya toma el primer intervalo, el suelo,
+  como oclusor: un alero no tapa nada de más), formato de quad, memoria del nivel 0.
 - Límite: un span suspendido por columna, y una columna con alero no puede tener además copa (gana el más alto).
 
 ### Fase 2: varios spans por columna y niveles gruesos
@@ -133,7 +134,9 @@ el costo en el GPU es menor que el aumento de quads.
 
 ## 7. Siguiente paso
 
-Una sesión con `mcopt.lod.spanStats=true` en el servidor (y si se puede, en un mundo de singleplayer con montañas). Con f medido:
+Una sesión con `mcopt.lod.spanStats=true` en el cliente. Cuenta los chunks reales que carga el juego (en un hilo aparte, no en el
+de render) y, si el guardado de Distant Horizons ya se importó, lo vuelve a leer solo para medir (un cuarto de sus chunks, sin
+importar nada). Con f medido:
 
 - f < 1 %: la Fase 1 sola cubre casi todo lo visible.
 - f entre 1 y 5 %: Fase 1 + Fase 2 en los niveles 0-1.

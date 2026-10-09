@@ -252,6 +252,7 @@ final class LodVoxyImport implements Runnable {
 				ChunkSource src = new ChunkSource(secs, ox, oz, this.minY, this.fallbackBiome);
 				if (!src.hasData()) continue;
 				this.pace();
+				if (LodChunks.SPAN_STATS) LodChunks.spanStats(src);
 				this.field.imported(LodChunks.summarize(LodChunks.snapshot(src, chunkX, chunkZ, this.field.roof, false)));
 				this.chunks.incrementAndGet();
 			}
