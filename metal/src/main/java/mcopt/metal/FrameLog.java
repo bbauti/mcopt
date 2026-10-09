@@ -13,19 +13,15 @@ import java.util.List;
  * Measurement only (-Dmcopt.own.int.frameLog=true): one row per submitted frame, written to framelog-<launch time>.csv in the working directory
  * when the game exits. Per frame: when it ended (epoch ms), its wall time (submit to submit), the render thread's wait time per site
  * (WaitStats' sites: in-flight limit, fence, nextDrawable, pacer, drain), time in timed regions of the render thread (client tick,
- * frame extract, frame render, vanilla's section scheduling, translucent resort scheduling, our terrain's per-frame event apply,
- * texture ticks, the far terrain's frame and chunk snapshots: lodUs) and the bytes the render thread allocated in each (the
- * columns at the end, tickB...: where the allocation that drives the young collections comes from),
+ * frame extract, frame render, vanilla's section scheduling, translucent resort scheduling, our terrain's per-frame event apply, texture ticks,
+ * the far terrain's frame and chunk snapshots: lodUs) and the bytes the render thread allocated in each (tickB... at the end: what drives young GCs),
  * the render thread's CPU time and allocation, GC collections and their time, our terrain's events applied (publish, resort,
  * release, clear), and the submit index (GpuTimes' key, for the GPU span with -Dmcopt.metal.gpuTimes). Render thread only; fixed
  * arrays, nothing allocated per frame.
  */
 public final class FrameLog {
 	public static final boolean ON = Boolean.getBoolean("mcopt.own.int.frameLog");
-	/**
-	 * The launch's time in every file name (framelog-, framelog-passes-, enclog-), so a run doesn't overwrite the last one's, and
-	 * framelog-<time>-flags.txt with the mcopt.* options it ran with (the A/B runs' only record of which was which).
-	 */
+	/** The launch's time in every file name (framelog-, framelog-passes-, enclog-): a run doesn't overwrite the last one's. */
 	private static final String STAMP = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
 	public static final int TICK = 0, EXTRACT = 1, RENDER = 2, COMPILE = 3, RESORT_SCHED = 4, OWN_BEGIN = 5, TEXTURES = 6, LOD = 7;
 	private static final String[] REGIONS = {"tickUs", "extractUs", "renderUs", "compileUs", "resortSchedUs", "ownBeginUs", "texTickUs", "lodUs"};
@@ -71,21 +67,16 @@ public final class FrameLog {
 
 	/** Start of a timed region on the render thread (nesting of the same region is not supported: the outer one counts). */
 	public static void begin(int region) {
-		if (regionStart[region] != 0) return;
-		regionStart[region] = System.nanoTime();
-		regionStartB[region] = allocated();
+		if (regionStart[region] == 0) regionStartB[region] = ALLOC != null ? ALLOC.getCurrentThreadAllocatedBytes() : 0;
+		if (regionStart[region] == 0) regionStart[region] = System.nanoTime();
 	}
 
 	public static void end(int region) {
 		long s = regionStart[region];
 		if (s == 0) return;
 		curRegion[region] += System.nanoTime() - s;
-		curRegionB[region] += allocated() - regionStartB[region];
+		curRegionB[region] += (ALLOC != null ? ALLOC.getCurrentThreadAllocatedBytes() : 0) - regionStartB[region];
 		regionStart[region] = 0;
-	}
-
-	private static long allocated() {
-		return ALLOC != null ? ALLOC.getCurrentThreadAllocatedBytes() : 0;
 	}
 
 	public static void event(int kind) {
@@ -115,7 +106,7 @@ public final class FrameLog {
 		long now = System.nanoTime();
 		if (renderThread == null) renderThread = Thread.currentThread();
 		long cpu = THREADS.getCurrentThreadCpuTime();
-		long alloc = allocated();
+		long alloc = THREADS instanceof com.sun.management.ThreadMXBean t ? t.getCurrentThreadAllocatedBytes() : 0;
 		long gcc = 0, gct = 0;
 		for (int i = 0, k = GCS.size(); i < k; i++) {
 			GarbageCollectorMXBean g = GCS.get(i);
@@ -216,7 +207,7 @@ public final class FrameLog {
 
 	private static void write() {
 		writeEncoders();
-		try {
+		try {   // framelog-<time>-flags.txt: the mcopt.* options it ran with (the A/B runs' only record of which was which)
 			StringBuilder f = new StringBuilder();
 			new java.util.TreeMap<>(System.getProperties()).forEach((k, v) -> {
 				if (k instanceof String key && key.startsWith("mcopt.")) f.append(key).append('=').append(v).append('\n');

@@ -27,6 +27,7 @@ import java.util.TreeMap;
  */
 public final class Profile {
 	private static boolean applied;
+	private static String overrides = "";
 	/** Alpha keys left out on the small tier: the 4096-entry clone cache costs memory an 8 GB / small-GPU Mac lacks. */
 	static final java.util.List<String> SMALL_OUT = java.util.List.of("mcopt.chunk.clones", "mcopt.chunk.clonesCleanup");
 	static final String DEFAULT = "indie";
@@ -79,17 +80,8 @@ public final class Profile {
 		return false;
 	}
 
-	/**
-	 * What differs from the profile, for the log: the mcopt.* keys config/mcopt.properties and the command line set (applyFlags
-	 * prints its line in preLaunch, before the game sends System.out to its log, so latest.log never had it).
-	 */
-	private static String overrides = "";
-	private static boolean overridesLogged;
-
-	/** Client entrypoint (System.out goes to the log by then): the profile and the options that differ from it, once. */
+	/** Client entrypoint: the profile and the options that differ from it, for latest.log (applyFlags runs before System.out goes there). */
 	public static synchronized void logOverrides() {
-		if (overridesLogged) return;
-		overridesLogged = true;
 		System.out.println("[mcopt] " + overrides);
 	}
 
@@ -124,13 +116,13 @@ public final class Profile {
 			if (name.equals("alpha")) tier(flags);
 		}
 		file.stringPropertyNames().stream().filter(k -> k.startsWith("mcopt.")).forEach(k -> flags.put(k, file.getProperty(k).trim()));
-		StringBuilder o = new StringBuilder("profile " + name);
 		Map<String, String> fromFile = new TreeMap<>();
 		file.stringPropertyNames().stream().filter(k -> k.startsWith("mcopt.")).forEach(k -> fromFile.put(k, file.getProperty(k).trim()));
-		if (!fromFile.isEmpty()) o.append("; set in config/mcopt.properties:").append(list(fromFile));
-		if (!commandLine.isEmpty()) o.append("; set on the command line:").append(list(commandLine));
-		if (fromFile.isEmpty() && commandLine.isEmpty()) o.append(", no option changed");
-		overrides = o.toString();
+		StringBuilder o = new StringBuilder("profile " + name).append(fromFile.isEmpty() ? "" : "; set in config/mcopt.properties:");
+		fromFile.forEach((k, v) -> o.append(' ').append(k).append('=').append(v));
+		o.append(commandLine.isEmpty() ? "" : "; set on the command line:");
+		commandLine.forEach((k, v) -> o.append(' ').append(k).append('=').append(v));
+		overrides = o.append(fromFile.isEmpty() && commandLine.isEmpty() ? ", no option changed" : "").toString();
 		if (flags.isEmpty()) return;
 		StringBuilder set = new StringBuilder(), kept = new StringBuilder();
 		flags.forEach((k, v) -> {
@@ -143,12 +135,6 @@ public final class Profile {
 		});
 		System.out.println("[mcopt] profile " + (name.isEmpty() ? "(config only)" : name) + ": set" + set
 			+ (kept.isEmpty() ? "" : "; kept from the command line:" + kept));
-	}
-
-	private static String list(Map<String, String> m) {
-		StringBuilder b = new StringBuilder();
-		m.forEach((k, v) -> b.append(' ').append(k).append('=').append(v));
-		return b.toString();
 	}
 
 	/** Small tier: GPU cores < 10 or RAM <= 8 GB, or either unreadable. Logs the tier and drops {@link #SMALL_OUT}. */
