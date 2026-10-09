@@ -135,6 +135,11 @@ final class LodNoise {
 	final WorldGenerationContext context;
 	private final ThreadLocal<Worker> workers;
 	private final BlockState snow = Blocks.SNOW_BLOCK.defaultBlockState(), ice = Blocks.ICE.defaultBlockState(), water = Blocks.WATER.defaultBlockState();
+	/**
+	 * Colors and texture words too (the client's far terrain); false: the structure alone (a server's: heights, blocks,
+	 * biomes, trees, water), with what the client needs to paint it (LodTile.belowState, impostor). No client class is touched.
+	 */
+	boolean paint = true;
 
 	/** Per thread: the sampler contexts hold caches and buffers. */
 	private final class Worker {
@@ -443,6 +448,14 @@ final class LodNoise {
 				int bx = t.x0 + x * c, bz = t.z0 + z * c;
 				Biome b = t.biome[i].value();
 				if (t.canopyHi[i] < t.canopyLo[i]) continue;
+				if (!this.paint) {
+					// (the structure: a tree standing in its column raises it; the colors are the client's)
+					if (t.standing[i] || t.level >= LodConfig.CROWN_LEVELS) {
+						t.height[i] = (short) Math.max(t.height[i], t.canopyHi[i] + 1);
+						t.standing[i] = true;
+					}
+					continue;
+				}
 				BlockState top = t.canopyState[i];
 				boolean leaves = top.is(net.minecraft.tags.BlockTags.LEAVES);
 				int topColor = LodColors.top(top, b, bx, bz);
@@ -483,7 +496,7 @@ final class LodNoise {
 	 * only into air (not where a plant stands).
 	 */
 	void dressGround(LodTile t) {
-		if (t.level != 0) return;
+		if (t.level != 0 || !this.paint) return;
 		for (int z = 0; z < t.size; z++) {
 			for (int x = 0; x < t.size; x++) {
 				int i = z * t.size + x;
@@ -606,6 +619,24 @@ final class LodNoise {
 				access.mcopt$updateY(2, 64, waterHeight, top - 1);
 				BlockState below = rule.tryApply(bx, top - 1, bz);
 				if (below == null) below = stone;
+				if (!this.paint) {
+					// the structure: the water, the block under the top, an impostor canopy's height (the colors are the client's)
+					t.belowState[i] = below;
+					if (wet) {
+						t.water[i] = (short) waterTop;
+					} else {
+						t.water[i] = LodTile.DRY;
+						if (LodConfig.TREES && t.impostorTrees) {
+							int canopy = LodTrees.canopy(biomes[i], surface, bx, bz, c);
+							if (canopy > 0) {
+								int raised = Math.min(this.maxY, h[i] + canopy);
+								t.impostor[i] = (byte) Math.clamp(raised - h[i], 0, 127);
+								h[i] = (short) raised;
+							}
+						}
+					}
+					continue;
+				}
 				Biome b = biomes[i].value();
 				int topColor = LodColors.top(surface, b, bx, bz);
 				int belowColor = LodColors.top(below, b, bx, bz);

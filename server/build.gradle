@@ -1,0 +1,41 @@
+plugins {
+	id 'net.fabricmc.fabric-loom' version "${loom_version}"
+}
+
+version = '0.3.0-alpha.2'
+
+dependencies {
+	minecraft "com.mojang:minecraft:${minecraft_version}"
+	implementation "net.fabricmc:fabric-loader:${loader_version}"
+	compileOnly "net.fabricmc.fabric-api:fabric-api-base:2.0.6+fcdff87f5d"
+	compileOnly "net.fabricmc.fabric-api:fabric-networking-api-v1:6.3.8+fcdff87f5d"
+	compileOnly "net.fabricmc.fabric-api:fabric-lifecycle-events-v1:4.1.9+ffef5f675d"
+}
+
+// The far terrain's generator is the client mod's own code (metal/), compiled here too: the same sources, so a server's tiles
+// are exactly what a client would generate. What they reference of the client (colors, textures, the native library) has
+// server stand-ins in src/main/java (it never runs here: the server makes the structure, the client paints it).
+def shared = ['mcopt/metal/lod/LodNoise.java', 'mcopt/metal/lod/LodTile.java', 'mcopt/metal/lod/LodForest.java', 'mcopt/metal/lod/LodTrees.java',
+	'mcopt/metal/lod/LodNativeNoise.java', 'mcopt/metal/lod/LodNoiseKernels.java', 'mcopt/metal/lod/LodNoiseVector.java', 'mcopt/metal/lod/LodChunks.java',
+	'mcopt/metal/lod/LodStructure.java', 'mcopt/metal/lod/LodNet.java', 'mcopt/metal/mixin/lod/LodMaterialContextAccess.java']
+def sharedDir = layout.buildDirectory.dir('shared-src')
+def syncShared = tasks.register('syncShared', Sync) {
+	from(rootProject.file('metal/src/main/java')) { include shared }
+	into sharedDir
+}
+sourceSets.main.java.srcDir(syncShared)
+
+processResources {
+	inputs.property 'version', version
+	filesMatching('fabric.mod.json') { expand 'version': version }
+}
+
+jar {
+	from(rootProject.file('LICENSE'))
+	from(rootProject.file('NOTICE'))
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 25
+	it.options.compilerArgs += ['--add-modules', 'jdk.incubator.vector']
+}

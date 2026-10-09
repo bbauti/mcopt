@@ -484,6 +484,7 @@ public final class Lod {
 	private void closeWorld() {
 		this.cullValid = false;
 		this.dataReachFrame = -1;
+		if (this.field != null && mcopt.metal.LodClientInit.networking) LodRemote.close(this.field);
 		if (this.field != null) {
 			this.field.close();
 			this.field = null;
@@ -553,6 +554,8 @@ public final class Lod {
 		}
 		if (noise == null) System.out.println("mcopt-lod: " + level.dimension().identifier() + (server == null ? " on a server" : " (not noise-generated, or a roof)")
 			+ ": far terrain from the chunks the client receives, kept in " + cache);
+		// on a server running mcopt-server: it's asked for what it can make (generated tiles, its saved chunks)
+		if (server == null && mcopt.metal.LodClientInit.networking) LodRemote.open(this.field, level.dimension().identifier().toString());
 		if (LodGenBench.ENABLED && noise != null) LodGenBench.start(noise, this.field);
 		if (LodYield.ON) LodYield.top = this.clip.levels - 1;
 	}
@@ -568,6 +571,7 @@ public final class Lod {
 		w.frame = this.frames;
 		while (!this.releaseLater.isEmpty() && this.frames - this.releaseLater.peek()[0] >= RING) LodNative.release(this.releaseLater.poll()[1]);
 		w.integrate();
+		if (w.remote != null) LodRemote.frame(w, this.camX, this.camZ);
 		if (!refreshQueue.isEmpty()) this.refreshChunks(mc);
 		if (LodMesh.REAL_OCC && !this.edited.isEmpty()) this.resnapshot(mc, start);
 		long t1 = System.nanoTime();

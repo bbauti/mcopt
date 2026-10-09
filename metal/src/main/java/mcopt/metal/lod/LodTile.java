@@ -60,6 +60,12 @@ final class LodTile {
 	final BlockState[] plantLower, plantUpper;
 	final byte[] plantBlocks;
 	final int[] plantColor;
+	/**
+	 * Structure only (a server's tiles, LodNoise without paint): the block under the top block, and the height an impostor
+	 * canopy added to the column (0: none), for the client to paint them (LodPaint).
+	 */
+	final BlockState[] belowState;
+	final byte[] impostor;
 	/** The water is known (the game's aquifers asked, levels 0-1): `water` holds it; else the sea fills what lies under its level. */
 	boolean waterKnown;
 	/** Impostor canopies from the biome (LodTrees) where no exact trees are planted. */
@@ -106,6 +112,8 @@ final class LodTile {
 		this.plantUpper = new BlockState[n];
 		this.plantBlocks = new byte[n];
 		this.plantColor = new int[n];
+		this.belowState = new BlockState[n];
+		this.impostor = new byte[n];
 	}
 
 	/**
