@@ -1741,6 +1741,14 @@ static void startDisplayLink(void) {
 // scanout times (presentedTime 0, as on the mini's display) nothing changes: the margin stays the caller's.
 static int paceAdapt;
 static _Atomic double paceExtra;  // seconds added to the caller's margin
+// The lowest lateness of presents lately: the display's own fixed delay. bbauti's external 100 Hz monitor (the main display)
+// showed every paced frame late by more than half a refresh, from the first second on, in menus at 60 fps too: a compositor
+// that scans a frame out a refresh after the one it latched makes every frame that late, and the margin sat at
+// PACE_EXTRA_MAX (6 ms of lead for nothing) while presents ran at 91-96 a second. Lateness is now measured from this floor:
+// only a frame that missed its latch on top of the display's delay counts. It follows a lower lateness at once and rises
+// PACE_FLOOR_RISE a present (2 ms a second at 100 Hz), so a lasting change of delay is taken up too.
+static _Atomic double paceFloor = INFINITY;
+#define PACE_FLOOR_RISE 0.00002
 static double paceTarget;         // the refresh the frame being presented was paced for (render thread)
 #define PACE_UP 0.00025
 #define PACE_DOWN 0.000005
@@ -1753,8 +1761,10 @@ static void paceWatch(id<CAMetalDrawable> drawable) {
 	[drawable addPresentedHandler:^(id<MTLDrawable> d) {
 		double shown = d.presentedTime;
 		if (shown <= 0 || period <= 0) return;
+		double late = shown - target, floor = fmin(paceFloor + PACE_FLOOR_RISE, late);
+		paceFloor = floor;
 		double e = paceExtra;
-		e = shown - target > period * 0.5 ? e + PACE_UP : e - PACE_DOWN;
+		e = late - floor > period * 0.5 ? e + PACE_UP : e - PACE_DOWN;
 		paceExtra = e < 0 ? 0 : e > PACE_EXTRA_MAX ? PACE_EXTRA_MAX : e;
 	}];
 }
@@ -1776,6 +1786,7 @@ double mc_pace_follow(double x, double y) {
 	if (CVDisplayLinkSetCurrentCGDisplay(link, d) != kCVReturnSuccess) return 0;
 	paceDisplay = d;
 	paceExtra = 0;
+	paceFloor = INFINITY;
 	CVTime t = CVDisplayLinkGetNominalOutputVideoRefreshPeriod(link);
 	return t.timeValue > 0 && !(t.flags & kCVTimeIsIndefinite) ? (double) t.timeScale / t.timeValue : -1;
 }
