@@ -404,6 +404,8 @@ public final class Lod {
 	}
 
 	/** A copy of the mask as it is now, for another thread (LodField's screen-ordered scan). */
+	private final java.util.function.Supplier<LodSeam.ChunkMask> maskSnapshotFn = this::maskSnapshot;
+
 	private LodSeam.ChunkMask maskSnapshot() {
 		int[] m = this.mask.clone();
 		int x0 = this.maskX, z0 = this.maskZ, size = this.maskSize, words = this.maskWords;
@@ -503,9 +505,8 @@ public final class Lod {
 		this.camY = camera.pos.y;
 		this.camZ = camera.pos.z;
 		// the projection the level is drawn with (bobbing, hurt tilt, nausea, camera rolls), else the camera's alone
-		Matrix4f proj = new Matrix4f(levelProjectionSet ? LEVEL_PROJECTION : camera.projectionMatrix);
+		this.viewProj.set(levelProjectionSet ? LEVEL_PROJECTION : camera.projectionMatrix).mul(camera.viewRotationMatrix);
 		levelProjectionSet = false;
-		this.viewProj.set(proj).mul(camera.viewRotationMatrix);
 		camera.viewRotationMatrix.positiveZ(this.forward).negate();
 		this.frustum.set(this.viewProj, false);
 		FogData fog = camera.fogData;
@@ -660,7 +661,7 @@ public final class Lod {
 		long t1 = System.nanoTime();
 		this.partNanos[0] += t1 - start;
 		w.rdBlocks = mc.options.getEffectiveRenderDistance() * 16.0;
-		if (LodField.PRIO_SCREEN) w.updateScreen(this.camX, this.camZ, this.frustum, this.camY, this.viewProj, this.forward, this::maskSnapshot);
+		if (LodField.PRIO_SCREEN) w.updateScreen(this.camX, this.camZ, this.frustum, this.camY, this.viewProj, this.forward, this.maskSnapshotFn);
 		else w.update(this.camX, this.camZ, this.frustum, this.camY);
 		w.saveDirty(false);
 		long t2 = System.nanoTime();
@@ -900,18 +901,23 @@ public final class Lod {
 
 	private final Matrix4d m = new Matrix4d(), inv = new Matrix4d();
 	private final Vector3d pa = new Vector3d(), pb = new Vector3d();
+	private final Vector4d v4 = new Vector4d();
 	private final double[] A = new double[3], B = new double[3], C = new double[3];
+	/** rays()' scratch: the rays at NDC (0, 0), (1, 0), (0, 1). */
+	private final double[][] rayD = new double[3][3];
 
 	/** The camera-relative view ray at GL NDC (x, y): A x + B y + C (any length, pointing away from the camera). */
 	private void rays() {
 		this.m.set(this.viewProj);
 		this.m.invert(this.inv);
-		double[][] d = new double[3][];
-		double[][] at = {{0, 0}, {1, 0}, {0, 1}};
+		double[][] d = this.rayD;
 		for (int i = 0; i < 3; i++) {
-			this.inv.transformProject(at[i][0], at[i][1], 0.25, this.pa);
-			this.inv.transformProject(at[i][0], at[i][1], 0.75, this.pb);
-			d[i] = new double[] {this.pa.x - this.pb.x, this.pa.y - this.pb.y, this.pa.z - this.pb.z};
+			double ax = i == 1 ? 1 : 0, ay = i == 2 ? 1 : 0;
+			this.inv.transformProject(ax, ay, 0.25, this.pa);
+			this.inv.transformProject(ax, ay, 0.75, this.pb);
+			d[i][0] = this.pa.x - this.pb.x;
+			d[i][1] = this.pa.y - this.pb.y;
+			d[i][2] = this.pa.z - this.pb.z;
 		}
 		double sign = d[0][0] * this.forward.x + d[0][1] * this.forward.y + d[0][2] * this.forward.z >= 0 ? 1 : -1;
 		for (int k = 0; k < 3; k++) {
@@ -990,7 +996,7 @@ public final class Lod {
 		int r0 = Math.max(0, (int) Math.floor((yBot + 1) * height / 2 - 0.5) - 2);
 		int r1 = Math.min(height - 1, (int) Math.ceil((yTop + 1) * height / 2 - 0.5) + 2);
 		// columns: lines through the vanishing point of the vertical, one pixel apart where they spread most
-		Vector4d v = this.m.transform(new Vector4d(0, 1, 0, 0));
+		Vector4d v = this.m.transform(this.v4.set(0, 1, 0, 0));
 		// (level with the horizon the verticals are parallel on screen: upright when the camera isn't rolled; rolled (Camera
 		// Overhaul, bobbing) they lean, so their vanishing point is taken far off along their slant instead)
 		if (Math.abs(v.w) <= 1e-9 * Math.abs(v.y) && Math.abs(v.x) > 1e-6 * Math.abs(v.y)) v.w = Math.copySign(1e-6 * Math.hypot(v.x, v.y), v.w == 0 ? 1 : v.w);
@@ -1124,7 +1130,7 @@ public final class Lod {
 		MemoryUtil.memPutFloat(c + 188, 0.6F);
 		// the quad sits at the depth of the nearest point far terrain can have (a view depth of half its horizontal distance
 		// covers the frustum's corners): early depth testing drops what real terrain hides
-		Vector4d q = this.m.transform(new Vector4d(this.forward.x * dMin * 0.5, this.forward.y * dMin * 0.5, this.forward.z * dMin * 0.5, 1));
+		Vector4d q = this.m.transform(this.v4.set(this.forward.x * dMin * 0.5, this.forward.y * dMin * 0.5, this.forward.z * dMin * 0.5, 1));
 		MemoryUtil.memPutFloat(c + 192, (float) Math.clamp(q.z / q.w, 0, 1));
 		MemoryUtil.memPutFloat(c + 196, LodConfig.NEAR_DETAIL ? 1 : 0);
 		MemoryUtil.memPutFloat(c + 200, (float) LodConfig.CROWN_SHADE);

@@ -173,13 +173,15 @@ final class LodMesh implements LodClip.Listener {
 	/** The 4 neighbors: dx, dz, and the LodClip.EDGE_* bit of the border cells their meshes read. */
 	private static final int[][] NEIGHBORS = {{1, 0, LodClip.EDGE_PX}, {-1, 0, LodClip.EDGE_NX}, {0, 1, LodClip.EDGE_PZ}, {0, -1, LodClip.EDGE_NZ}};
 
+	/** The 4 neighbors: dx, dz, and their bit in builtNeighbors. */
+	private static final int[][] BUILT_SIDES = {{1, 0, 2}, {-1, 0, 1}, {0, 1, 8}, {0, -1, 4}};
+
 	@Override
 	public void tilePut(int level, int tx, int tz, boolean refreshed) {
 		if (LodClip.PAIRS) this.snaps.remove(LodTile.key(level, tx, tz));
 		this.request(level, tx, tz);
 		// each neighbor's border walls toward this tile: built without it (skirts), or this tile's border cells changed
-		int[][] d = {{1, 0, 2}, {-1, 0, 1}, {0, 1, 8}, {0, -1, 4}};
-		for (int[] n : d) {
+		for (int[] n : BUILT_SIDES) {
 			int nx = tx + n[0], nz = tz + n[1];
 			if (!this.clip.resident(level, nx, nz)) continue;
 			int ns = this.clip.slot(nx, nz);
