@@ -327,6 +327,7 @@ final class LodMesh implements LodClip.Listener {
 
 	/** Once a frame before drawing: finished meshes go into the arena, freed ranges whose frames are done return. */
 	void integrate(long frame) {
+		this.clip.frame(frame);
 		while (!this.releaseLater.isEmpty() && frame - this.releaseLater.peek()[0] >= RING) {
 			long[] r = this.releaseLater.poll();
 			this.release(r[1], r[2]);

@@ -105,8 +105,21 @@ final class LodField {
 	void close() {
 		this.closed = true;
 		if (this.importer != null) this.importer.stop();
+		if (this.scanner != null) {
+			// (its re-sort drains and re-adds the queue: done before the queue is drained here)
+			this.scanner.shutdownNow();
+			try {
+				this.scanner.awaitTermination(2, java.util.concurrent.TimeUnit.SECONDS);
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+		}
+		// what the workers handed back and the held chunks: into the tiles (or their patches) before anything is saved
+		Runnable r;
+		while ((r = this.results.poll()) != null) r.run();
+		for (LodChunks.Summary s : this.held.values()) this.applyChunk(s, 1, this.clip.levels);
+		this.held.clear();
 		for (Thread t : this.threads) t.interrupt();
-		if (this.scanner != null) this.scanner.shutdownNow();
 		// the saves still queued (real chunks' tiles: what was seen this session) are written now, not dropped with the queue
 		java.util.ArrayList<Job> left = new java.util.ArrayList<>();
 		this.jobs.drainTo(left);
@@ -187,8 +200,10 @@ final class LodField {
 				if (this.clip.resident(0, tx, tz)) return;
 				this.chunkBuilt.remove(key);
 			}
-			if (this.clip.put(level, tx, tz, g, c, cr, tw, rn, pl) && level == 0) {
-				List<LodChunks.Summary> real = this.waiting.remove(key);
+			if (this.clip.put(level, tx, tz, g, c, cr, tw, rn, pl)) {
+				// (patches made while it loaded, older than the chunks waiting for it)
+				this.applyPending(key);
+				List<LodChunks.Summary> real = level == 0 ? this.waiting.remove(key) : null;
 				if (real != null) for (LodChunks.Summary s : real) this.applyChunk(s);
 			}
 			this.arrived(key);
@@ -202,17 +217,22 @@ final class LodField {
 	private void produce(long key, int[] g, int[] c, int @org.jspecify.annotations.Nullable [] cr, int @org.jspecify.annotations.Nullable [] tw,
 		int @org.jspecify.annotations.Nullable [] rn, int @org.jspecify.annotations.Nullable [] pl) {
 		synchronized (this.lock(key)) {
-			this.produce0(key, g, c, cr, tw, rn, pl);
+			this.produce0(key, g, c, cr, tw, rn, pl, true);
 		}
 	}
 
+	/** consume: a patch queued for the tile goes into the words now (and into its file), so the tile is put with it. */
 	private void produce0(long key, int[] g, int[] c, int @org.jspecify.annotations.Nullable [] cr, int @org.jspecify.annotations.Nullable [] tw,
-		int @org.jspecify.annotations.Nullable [] rn, int @org.jspecify.annotations.Nullable [] pl) {
+		int @org.jspecify.annotations.Nullable [] rn, int @org.jspecify.annotations.Nullable [] pl, boolean consume) {
 		int level = LodTile.levelOf(key), tx = LodTile.txOf(key), tz = LodTile.tzOf(key);
 		long start = System.nanoTime();
 		boolean fromDisk = LodConfig.DISK_CACHE && this.load(key, g, c, cr, tw, rn, pl);
 		if (!fromDisk && this.noise == null) {
-			// nothing to generate from: an empty tile (no cell valid, nothing drawn) for the real chunks to fill
+			// nothing to generate from: an empty tile (no cell valid, nothing drawn) for the real chunks to fill (and nothing of a
+			// file that failed to load halfway)
+			java.util.Arrays.fill(g, 0);
+			java.util.Arrays.fill(c, 0);
+			for (int[] a : new int[][] {cr, tw, rn, pl}) if (a != null) java.util.Arrays.fill(a, 0);
 			this.empty.incrementAndGet();
 		} else if (!fromDisk) {
 			LodTile t = new LodTile(level, tx, tz);
@@ -234,17 +254,23 @@ final class LodField {
 		} else {
 			this.loaded.incrementAndGet();
 		}
+		Patch q = consume ? this.queued.remove(key) : null;
+		if (q != null) {
+			applyTo(q, g, c, cr, tw, rn, pl);
+			if (LodConfig.DISK_CACHE) this.save0(key, g, c, cr, tw, rn, pl);
+			this.patched.incrementAndGet();
+		}
 	}
 
 	/** Striped locks over the cache's files: a tile's file is read, generated and written by one thread at a time. */
-	private final Object[] locks = new Object[256];
+	private final Object[] locks = new Object[4096];
 
 	{
 		for (int i = 0; i < this.locks.length; i++) this.locks[i] = new Object();
 	}
 
 	private Object lock(long key) {
-		return this.locks[(int) ((key ^ key >>> 32) * 0x9E3779B97F4A7C15L >>> 56)];
+		return this.locks[(int) ((key ^ key >>> 32) * 0x9E3779B97F4A7C15L >>> 52)];
 	}
 
 	/**
@@ -592,8 +618,9 @@ final class LodField {
 		this.results.add(() -> {
 			var level = net.minecraft.client.Minecraft.getInstance().level;
 			if (level != null && level.getChunkSource().hasChunk(s.chunkX(), s.chunkZ())) return;
-			int span = this.clip.span(0);
-			if (this.clip.resident(0, Math.floorDiv(s.chunkX() * 16, span), Math.floorDiv(s.chunkZ() * 16, span))) this.applyChunk(s, 0, 1);
+			int span = this.clip.span(0), tx = Math.floorDiv(s.chunkX() * 16, span), tz = Math.floorDiv(s.chunkZ() * 16, span);
+			if (this.clip.resident(0, tx, tz)) this.applyChunk(s, 0, 1);
+			else if (PATCHES) this.patch(s, 0, tx, tz);
 			if (this.clip.levels > 1) this.applyChunk(s, 1, this.clip.levels);
 		});
 	}
@@ -716,29 +743,50 @@ final class LodField {
 	 */
 	static final boolean PATCHES = LodConfig.DISK_CACHE && Boolean.parseBoolean(System.getProperty("mcopt.lod.patches", "true"));
 
-	/** A coarser tile's cells from real chunks, for its cache file: cell indices and their words, in arrival order (last wins). */
+	/**
+	 * A tile's cells from real chunks, for when it isn't in memory: cell indices and their words as applyChunk writes them, in
+	 * arrival order (last wins). generate: the tile may be generated for it (it's in its window, or there's no noise: an empty
+	 * tile); otherwise only an existing cache file takes it.
+	 */
 	private static final class Patch {
 		final it.unimi.dsi.fastutil.ints.IntArrayList cells = new it.unimi.dsi.fastutil.ints.IntArrayList(), g = new it.unimi.dsi.fastutil.ints.IntArrayList(),
-			c = new it.unimi.dsi.fastutil.ints.IntArrayList(), cr = new it.unimi.dsi.fastutil.ints.IntArrayList(), runs = new it.unimi.dsi.fastutil.ints.IntArrayList();
+			c = new it.unimi.dsi.fastutil.ints.IntArrayList(), cr = new it.unimi.dsi.fastutil.ints.IntArrayList(), runs = new it.unimi.dsi.fastutil.ints.IntArrayList(),
+			tw = new it.unimi.dsi.fastutil.ints.IntArrayList(), pa = new it.unimi.dsi.fastutil.ints.IntArrayList(), pb = new it.unimi.dsi.fastutil.ints.IntArrayList();
+		boolean generate;
+
+		/** This patch followed by a later one. */
+		Patch then(Patch later) {
+			this.cells.addAll(later.cells);
+			this.g.addAll(later.g);
+			this.c.addAll(later.c);
+			this.cr.addAll(later.cr);
+			this.runs.addAll(later.runs);
+			this.tw.addAll(later.tw);
+			this.pa.addAll(later.pa);
+			this.pb.addAll(later.pb);
+			this.generate |= later.generate;
+			return this;
+		}
 	}
 
-	/**
-	 * Patches after the tiles in view (a patch may have to generate its tile first), before those out of view. At close the
-	 * queued ones are written all the same (close takes every SAVE_KEY job).
-	 */
-	private static final double PATCH_PRIORITY = 0;
-
-	/** Render thread: patches waiting for the next save (by tile key). */
+	/** Render thread: patches waiting for the next save (by tile key), newer than the queued ones. */
 	private final java.util.HashMap<Long, Patch> patches = new java.util.HashMap<>();
+	/**
+	 * Patches handed to the workers and not yet written (by tile key, older first when merged): taken by whichever comes
+	 * first under the tile's lock, its patch job (into the file) or the tile's own loading (into the words it loads), or by
+	 * the render thread when the tile is put meanwhile.
+	 */
+	private final ConcurrentHashMap<Long, Patch> queued = new ConcurrentHashMap<>();
 	final AtomicLong patched = new AtomicLong();
 
-	/** A chunk's cells on a coarser level whose tile isn't resident, as applyChunk would write them, into the tile's patch. */
+	/** A chunk's cells on a level whose tile isn't resident, as applyChunk would write them, into the tile's patch. */
 	private void patch(LodChunks.Summary s, int level, int tx, int tz) {
 		int bx = s.chunkX() * 16, bz = s.chunkZ() * 16, cell = 1 << level;
 		int c0x = Math.ceilDiv(bx, cell), c1x = Math.floorDiv(bx + 15, cell);
 		int c0z = Math.ceilDiv(bz, cell), c1z = Math.floorDiv(bz + 15, cell);
 		if (c0x > c1x || c0z > c1z) return;
 		Patch p = this.patches.computeIfAbsent(LodTile.key(level, tx, tz), k -> new Patch());
+		if (this.noise == null || this.clip.inWindow(level, tx, tz)) p.generate = true;
 		int x0 = tx * LodTile.SIZE, z0 = tz * LodTile.SIZE;
 		for (int cz = c0z; cz <= c1z; cz++) {
 			for (int cx = c0x; cx <= c1x; cx++) {
@@ -752,19 +800,36 @@ final class LodField {
 					p.c.add(LodClip.colorWord(s.top()[k], s.side()[k]));
 					p.cr.add(LodClip.crownWord(surface, s.groundColor()[k]));
 					p.runs.add(s.runs()[k]);
+					p.tw.add(s.tex()[k]);
+					p.pa.add(0);
+					p.pb.add(0);
+				} else if (level == 0) {
+					int pa = s.plantA()[k];
+					p.g.add(LodClip.geomWord(Math.max(surface, s.crownHi()[k]), wet) | clear | (s.fringe()[k] && !wet ? LodClip.GEOM_FRINGE : 0)
+						| ((pa & 1023) != 0 && !wet ? LodClip.plantBits((pa >> 20 & 3) + 1) : 0));
+					p.c.add(LodClip.colorWord(s.top()[k], s.side()[k]));
+					p.cr.add(LodClip.belowWord(s.below()[k]));
+					p.runs.add(0);
+					p.tw.add(s.tex()[k]);
+					p.pa.add(pa);
+					p.pb.add(s.plantB()[k]);
 				} else {
 					p.g.add(LodClip.geomWord(Math.max(surface, s.crownHi()[k]), wet) | clear);
 					p.c.add(LodClip.colorWord(s.top()[k], LodColors.mix(s.side()[k], s.below()[k], 0.6F)));
 					p.cr.add(0);
 					p.runs.add(0);
+					p.tw.add(0);
+					p.pa.add(0);
+					p.pb.add(0);
 				}
 			}
 		}
 	}
 
 	/**
-	 * With the saves: each waiting patch into its tile, in memory if the tile is resident by now, else into its cache file (on
-	 * a worker, or here with sync), after which the tile, if it has become resident meanwhile, takes the cells too.
+	 * With the saves: each waiting patch into its tile, in memory if the tile is resident by now, else handed to the workers
+	 * (queued, then a job at the saves' priority, so saves and patches of a tile run in the order they were made), or with
+	 * sync written here.
 	 */
 	private int flushPatches(boolean sync) {
 		if (this.patches.isEmpty()) return 0;
@@ -774,11 +839,9 @@ final class LodField {
 			Patch p = e.getValue();
 			if (this.applyResident(key, p)) continue;
 			n++;
-			if (sync) this.patchFile(key, p);
-			else this.jobs.add(new Job(PATCH_PRIORITY, this.seq.incrementAndGet(), SAVE_KEY, () -> {
-				this.patchFile(key, p);
-				this.results.add(() -> this.applyResident(key, p));
-			}));
+			this.queued.merge(key, p, Patch::then);
+			if (sync) this.patchFile(key);
+			else this.jobs.add(new Job(SAVE_PRIORITY, this.seq.incrementAndGet(), SAVE_KEY, () -> this.patchFile(key)));
 		}
 		this.patches.clear();
 		return n;
@@ -791,35 +854,58 @@ final class LodField {
 		int x0 = tx * LodTile.SIZE, z0 = tz * LodTile.SIZE;
 		for (int i = 0; i < p.cells.size(); i++) {
 			int cell = p.cells.getInt(i);
-			this.clip.putCell(level, x0 + cell % LodTile.SIZE, z0 + cell / LodTile.SIZE, p.g.getInt(i), p.c.getInt(i), p.cr.getInt(i), 0, p.runs.getInt(i), 0, 0);
+			this.clip.putCell(level, x0 + cell % LodTile.SIZE, z0 + cell / LodTile.SIZE, p.g.getInt(i), p.c.getInt(i), p.cr.getInt(i), p.tw.getInt(i),
+				p.runs.getInt(i), p.pa.getInt(i), p.pb.getInt(i));
 		}
 		this.touched.add(key);
 		this.dirtyTiles.add(key);
 		return true;
 	}
 
-	/** Worker: the patch into the tile's cache file (read, or produced first, then written back), under the tile's lock. */
-	private void patchFile(long key, Patch p) {
+	/** Render thread, right after a tile is put: the patches made for it while it wasn't resident, older first. */
+	private void applyPending(long key) {
+		Patch q = this.queued.remove(key);
+		if (q != null) this.applyResident(key, q);
+		Patch p = this.patches.remove(key);
+		if (p != null) this.applyResident(key, p);
+	}
+
+	/** A patch into a tile's words (as putCell keeps them: crowns and plants only where the level has them). */
+	private static void applyTo(Patch p, int[] g, int[] c, int @org.jspecify.annotations.Nullable [] cr, int @org.jspecify.annotations.Nullable [] tw,
+		int @org.jspecify.annotations.Nullable [] rn, int @org.jspecify.annotations.Nullable [] pl) {
+		for (int i = 0; i < p.cells.size(); i++) {
+			int cell = p.cells.getInt(i), gw = p.g.getInt(i);
+			if (pl == null) gw &= ~LodClip.GEOM_PLANT_BITS;
+			if (cr == null) gw &= ~LodClip.GEOM_CROWN_BITS;
+			g[cell] = gw;
+			c[cell] = p.c.getInt(i);
+			if (cr != null) cr[cell] = p.cr.getInt(i);
+			if (rn != null) rn[cell] = p.runs.getInt(i);
+			if (tw != null) tw[cell] = p.tw.getInt(i);
+			if (pl != null) {
+				pl[cell] = p.pa.getInt(i);
+				pl[LodTile.CELLS + cell] = p.pb.getInt(i);
+			}
+		}
+	}
+
+	/** Worker (or the render thread at close): the tile's queued patch into its cache file, under the tile's lock. */
+	private void patchFile(long key) {
 		int level = LodTile.levelOf(key);
 		int[] g = new int[LodTile.CELLS], c = new int[LodTile.CELLS];
 		int[] cr = level < this.clip.crownLevels ? new int[LodTile.CELLS] : null;
+		int[] tw = level == 0 && LodConfig.TEXTURES ? new int[LodTile.CELLS] : null;
 		int[] rn = cr != null ? new int[LodTile.CELLS] : null;
-		// (closing, on the render thread: a tile with nothing cached isn't generated just for the patch)
-		if (this.closed && this.noise != null && !Files.exists(this.file(key))) return;
+		int[] pl = level == 0 && this.clip.plants ? new int[2 * LodTile.CELLS] : null;
 		synchronized (this.lock(key)) {
-			this.produce0(key, g, c, cr, null, rn, null);
-			for (int i = 0; i < p.cells.size(); i++) {
-				int cell = p.cells.getInt(i), gw = p.g.getInt(i) & ~LodClip.GEOM_PLANT_BITS;
-				// as putCell keeps them: crowns only on the levels that have them
-				if (cr == null) gw &= ~LodClip.GEOM_CROWN_BITS;
-				g[cell] = gw;
-				c[cell] = p.c.getInt(i);
-				if (cr != null) {
-					cr[cell] = p.cr.getInt(i);
-					rn[cell] = p.runs.getInt(i);
-				}
-			}
-			this.save0(key, g, c, cr, null, rn, null);
+			Patch p = this.queued.remove(key);
+			// (taken by the tile's loading meanwhile, or by the render thread: nothing left to write)
+			if (p == null) return;
+			// a tile with nothing cached isn't generated for a patch outside its window (it may never be drawn), nor at close
+			if (this.noise != null && (!p.generate || this.closed) && !Files.exists(this.file(key))) return;
+			this.produce0(key, g, c, cr, tw, rn, pl, false);
+			applyTo(p, g, c, cr, tw, rn, pl);
+			this.save0(key, g, c, cr, tw, rn, pl);
 		}
 		this.patched.incrementAndGet();
 	}
@@ -1035,7 +1121,8 @@ final class LodField {
 		int[] tw = level == 0 && LodConfig.TEXTURES ? new int[LodTile.CELLS] : null;
 		int[] rn = cr != null ? new int[LodTile.CELLS] : null;
 		int[] pl = level == 0 && this.clip.plants ? new int[2 * LodTile.CELLS] : null;
-		this.clip.read(level, tx, tz, g, c, cr, tw, rn, pl);
+		// (the newest words: real chunks' cells may still be staged, or published but not yet copied by the GPU)
+		this.clip.readForSave(level, tx, tz, g, c, cr, tw, rn, pl);
 		if (sync) this.save(key, g, c, cr, tw, rn, pl);
 		else this.jobs.add(new Job(SAVE_PRIORITY, this.seq.incrementAndGet(), SAVE_KEY, () -> this.save(key, g, c, cr, tw, rn, pl)));
 		return true;

@@ -57,6 +57,21 @@ final class LodWorlds {
 		}
 	}
 
+	/**
+	 * "_" and the world's hashed seed as the server sent it (what the client's biome lookups use), or "" when it can't be read
+	 * or is 0 (a server that hides it): worlds behind one address then share a cache, as before.
+	 */
+	static String seedSuffix(net.minecraft.client.multiplayer.ClientLevel level) {
+		try {
+			java.lang.reflect.Field f = net.minecraft.world.level.biome.BiomeManager.class.getDeclaredField("biomeZoomSeed");
+			f.setAccessible(true);
+			long seed = f.getLong(level.getBiomeManager());
+			return seed == 0 ? "" : "_" + Long.toHexString(seed);
+		} catch (ReflectiveOperationException | RuntimeException e) {
+			return "";
+		}
+	}
+
 	static String safe(String name) {
 		String s = name.strip().toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9._-]", "_");
 		// (no "." or ".." as a whole name, nothing too long for a file system)

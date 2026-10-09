@@ -81,8 +81,10 @@ final class LodColors {
 		int[] o = OVERRIDES.get(net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString());
 		if (o == null) return l;
 		int top = o[0] >= 0 ? o[0] : l.top(), side = o[1] >= 0 ? o[1] : l.side();
-		return new Look(top, side, o[0] >= 0 ? TINT_NONE : l.topTint(), o[1] >= 0 ? TINT_NONE : l.sideTint(), l.constant(), l.topUv(), l.sideUv(), l.cross(),
-			l.profile());
+		// an overridden face is drawn flat in its color: no sprite (the textured path scales the sprite by color / average, which
+		// for an override would be the raw texture)
+		return new Look(top, side, o[0] >= 0 ? TINT_NONE : l.topTint(), o[1] >= 0 ? TINT_NONE : l.sideTint(), l.constant(),
+			o[0] >= 0 ? new float[4] : l.topUv(), o[1] >= 0 ? new float[4] : l.sideUv(), l.cross(), l.profile());
 	}
 
 	/** The resources were reloaded (a resource pack changed): every look is read again from the new models and textures. */
@@ -103,18 +105,27 @@ final class LodColors {
 		java.util.Map<String, int[]> out = new java.util.HashMap<>();
 		java.nio.file.Path f = net.fabricmc.loader.api.FabricLoader.getInstance().getConfigDir().resolve("mcopt-lod-colors.properties");
 		if (!java.nio.file.Files.isRegularFile(f)) return out;
-		java.util.Properties p = new java.util.Properties();
-		try (var r = java.nio.file.Files.newBufferedReader(f)) {
-			p.load(r);
+		java.util.List<String> lines;
+		try {
+			lines = java.nio.file.Files.readAllLines(f, java.nio.charset.StandardCharsets.UTF_8);
 		} catch (java.io.IOException e) {
 			System.out.println("mcopt-lod: can't read " + f + ": " + e);
 			return out;
 		}
-		for (String k : p.stringPropertyNames()) {
-			String[] v = p.getProperty(k).split(",");
+		// (lines split at their '=' here: java.util.Properties would split modid:block at its ':')
+		for (String line : lines) {
+			String t = line.strip();
+			if (t.isEmpty() || t.startsWith("#") || t.startsWith("!")) continue;
+			int eq = t.indexOf('=');
+			if (eq <= 0) {
+				System.out.println("mcopt-lod: " + f.getFileName() + ": '" + t + "' isn't block=RRGGBB (ignored)");
+				continue;
+			}
+			String k = t.substring(0, eq).strip();
+			String[] v = t.substring(eq + 1).split(",");
 			try {
 				int top = rgb(v[0]), side = v.length > 1 ? rgb(v[1]) : top;
-				out.put(k.contains(":") ? k.strip() : "minecraft:" + k.strip(), new int[] {top, side});
+				out.put(k.contains(":") ? k : "minecraft:" + k, new int[] {top, side});
 			} catch (NumberFormatException e) {
 				System.out.println("mcopt-lod: " + f.getFileName() + ": " + k + " isn't RRGGBB or RRGGBB,RRGGBB (ignored)");
 			}

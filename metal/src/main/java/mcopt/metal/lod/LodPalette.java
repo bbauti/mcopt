@@ -29,7 +29,10 @@ final class LodPalette {
 	static synchronized void bind(long address) {
 		table = address;
 		MemoryUtil.memSet(address, 0, (long) MAX * STRIDE * 4);
-		IDS.forEach(LodPalette::write);
+		// (0 is "none": states remembered as past a full table aren't written there)
+		IDS.forEach((state, n) -> {
+			if (n != 0) write(state, n);
+		});
 	}
 
 	/** The block's number (0 when the table is full, or for air and fluids: they keep the flat color). */
@@ -54,6 +57,8 @@ final class LodPalette {
 					fullLogged = true;
 					System.out.println("mcopt-lod: the far terrain's block palette is full (" + (MAX - 1) + " looks): blocks met from now on are drawn with flat colors");
 				}
+				// (remembered: the next call for it doesn't take the lock again)
+				IDS.put(state, 0);
 				return 0;
 			}
 			NEXT.incrementAndGet();

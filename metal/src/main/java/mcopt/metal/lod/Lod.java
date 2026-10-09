@@ -240,7 +240,7 @@ public final class Lod {
 			this.dataReach = far;
 		}
 		double rd = mc.options.getEffectiveRenderDistance() * 16.0;
-		return (float) Math.clamp(this.dataReach, rd, reach);
+		return (float) Math.clamp(this.dataReach, Math.min(rd, reach), reach);
 	}
 
 	private double dataReach;
@@ -482,6 +482,8 @@ public final class Lod {
 
 	/** The current world's far terrain closed (saved) and its GPU buffers released a few frames from now. */
 	private void closeWorld() {
+		this.cullValid = false;
+		this.dataReachFrame = -1;
 		if (this.field != null) {
 			this.field.close();
 			this.field = null;
@@ -517,8 +519,13 @@ public final class Lod {
 			return;
 		}
 		Path root = LodConfig.CACHE_DIR != null ? Path.of(LodConfig.CACHE_DIR) : mc.gameDirectory.toPath().resolve("mcopt-lod");
+		// (a singleplayer save's own folder name: one name, from this computer's disk)
 		String save = server != null ? server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize().getFileName().toString() : LodWorlds.serverDir(mc);
-		Path cache = root.resolve(save).resolve(level.dimension().identifier().getNamespace() + "_" + level.dimension().identifier().getPath());
+		// (a server names its dimensions: as file names made safe, never a path out of the cache)
+		String dimDir = LodWorlds.safe(level.dimension().identifier().getNamespace()) + "_" + LodWorlds.safe(level.dimension().identifier().getPath());
+		// a server's worlds behind one address (a network's lobby and survival, a reset map) are told apart by their hashed seed
+		if (server == null) dimDir += LodWorlds.seedSuffix(level);
+		Path cache = root.resolve(save).resolve(dimDir);
 		// (a new world under an old one's folder name doesn't get the old one's far terrain)
 		if (sl != null && LodConfig.DISK_CACHE) LodWorlds.claim(cache, sl.getSeed());
 		// tiles cached under other crown or tree levels lack (or carry) data these levels need: their own directory

@@ -276,9 +276,15 @@ final class LodClip {
 	/** A staged snapshot's words into the clipmap (its mesh is installed in the same step); false when the tile isn't resident. */
 	boolean publish(Snapshot s) {
 		if (!this.resident(s.level, s.tx, s.tz) || s.epoch != this.epoch[s.level][this.slot(s.tx, s.tz)]) return false;
-		if (this.publisher != null) this.writeGpu(s.level, s.tx, s.tz, s.g, s.c, s.cr, s.tw, s.runs, s.pl);
-		else this.write(s.level, s.tx, s.tz, s.g, s.c, s.cr, s.tw, s.runs, s.pl);
 		long key = LodTile.key(s.level, s.tx, s.tz);
+		if (this.publisher != null) {
+			this.writeGpu(s.level, s.tx, s.tz, s.g, s.c, s.cr, s.tw, s.runs, s.pl);
+			// (the GPU writes these words a few frames from now: until then they're what the disk cache must get)
+			this.published.put(key, s);
+			this.publishedAt.put(key, this.frame);
+		} else {
+			this.write(s.level, s.tx, s.tz, s.g, s.c, s.cr, s.tw, s.runs, s.pl);
+		}
 		Snapshot st = this.staged.get(key);
 		if (st != null && st.version == s.version) this.staged.remove(key);
 		return true;
@@ -372,6 +378,58 @@ final class LodClip {
 	}
 
 	/** A resident tile's words, read back (for the disk cache after real chunks changed it); cr may be null. */
+	/** publish=gpu: tiles published in the last frames (their words reach the live buffer when the GPU's copy has run). */
+	private final java.util.HashMap<Long, Snapshot> published = new java.util.HashMap<>();
+	private final java.util.HashMap<Long, Long> publishedAt = new java.util.HashMap<>();
+	/** The frame the mesh path is on (set by LodMesh.integrate), for the published copies' age. */
+	private long frame;
+
+	/** Render thread, once a frame: published copies the GPU has surely written by now are let go. */
+	void frame(long frame) {
+		this.frame = frame;
+		if (this.publishedAt.isEmpty()) return;
+		for (var it = this.publishedAt.entrySet().iterator(); it.hasNext();) {
+			var e = it.next();
+			if (frame - e.getValue() <= 8) continue;
+			this.published.remove(e.getKey());
+			it.remove();
+		}
+	}
+
+	/**
+	 * A resident tile's newest words, for the disk cache: its staged copy (real chunks' cells not published with a mesh yet),
+	 * else its last published copy while the GPU may not have written it yet, else the live words. Render thread.
+	 */
+	void readForSave(int level, int tx, int tz, int[] g, int[] c, int @org.jspecify.annotations.Nullable [] cr, int @org.jspecify.annotations.Nullable [] tw,
+		int @org.jspecify.annotations.Nullable [] runs, int @org.jspecify.annotations.Nullable [] pl) {
+		long key = LodTile.key(level, tx, tz);
+		long ep = this.epoch[level][this.slot(tx, tz)];
+		Snapshot s = this.staged.get(key);
+		if (s == null || s.epoch != ep) s = this.published.get(key);
+		if (s == null || s.epoch != ep) {
+			this.read(level, tx, tz, g, c, cr, tw, runs, pl);
+			return;
+		}
+		System.arraycopy(s.g, 0, g, 0, g.length);
+		System.arraycopy(s.c, 0, c, 0, c.length);
+		if (cr != null) {
+			if (s.cr != null) System.arraycopy(s.cr, 0, cr, 0, cr.length);
+			else java.util.Arrays.fill(cr, 0);
+		}
+		if (runs != null) {
+			if (s.runs != null) System.arraycopy(s.runs, 0, runs, 0, runs.length);
+			else java.util.Arrays.fill(runs, 0);
+		}
+		if (tw != null) {
+			if (s.tw != null) System.arraycopy(s.tw, 0, tw, 0, tw.length);
+			else java.util.Arrays.fill(tw, 0);
+		}
+		if (pl != null) {
+			if (s.pl != null) System.arraycopy(s.pl, 0, pl, 0, pl.length);
+			else java.util.Arrays.fill(pl, 0);
+		}
+	}
+
 	void read(int level, int tx, int tz, int[] g, int[] c, int @org.jspecify.annotations.Nullable [] cr) {
 		this.read(level, tx, tz, g, c, cr, null, null, null);
 	}
