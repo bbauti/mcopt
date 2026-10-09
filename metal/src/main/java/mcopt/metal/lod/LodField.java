@@ -684,9 +684,28 @@ final class LodField {
 					}
 				}
 			}
-			this.clip.refresh(level, tx, tz);
+			this.touched.add(LodTile.key(level, tx, tz));
 			this.dirtyTiles.add(LodTile.key(level, tx, tz));
 		}
+	}
+
+	/**
+	 * Tiles real chunks wrote cells into since the last flushTouched: refreshed once each a frame, not once a chunk (with
+	 * paired publishing a refresh copies the whole tile for its mesh: a burst of chunks, a server's join or the import, made
+	 * one copy and one remesh per chunk per level). Render thread.
+	 */
+	private final it.unimi.dsi.fastutil.longs.LongOpenHashSet touched = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+
+	/** Render thread, once a frame after the chunks were applied: every touched tile still resident refreshed (its maxima, its mesh). */
+	void flushTouched() {
+		if (this.touched.isEmpty()) return;
+		var it = this.touched.iterator();
+		while (it.hasNext()) {
+			long key = it.nextLong();
+			int level = LodTile.levelOf(key), tx = LodTile.txOf(key), tz = LodTile.tzOf(key);
+			if (this.clip.resident(level, tx, tz)) this.clip.refresh(level, tx, tz);
+		}
+		this.touched.clear();
 	}
 
 	/**
@@ -774,7 +793,7 @@ final class LodField {
 			int cell = p.cells.getInt(i);
 			this.clip.putCell(level, x0 + cell % LodTile.SIZE, z0 + cell / LodTile.SIZE, p.g.getInt(i), p.c.getInt(i), p.cr.getInt(i), 0, p.runs.getInt(i), 0, 0);
 		}
-		this.clip.refresh(level, tx, tz);
+		this.touched.add(key);
 		this.dirtyTiles.add(key);
 		return true;
 	}

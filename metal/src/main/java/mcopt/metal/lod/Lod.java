@@ -579,6 +579,8 @@ public final class Lod {
 			w.hold = cl == null ? null : key -> this.heldInView((int) (key >> 32), (int) key, cl);
 			w.releaseHeld();
 		}
+		// (the tiles this frame's chunks, patches and held chunks wrote: one refresh each)
+		w.flushTouched();
 		this.partNanos[2] += System.nanoTime() - t2;
 		boolean probeOn = this.probe(start);
 		if (!LodConfig.DRAW || !drawEnabled || !probeOn || !MetalBridge.inRenderPass(this.encoder)) {
