@@ -152,6 +152,7 @@ final class LodVoxyImport implements Runnable {
 			if (this.stopped) return;
 			String signature = signature(this.storage);
 			if (Files.isRegularFile(this.done) && Files.readString(this.done).strip().equals(signature)) return;
+			System.out.println("mcopt-lod: importing Voxy's save " + this.storage);
 			try (LodRocks db = new LodRocks(this.storage)) {
 				this.importAll(db);
 			}
@@ -368,7 +369,7 @@ final class LodVoxyImport implements Runnable {
 
 	/** Waits while the field is busy, as LodImport does. */
 	private void pace() throws InterruptedException {
-		while (!this.stopped && (this.field.resultsWaiting() > 256 || this.field.queued() > 64 || LodYield.ON && LodYield.pressure)) Thread.sleep(20);
+		while (!this.stopped && (this.field.resultsWaiting() > 256 || this.field.queued() > 64 || LodYield.importsWait())) Thread.sleep(20);
 	}
 
 	/** One chunk (16 x 16 columns at (ox, oz) of a column of sections) as LodChunks.snapshot reads blocks. */

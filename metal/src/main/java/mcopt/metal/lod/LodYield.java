@@ -40,6 +40,8 @@ final class LodYield {
 	static final int BUDGET = Integer.getInteger("mcopt.lod.yield.budget", 0);
 
 	static volatile boolean pressure;
+	/** An integrated server runs (singleplayer): what the pressure gives way to. Sampled with it. */
+	static volatile boolean local;
 	/** The coarsest level (its tiles never wait), set by Lod with the clipmap. */
 	static volatile int top = Integer.MAX_VALUE;
 	private static final AtomicInteger holders = new AtomicInteger(), paused = new AtomicInteger();
@@ -62,6 +64,7 @@ final class LodYield {
 			p = LodGenStats.missing(mc.level, camX, camZ, rd, thresh) > thresh;
 		}
 		pressure = p;
+		local = mc.getSingleplayerServer() != null;
 		sampledFrames.incrementAndGet();
 		if (p) pressureFrames.incrementAndGet();
 	}
@@ -126,6 +129,15 @@ final class LodYield {
 			}
 		}
 		return false;
+	}
+
+	/**
+	 * The importers (saved chunks, Voxy's, Distant Horizons'): wait while the pressure is on, with an integrated server to give way
+	 * to. On a server's world the pressure only means chunks are still on their way (with a server view distance under the
+	 * client's, or while moving, nearly always): the imports waited there for good.
+	 */
+	static boolean importsWait() {
+		return ON && pressure && local;
 	}
 
 	/** The server's worldgen pool (Worker-Main): threads busy now (approximate, any thread may ask). */

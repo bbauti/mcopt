@@ -164,7 +164,7 @@ final class LodImport implements Runnable {
 
 	/** Waits while the field is busy (results to take, saves and patches queued) or the server lacks chunks near the player. */
 	private void pace() throws InterruptedException {
-		while (!this.stopped && (this.field.resultsWaiting() > 256 || this.field.queued() > 64 || LodYield.ON && LodYield.pressure)) Thread.sleep(20);
+		while (!this.stopped && (this.field.resultsWaiting() > 256 || this.field.queued() > 64 || LodYield.importsWait())) Thread.sleep(20);
 	}
 
 	private static double regionDistance(Path f, double cx, double cz) {

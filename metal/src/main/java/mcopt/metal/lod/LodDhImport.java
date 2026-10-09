@@ -58,6 +58,14 @@ final class LodDhImport implements Runnable {
 	private volatile boolean stopped;
 	private final Thread thread;
 	final AtomicLong chunks = new AtomicLong(), sections = new AtomicLong(), skipped = new AtomicLong();
+	/**
+	 * FullData's rows passed (all of them, in the file's order) and the ones before resumeRow skipped unread: a session that closes
+	 * first leaves "<signature> <rows done>" in dh-import.txt, and the next one goes on from there (a 225 MB save takes longer than a
+	 * short session, and starting over each time it never finished). By detail level: level 0 is read, coarser ones aren't.
+	 */
+	private long rowsDone, resumeRow, rowsXz, rowsFar, lastReport;
+	private final long[] rowsByLevel = new long[16];
+	private String signature = "";
 
 	private LodDhImport(LodField field, Path db, @Nullable Path regions, int minY, Registry<Block> blocks, Registry<Biome> biomes, Holder<Biome> fallbackBiome) {
 		this.field = field;
@@ -184,20 +192,61 @@ final class LodDhImport implements Runnable {
 			while (!this.stopped && !this.field.settled && System.nanoTime() < until) Thread.sleep(500);
 			if (this.stopped) return;
 			String signature = signature(this.db);
-			if (Files.isRegularFile(this.done) && Files.readString(this.done).strip().equals(signature)) return;
+			String done = Files.isRegularFile(this.done) ? Files.readString(this.done).strip() : "";
+			if (done.equals(signature)) return;
+			this.signature = signature;
+			if (done.startsWith(signature + " ")) {
+				try {
+					this.resumeRow = Long.parseLong(done.substring(signature.length() + 1).trim());
+				} catch (NumberFormatException e) {
+					this.resumeRow = 0;
+				}
+			}
+			this.lastReport = System.nanoTime();
+			System.out.printf(java.util.Locale.ROOT, "mcopt-lod: importing Distant Horizons' save %s (%d MB)%s%n", this.db, Files.size(this.db) >> 20,
+				this.resumeRow > 0 ? ", from row " + this.resumeRow + ", where the last session stopped" : "");
 			try (LodSqlite sql = new LodSqlite(this.db)) {
 				this.importAll(sql);
 			}
-			if (this.stopped) return;
+			if (this.stopped) {
+				this.paused();
+				return;
+			}
 			Files.createDirectories(this.done.getParent());
 			Files.writeString(this.done, signature + "\n");
-			System.out.printf("mcopt-lod: imported %d chunks from Distant Horizons' save (%d sections; %d chunks left to the world's own)%n", this.chunks.get(),
-				this.sections.get(), this.skipped.get());
+			System.out.printf(java.util.Locale.ROOT, "mcopt-lod: imported %d chunks from Distant Horizons' save (%d sections; %d chunks left to the world's own; %s)%n",
+				this.chunks.get(), this.sections.get(), this.skipped.get(), this.rowCounts());
 		} catch (InterruptedException e) {
-			// closing
+			if (this.stopped) this.paused();
 		} catch (IOException | RuntimeException e) {
-			System.out.println("mcopt-lod: Distant Horizons import stopped: " + e);
+			// (closing interrupts a read, which closes the file's channel: that's a pause too)
+			if (this.stopped) this.paused();
+			else System.out.println("mcopt-lod: Distant Horizons import stopped: " + e);
 		}
+	}
+
+	/** Closing before the end: where it got to, for the next session. */
+	private void paused() {
+		if (this.signature.isEmpty()) return;
+		this.saveProgress();
+		System.out.printf(java.util.Locale.ROOT, "mcopt-lod: Distant Horizons import paused at row %d (%d chunks imported this session); it goes on next time%n",
+			this.rowsDone, this.chunks.get());
+	}
+
+	private void saveProgress() {
+		try {
+			Files.createDirectories(this.done.getParent());
+			Files.writeString(this.done, this.signature + " " + Math.max(this.rowsDone, this.resumeRow) + "\n");
+		} catch (IOException e) {
+			System.out.println("mcopt-lod: can't save the Distant Horizons import's progress: " + e);
+		}
+	}
+
+	private String rowCounts() {
+		long coarser = 0;
+		for (int l = 1; l < this.rowsByLevel.length; l++) coarser += this.rowsByLevel[l];
+		return String.format(java.util.Locale.ROOT, "%d rows read this session: %d at full detail (%d beyond the far terrain's reach, %d xz-compressed, not read), "
+			+ "%d coarser (not read)", this.rowsDone - this.resumeRow, this.rowsByLevel[0], this.rowsFar, this.rowsXz, coarser);
 	}
 
 	private static String signature(Path db) throws IOException {
@@ -231,9 +280,30 @@ final class LodDhImport implements Runnable {
 		int[] unreadable = {0};
 		sql.rows(t.root(), row -> {
 			if (this.stopped) return false;
-			if (!(row[cLevel] instanceof Long lv) || lv != 0 || !(row[cX] instanceof Long px) || !(row[cZ] instanceof Long pz)) return true;
+			// (a row is done once passed whole: one a close cut short is read again next time)
+			long index = this.rowsDone;
+			if (index < this.resumeRow) {
+				this.rowsDone++;
+				return true;
+			}
+			long now = System.nanoTime();
+			if (now - this.lastReport > 30_000_000_000L) {
+				this.lastReport = now;
+				this.saveProgress();
+				System.out.printf(java.util.Locale.ROOT, "mcopt-lod: Distant Horizons import: row %d, %d chunks imported%n", index, this.chunks.get());
+			}
+			if (row[cLevel] instanceof Long lv && lv >= 0 && lv < this.rowsByLevel.length) this.rowsByLevel[(int) (long) lv]++;
+			if (!(row[cLevel] instanceof Long lv) || lv != 0 || !(row[cX] instanceof Long px) || !(row[cZ] instanceof Long pz)) {
+				this.rowsDone++;
+				return true;
+			}
+			if (row[cMode] instanceof Long md && md == 3) this.rowsXz++;
 			int x0 = (int) (long) px * WIDTH, z0 = (int) (long) pz * WIDTH;
-			if (Math.hypot(x0 + WIDTH / 2.0 - this.field.camX, z0 + WIDTH / 2.0 - this.field.camZ) > reach) return true;
+			if (Math.hypot(x0 + WIDTH / 2.0 - this.field.camX, z0 + WIDTH / 2.0 - this.field.camZ) > reach) {
+				this.rowsFar++;
+				this.rowsDone++;
+				return true;
+			}
 			Section s;
 			try {
 				byte[][] adj = new byte[4][];
@@ -243,9 +313,13 @@ final class LodDhImport implements Runnable {
 					row[cMode] instanceof Long md ? (int) (long) md : 0, pairs);
 			} catch (IOException | RuntimeException e) {
 				if (unreadable[0]++ < 3) System.out.println("mcopt-lod: Distant Horizons section " + px + "," + pz + " unreadable: " + e);
+				this.rowsDone++;
 				return true;
 			}
-			if (s == null) return true;
+			if (s == null) {
+				this.rowsDone++;
+				return true;
+			}
 			this.sections.incrementAndGet();
 			for (int q = 0; q < 16; q++) {
 				int ox = (q & 3) * 16, oz = (q >> 2) * 16;
@@ -265,6 +339,7 @@ final class LodDhImport implements Runnable {
 				this.field.imported(LodChunks.summarize(LodChunks.snapshot(src, chunkX, chunkZ, this.field.roof, false)));
 				this.chunks.incrementAndGet();
 			}
+			this.rowsDone++;
 			return true;
 		});
 	}
@@ -482,7 +557,7 @@ final class LodDhImport implements Runnable {
 	}
 
 	private void pace() throws InterruptedException {
-		while (!this.stopped && (this.field.resultsWaiting() > 256 || this.field.queued() > 64 || LodYield.ON && LodYield.pressure)) Thread.sleep(20);
+		while (!this.stopped && (this.field.resultsWaiting() > 256 || this.field.queued() > 64 || LodYield.importsWait())) Thread.sleep(20);
 	}
 
 	/** One chunk (16 x 16 columns at (ox, oz) of a section) as LodChunks.snapshot reads blocks. */
