@@ -10,7 +10,7 @@ import java.nio.file.Path;
 import java.util.List;
 
 /**
- * Measurement only (-Dmcopt.own.int.frameLog=true): one row per submitted frame, written to framelog.csv in the working directory
+ * Measurement only (-Dmcopt.own.int.frameLog=true): one row per submitted frame, written to framelog-<launch time>.csv in the working directory
  * when the game exits. Per frame: when it ended (epoch ms), its wall time (submit to submit), the render thread's wait time per site
  * (WaitStats' sites: in-flight limit, fence, nextDrawable, pacer, drain), time in timed regions of the render thread (client tick,
  * frame extract, frame render, vanilla's section scheduling, translucent resort scheduling, our terrain's per-frame event apply),
@@ -20,6 +20,11 @@ import java.util.List;
  */
 public final class FrameLog {
 	public static final boolean ON = Boolean.getBoolean("mcopt.own.int.frameLog");
+	/**
+	 * The launch's time in every file name (framelog-, framelog-passes-, enclog-), so a run doesn't overwrite the last one's, and
+	 * framelog-<time>-flags.txt with the mcopt.* options it ran with (the A/B runs' only record of which was which).
+	 */
+	private static final String STAMP = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
 	public static final int TICK = 0, EXTRACT = 1, RENDER = 2, COMPILE = 3, RESORT_SCHED = 4, OWN_BEGIN = 5, TEXTURES = 6;
 	private static final String[] REGIONS = {"tickUs", "extractUs", "renderUs", "compileUs", "resortSchedUs", "ownBeginUs", "texTickUs"};
 	public static final int PUBLISH = 0, RESORT = 1, RELEASE = 2, CLEAR = 3;
@@ -48,7 +53,7 @@ public final class FrameLog {
 	static {
 		if (ON) {
 			Runtime.getRuntime().addShutdownHook(new Thread(FrameLog::write, "mcopt-framelog"));
-			System.out.println("mcopt-framelog: on (framelog.csv at exit)");
+			System.out.println("mcopt-framelog: on (framelog-" + STAMP + ".csv at exit)");
 		}
 	}
 
@@ -177,7 +182,7 @@ public final class FrameLog {
 
 	private static void writeEncoders() {
 		if (encRows == 0) return;
-		Path out = Path.of(System.getProperty("user.dir"), "enclog.csv");
+		Path out = Path.of(System.getProperty("user.dir"), "enclog-" + STAMP + ".csv");
 		try (BufferedWriter w = Files.newBufferedWriter(out, StandardCharsets.US_ASCII)) {
 			w.write("submit,group,label,originUs,vsUs,veUs,fsUs,feUs\n");
 			long first = Math.max(0, encRows - ENC_CAP);
@@ -197,7 +202,16 @@ public final class FrameLog {
 
 	private static void write() {
 		writeEncoders();
-		Path out = Path.of(System.getProperty("user.dir"), "framelog.csv");
+		try {
+			StringBuilder f = new StringBuilder();
+			new java.util.TreeMap<>(System.getProperties()).forEach((k, v) -> {
+				if (k instanceof String key && key.startsWith("mcopt.")) f.append(key).append('=').append(v).append('\n');
+			});
+			Files.writeString(Path.of(System.getProperty("user.dir"), "framelog-" + STAMP + "-flags.txt"), f, StandardCharsets.UTF_8);
+		} catch (IOException | RuntimeException e) {
+			// measurement only
+		}
+		Path out = Path.of(System.getProperty("user.dir"), "framelog-" + STAMP + ".csv");
 		try (BufferedWriter w = Files.newBufferedWriter(out, StandardCharsets.US_ASCII)) {
 			StringBuilder h = new StringBuilder("endMs,submit,wallUs,cpuUs,allocKb,gcCount,gcMs");
 			for (String s : WAITS) h.append(',').append(s);
@@ -224,7 +238,7 @@ public final class FrameLog {
 			StringBuilder b = new StringBuilder("render passes made in the client tick (count, target pixels each, key):\n");
 			tickPasses.forEach((k, v) -> b.append(v[0]).append("x ").append(v[1] / Math.max(1, v[0])).append(" px  ").append(k).append('\n'));
 			try {
-				Files.writeString(Path.of(System.getProperty("user.dir"), "framelog-passes.txt"), b, StandardCharsets.UTF_8);
+				Files.writeString(Path.of(System.getProperty("user.dir"), "framelog-passes-" + STAMP + ".txt"), b, StandardCharsets.UTF_8);
 			} catch (IOException e) {
 				// measurement only
 			}

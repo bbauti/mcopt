@@ -4,7 +4,7 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.loader.api.FabricLoader;
 
 /**
- * The client entrypoint: far terrain's networking with servers running mcopt-server (mcopt.metal.lod.LodRemote), only when
+ * The client entrypoint: the profile's line for the log (Profile.logOverrides), and far terrain's networking with servers running mcopt-server (mcopt.metal.lod.LodRemote), only when
  * far terrain is on and Fabric API's networking is installed (without it, nothing of LodRemote loads).
  */
 public final class LodClientInit implements ClientModInitializer {
@@ -13,6 +13,7 @@ public final class LodClientInit implements ClientModInitializer {
 
 	@Override
 	public void onInitializeClient() {
+		Profile.logOverrides();
 		if (!LodSwitch.ENABLED) return;
 		if (!FabricLoader.getInstance().isModLoaded("fabric-networking-api-v1")) {
 			System.out.println("[mcopt] far terrain from servers needs Fabric API (not installed): far terrain on servers comes from what you see there only");

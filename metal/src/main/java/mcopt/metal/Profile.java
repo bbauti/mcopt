@@ -79,7 +79,23 @@ public final class Profile {
 		return false;
 	}
 
+	/**
+	 * What differs from the profile, for the log: the mcopt.* keys config/mcopt.properties and the command line set (applyFlags
+	 * prints its line in preLaunch, before the game sends System.out to its log, so latest.log never had it).
+	 */
+	private static String overrides = "";
+	private static boolean overridesLogged;
+
+	/** Client entrypoint (System.out goes to the log by then): the profile and the options that differ from it, once. */
+	public static synchronized void logOverrides() {
+		if (overridesLogged) return;
+		overridesLogged = true;
+		System.out.println("[mcopt] " + overrides);
+	}
+
 	private static void applyFlags() {
+		Map<String, String> commandLine = new TreeMap<>();
+		System.getProperties().stringPropertyNames().stream().filter(k -> k.startsWith("mcopt.")).forEach(k -> commandLine.put(k, System.getProperty(k)));
 		Properties file = new Properties();
 		Path cfg = gameDir().resolve("config").resolve("mcopt.properties");
 		if (Files.isRegularFile(cfg)) {
@@ -108,6 +124,13 @@ public final class Profile {
 			if (name.equals("alpha")) tier(flags);
 		}
 		file.stringPropertyNames().stream().filter(k -> k.startsWith("mcopt.")).forEach(k -> flags.put(k, file.getProperty(k).trim()));
+		StringBuilder o = new StringBuilder("profile " + name);
+		Map<String, String> fromFile = new TreeMap<>();
+		file.stringPropertyNames().stream().filter(k -> k.startsWith("mcopt.")).forEach(k -> fromFile.put(k, file.getProperty(k).trim()));
+		if (!fromFile.isEmpty()) o.append("; set in config/mcopt.properties:").append(list(fromFile));
+		if (!commandLine.isEmpty()) o.append("; set on the command line:").append(list(commandLine));
+		if (fromFile.isEmpty() && commandLine.isEmpty()) o.append(", no option changed");
+		overrides = o.toString();
 		if (flags.isEmpty()) return;
 		StringBuilder set = new StringBuilder(), kept = new StringBuilder();
 		flags.forEach((k, v) -> {
@@ -120,6 +143,12 @@ public final class Profile {
 		});
 		System.out.println("[mcopt] profile " + (name.isEmpty() ? "(config only)" : name) + ": set" + set
 			+ (kept.isEmpty() ? "" : "; kept from the command line:" + kept));
+	}
+
+	private static String list(Map<String, String> m) {
+		StringBuilder b = new StringBuilder();
+		m.forEach((k, v) -> b.append(' ').append(k).append('=').append(v));
+		return b.toString();
 	}
 
 	/** Small tier: GPU cores < 10 or RAM <= 8 GB, or either unreadable. Logs the tier and drops {@link #SMALL_OUT}. */
