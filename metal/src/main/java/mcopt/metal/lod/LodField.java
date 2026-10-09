@@ -68,7 +68,11 @@ final class LodField {
 	/** Render thread: chunks snapshotted and the time it took (ns). */
 	long snapshots, snapNanos;
 	long startNanos = System.nanoTime(), settledNanos, firstSettledNanos;
-	boolean settled;
+	volatile boolean settled;
+	/** The camera's position at the last update (for other threads: the importer's order). */
+	volatile double camX, camZ;
+	/** Singleplayer: the saved chunks' importer (LodImport), else null. */
+	@org.jspecify.annotations.Nullable LodImport importer;
 	int needed, missing;
 
 	private record Job(double priority, long seq, long key, Runnable task) implements Comparable<Job> {
@@ -100,6 +104,7 @@ final class LodField {
 
 	void close() {
 		this.closed = true;
+		if (this.importer != null) this.importer.stop();
 		for (Thread t : this.threads) t.interrupt();
 		if (this.scanner != null) this.scanner.shutdownNow();
 		// the saves still queued (real chunks' tiles: what was seen this session) are written now, not dropped with the queue
@@ -570,6 +575,26 @@ final class LodField {
 		}));
 	}
 
+	/**
+	 * LodImport (any thread): a saved chunk's summary, applied on the render thread unless the client has the chunk loaded
+	 * (its own summary is newer): level 0 only where its tile is resident (a level-0 tile out of its ring isn't drawn, and
+	 * waiting for it would hold every imported chunk of the window), coarser levels in memory or as patches of their files.
+	 */
+	void imported(LodChunks.Summary s) {
+		this.results.add(() -> {
+			var level = net.minecraft.client.Minecraft.getInstance().level;
+			if (level != null && level.getChunkSource().hasChunk(s.chunkX(), s.chunkZ())) return;
+			int span = this.clip.span(0);
+			if (this.clip.resident(0, Math.floorDiv(s.chunkX() * 16, span), Math.floorDiv(s.chunkZ() * 16, span))) this.applyChunk(s, 0, 1);
+			if (this.clip.levels > 1) this.applyChunk(s, 1, this.clip.levels);
+		});
+	}
+
+	/** Worker results the render thread hasn't taken yet. */
+	int resultsWaiting() {
+		return this.results.size();
+	}
+
 	/** Writes a chunk's columns into every resident tile that covers it: level 0 every column, coarser at sample points. */
 	private void applyChunk(LodChunks.Summary s) {
 		// -Dmcopt.lod.chunkHold: a chunk in view and not handed off yet keeps its coarser levels as they are for now (a rewrite
@@ -670,6 +695,12 @@ final class LodField {
 			c = new it.unimi.dsi.fastutil.ints.IntArrayList(), cr = new it.unimi.dsi.fastutil.ints.IntArrayList(), runs = new it.unimi.dsi.fastutil.ints.IntArrayList();
 	}
 
+	/**
+	 * Patches after the tiles in view (a patch may have to generate its tile first), before those out of view. At close the
+	 * queued ones are written all the same (close takes every SAVE_KEY job).
+	 */
+	private static final double PATCH_PRIORITY = 0;
+
 	/** Render thread: patches waiting for the next save (by tile key). */
 	private final java.util.HashMap<Long, Patch> patches = new java.util.HashMap<>();
 	final AtomicLong patched = new AtomicLong();
@@ -717,7 +748,7 @@ final class LodField {
 			if (this.applyResident(key, p)) continue;
 			n++;
 			if (sync) this.patchFile(key, p);
-			else this.jobs.add(new Job(SAVE_PRIORITY, this.seq.incrementAndGet(), SAVE_KEY, () -> {
+			else this.jobs.add(new Job(PATCH_PRIORITY, this.seq.incrementAndGet(), SAVE_KEY, () -> {
 				this.patchFile(key, p);
 				this.results.add(() -> this.applyResident(key, p));
 			}));
@@ -1031,6 +1062,8 @@ final class LodField {
 	 * moved a few blocks or tiles arrived.
 	 */
 	void update(double cx, double cz, FrustumIntersection frustum, double camY) {
+		this.camX = cx;
+		this.camZ = cz;
 		this.beforeRecenter(cx, cz);
 		boolean moved = this.clip.recenter(cx, cz);
 		for (int l = 0; l < this.clip.levels; l++) {
@@ -1128,6 +1161,8 @@ final class LodField {
 		this.lastX = cx;
 		this.lastZ = cz;
 		this.lastT = now;
+		this.camX = cx;
+		this.camZ = cz;
 		this.beforeRecenter(cx, cz);
 		boolean moved = this.clip.recenter(cx, cz);
 		for (int l = 0; l < this.clip.levels; l++) {

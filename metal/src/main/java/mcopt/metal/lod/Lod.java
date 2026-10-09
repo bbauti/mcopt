@@ -486,6 +486,10 @@ public final class Lod {
 		// (a dimension with a roof, the Nether: its columns are read from under the roof)
 		int roof = dim.hasCeiling() && LodConfig.CEILING ? dim.minY() + dim.logicalHeight() - 1 : Integer.MAX_VALUE;
 		this.field = new LodField(noise, this.clip, cache, roof);
+		// singleplayer: the dimension's saved chunks become far terrain too (what was explored before, as it is)
+		if (server != null && sl != null && LodImport.ON && LodConfig.DISK_CACHE && LodConfig.CHUNKS) {
+			this.field.importer = new LodImport(this.field, sl, server.getWorldPath(LevelResource.ROOT), cache);
+		}
 		if (noise == null) System.out.println("mcopt-lod: " + level.dimension().identifier() + (server == null ? " on a server" : " (not noise-generated, or a roof)")
 			+ ": far terrain from the chunks the client receives, kept in " + cache);
 		if (LodGenBench.ENABLED && noise != null) LodGenBench.start(noise, this.field);
@@ -1510,6 +1514,7 @@ public final class Lod {
 		m.put("chunksSummarized", w.chunksSummarized.get());
 		m.put("emptyTiles", w.empty.get());
 		m.put("patchedTiles", w.patched.get());
+		if (w.importer != null) m.put("importedChunks", w.importer.chunks.get());
 		m.put("cullsSkipped", l.cullsSkipped);
 		m.put("quality", LodConfig.QUALITY.name());
 		if (LodField.CHUNK_TILES) {

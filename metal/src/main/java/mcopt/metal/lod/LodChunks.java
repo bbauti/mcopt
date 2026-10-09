@@ -10,7 +10,6 @@ import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
-import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.levelgen.Heightmap;
@@ -65,7 +64,7 @@ final class LodChunks {
 	 * Under a roof: from y down through the roof's blocks to the first air, then through the air to what stands under it (its
 	 * y). A column solid all the way (no air within ROOF_SCAN blocks of the roof) keeps y: the roof is all there is to see.
 	 */
-	private static int underRoof(LevelChunk chunk, BlockPos.MutableBlockPos pos, int px, int pz, int y, int minY) {
+	private static int underRoof(net.minecraft.world.level.chunk.ChunkAccess chunk, BlockPos.MutableBlockPos pos, int px, int pz, int y, int minY) {
 		int k = y, floor = Math.max(minY + 1, y - ROOF_SCAN);
 		while (k > floor && !chunk.getBlockState(pos.set(px, k, pz)).isAir()) k--;
 		if (k <= floor) return y;
@@ -122,7 +121,7 @@ final class LodChunks {
 	 * blocks down, so the far terrain shows the ground under the roof instead of the roof's flat top. Integer.MAX_VALUE: none.
 	 */
 	@SuppressWarnings("unchecked")
-	static Snapshot snapshot(LevelChunk chunk, int roof) {
+	static Snapshot snapshot(net.minecraft.world.level.chunk.ChunkAccess chunk, int roof) {
 		int minY = chunk.getMinY();
 		BlockState[] top = new BlockState[256], under = new BlockState[256], crown = new BlockState[256], crownLeaf = new BlockState[256];
 		short[] height = new short[256], water = new short[256], crownLo = new short[256], crownHi = new short[256];
