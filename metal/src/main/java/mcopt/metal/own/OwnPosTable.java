@@ -38,8 +38,9 @@ final class OwnPosTable {
 				long n = OVERFLOW.incrementAndGet();
 				long now = System.nanoTime();
 				if (now > logAt) {
-					logAt = now + 5_000_000_000L;
-					System.out.println("mcopt-own mesh exactPos: table full (" + SIZE + "), " + n + " coordinates rounded to the grid");
+					// (once a minute: a full table stays full; what it rounds is within 1/4096 of a block, as before exactPos)
+					logAt = now + 60_000_000_000L;
+					System.out.println("mcopt-own mesh exactPos: table full (" + SIZE + "), " + n + " coordinates rounded to the 1/2048-block grid");
 				}
 				return Math.min(g, BASE - 1);
 			}
