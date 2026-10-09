@@ -53,6 +53,9 @@ final class LodClip {
 	private final java.util.HashMap<Long, Snapshot> staged = new java.util.HashMap<>();
 
 	/** A tile's words (crown, runs, tex, plants where the level has them), and the staged version they are. */
+	/** Snapshot.edges: the neighbor at +x, -x, +z, -z reads a border cell that changed. */
+	static final int EDGE_PX = 1, EDGE_NX = 2, EDGE_PZ = 4, EDGE_NZ = 8;
+
 	static final class Snapshot {
 		final int level, tx, tz;
 		final int[] g = new int[TILE * TILE], c = new int[TILE * TILE];
@@ -60,6 +63,11 @@ final class LodClip {
 		long version;
 		/** The slot's residency epoch it was staged in (a clear or a new put makes it void). */
 		long epoch;
+		/**
+		 * The tile's border cells changed while staged, one bit per neighbor whose mesh reads them (EDGE_*): the mesher reads a tile
+		 * and the one-cell ring around it (lodmesh.c, REGION), so only those neighbors' walls depend on this tile's words.
+		 */
+		int edges;
 
 		Snapshot(int level, int tx, int tz, boolean crowns, boolean texture, boolean plants) {
 			this.level = level;
@@ -81,6 +89,7 @@ final class LodClip {
 			if (this.pl != null) System.arraycopy(this.pl, 0, s.pl, 0, this.pl.length);
 			s.version = this.version;
 			s.epoch = this.epoch;
+			s.edges = this.edges;
 			return s;
 		}
 	}
@@ -544,6 +553,11 @@ final class LodClip {
 			s.runs[i] = runs;
 			s.cr[i] = cr;
 		}
+		int lx = cx - tx * TILE, lz = cz - tz * TILE;
+		if (lx == TILE - 1) s.edges |= EDGE_PX;
+		if (lx == 0) s.edges |= EDGE_NX;
+		if (lz == TILE - 1) s.edges |= EDGE_PZ;
+		if (lz == 0) s.edges |= EDGE_NZ;
 		if (s.tw != null) s.tw[i] = tw;
 		if (s.pl != null) {
 			s.pl[i] = plantA;

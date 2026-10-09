@@ -170,6 +170,9 @@ final class LodMesh implements LodClip.Listener {
 
 	// ---- the clipmap's changes (render thread) ----
 
+	/** The 4 neighbors: dx, dz, and the LodClip.EDGE_* bit of the border cells their meshes read. */
+	private static final int[][] NEIGHBORS = {{1, 0, LodClip.EDGE_PX}, {-1, 0, LodClip.EDGE_NX}, {0, 1, LodClip.EDGE_PZ}, {0, -1, LodClip.EDGE_NZ}};
+
 	@Override
 	public void tilePut(int level, int tx, int tz, boolean refreshed) {
 		if (LodClip.PAIRS) this.snaps.remove(LodTile.key(level, tx, tz));
@@ -412,9 +415,10 @@ final class LodMesh implements LodClip.Listener {
 			this.published.incrementAndGet();
 			r[5] = this.clip.writing[level].get(slot);
 			this.install(frame, r, true);
-			int[][] d = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-			for (int[] n : d) {
-				if (!this.clip.resident(level, tx + n[0], tz + n[1])) continue;
+			// (only the neighbors whose border walls read a cell that changed: a chunk inside the tile, most of them at level 0
+			// and nearly all at coarser levels, remeshed all four)
+			for (int[] n : NEIGHBORS) {
+				if ((snap.edges & n[2]) == 0 || !this.clip.resident(level, tx + n[0], tz + n[1])) continue;
 				if (LodPublish.ON) this.requestLater.add(new long[] {frame + RING, level, tx + n[0], tz + n[1]});
 				else this.request(level, tx + n[0], tz + n[1]);
 			}
