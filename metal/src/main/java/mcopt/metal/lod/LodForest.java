@@ -90,7 +90,8 @@ final class LodForest {
 			List<String> plantIds = new ArrayList<>();
 			for (int i = 0; i < t.length; i++) {
 				Identifier id = registry.getKey(this.step.features().get(i));
-				t[i] = id != null && isTree(id.getPath());
+				// (a mod's or datapack's features by what they place: their names follow no pattern)
+				t[i] = id != null && (isTree(id.getPath()) || !"minecraft".equals(id.getNamespace()) && placesTrees(this.step.features().get(i)));
 				p[i] = LodConfig.PLANTS && id != null && !t[i] && isPlants(id.getPath());
 				if (t[i]) count++;
 				if (p[i]) plantIds.add(id.getPath());
@@ -105,6 +106,24 @@ final class LodForest {
 	private static boolean isTree(String path) {
 		return path.startsWith("trees_") || path.equals("birch_tall") || path.equals("dark_forest_vegetation") || path.equals("pale_garden_vegetation")
 			|| path.equals("mushroom_island_vegetation") || path.equals("bamboo_vegetation");
+	}
+
+	/** Whether a placed feature places trees (or huge mushrooms or fungi), itself or through the features it picks from. */
+	static boolean placesTrees(net.minecraft.world.level.levelgen.placement.PlacedFeature feature) {
+		try {
+			return placesTrees(feature.feature(), 0);
+		} catch (RuntimeException e) {
+			return false;
+		}
+	}
+
+	private static boolean placesTrees(net.minecraft.core.Holder<net.minecraft.world.level.levelgen.feature.Feature> h, int depth) {
+		var f = h.value();
+		if (f instanceof net.minecraft.world.level.levelgen.feature.TreeFeature || f instanceof net.minecraft.world.level.levelgen.feature.HugeBrownMushroomFeature
+			|| f instanceof net.minecraft.world.level.levelgen.feature.HugeRedMushroomFeature || f instanceof net.minecraft.world.level.levelgen.feature.HugeFungusFeature) {
+			return true;
+		}
+		return depth < 4 && f.getSubFeatures().anyMatch(s -> s != h && placesTrees(s, depth + 1));
 	}
 
 	/** Features that grow small plants on the surface (not under water, not in caves, not on trees). */

@@ -29,6 +29,8 @@ final class LodTrees {
 
 	private static Profile derive(Holder<Biome> biome) {
 		String name = biome.unwrapKey().map(k -> k.identifier().getPath()).orElse("");
+		String namespace = biome.unwrapKey().map(k -> k.identifier().getNamespace()).orElse("minecraft");
+		if (!"minecraft".equals(namespace)) return modded(biome, name);
 		BlockState oak = Blocks.OAK_LEAVES.defaultBlockState(), spruce = Blocks.SPRUCE_LEAVES.defaultBlockState(), birch = Blocks.BIRCH_LEAVES.defaultBlockState();
 		return switch (name) {
 			case "forest", "flower_forest" -> new Profile(0.72F, 6, oak);
@@ -55,6 +57,42 @@ final class LodTrees {
 	}
 
 	/**
+	 * A mod's or datapack's biome: a canopy only if its vegetation places trees (LodForest.placesTrees), as dense and as tall
+	 * as its name suggests (forests, jungles, taigas, savannas...), with the leaves its name suggests (oak otherwise).
+	 */
+	private static Profile modded(Holder<Biome> biome, String name) {
+		boolean trees;
+		try {
+			var steps = biome.value().getGenerationSettings().features();
+			int veg = net.minecraft.world.level.levelgen.GenerationStep.Decoration.VEGETAL_DECORATION.ordinal();
+			trees = veg < steps.size() && steps.get(veg).stream().anyMatch(h -> LodForest.placesTrees(h.value()));
+		} catch (RuntimeException e) {
+			trees = false;
+		}
+		if (!trees) return NONE;
+		String n = name.toLowerCase(java.util.Locale.ROOT);
+		BlockState leaves = has(n, "taiga", "spruce", "pine", "conifer", "boreal", "fir", "snowy") ? Blocks.SPRUCE_LEAVES.defaultBlockState()
+			: has(n, "birch", "aspen") ? Blocks.BIRCH_LEAVES.defaultBlockState()
+			: has(n, "jungle", "tropic", "rainforest") ? Blocks.JUNGLE_LEAVES.defaultBlockState()
+			: has(n, "savanna", "acacia", "outback") ? Blocks.ACACIA_LEAVES.defaultBlockState()
+			: has(n, "cherry", "sakura", "blossom") ? Blocks.CHERRY_LEAVES.defaultBlockState()
+			: has(n, "mangrove", "bayou") ? Blocks.MANGROVE_LEAVES.defaultBlockState()
+			: has(n, "dark", "black", "mystic", "enchanted", "ebony") ? Blocks.DARK_OAK_LEAVES.defaultBlockState()
+			: Blocks.OAK_LEAVES.defaultBlockState();
+		if (has(n, "sparse", "savanna", "shrub", "steppe", "scrub", "outback")) return new Profile(0.18F, 6, leaves);
+		if (has(n, "jungle", "rainforest", "tropic")) return new Profile(0.85F, 13, leaves);
+		if (has(n, "old_growth", "redwood", "giant", "tall")) return new Profile(0.75F, 15, leaves);
+		if (has(n, "forest", "wood", "grove", "taiga", "thicket", "orchard", "swamp", "bayou")) return new Profile(0.65F, 8, leaves);
+		// trees, but nothing says how many: a few, as on plains
+		return new Profile(0.08F, 6, leaves);
+	}
+
+	private static boolean has(String name, String... words) {
+		for (String w : words) if (name.contains(w)) return true;
+		return false;
+	}
+
+	/**
 	 * Canopy height to add over a column whose top block is `ground` (0: no tree here). Forest density is a smooth
 	 * low-frequency noise thresholded by the biome's cover, ramped over a few blocks: woods come in stands with soft edges,
 	 * never as lone pillars; inside a stand the height varies a little per 4-block patch (a tree or two). Cells of 16 blocks
@@ -65,7 +103,7 @@ final class LodTrees {
 		if (p.cover <= 0) return 0;
 		if (!ground.is(Blocks.GRASS_BLOCK) && !ground.is(Blocks.PODZOL) && !ground.is(Blocks.DIRT) && !ground.is(Blocks.COARSE_DIRT)
 			&& !ground.is(Blocks.MUD) && !ground.is(Blocks.SNOW_BLOCK) && !ground.is(Blocks.MYCELIUM) && !ground.is(Blocks.ROOTED_DIRT)
-			&& !ground.is(Blocks.MOSS_BLOCK) && !ground.is(Blocks.PALE_MOSS_BLOCK)) return 0;
+			&& !ground.is(Blocks.MOSS_BLOCK) && !ground.is(Blocks.PALE_MOSS_BLOCK) && !ground.is(net.minecraft.tags.BlockTags.DIRT)) return 0;
 		if (cell >= 16) return Math.round(p.cover * p.height * 0.85F);
 		float n = valueNoise(x / 22.0F, z / 22.0F);
 		float density = Math.clamp((p.cover - n) * 3.0F + 0.5F, 0.0F, 1.0F);
