@@ -17,9 +17,9 @@ dependencies {
 def nativeOut = layout.buildDirectory.dir('natives/natives')
 
 tasks.register('compileNative', Exec) {
-	def sources = ['mcmetal.m', 'mclod.m', 'lodseam.m', 'lodmesh.c', 'lodnoise.c', 'rec.m', 'mcown.m', 'mccap.m'].collect { file("src/main/native/$it") }
+	def sources = ['mcmetal.m', 'mclod.m', 'lodseam.m', 'lodmesh.c', 'lodnoise.c', 'rec.m', 'mcown.m', 'mccap.m', 'mczstd.c'].collect { file("src/main/native/$it") }
 	def output = nativeOut.get().file('libmcmetal.dylib').asFile
-	inputs.files sources, file('src/main/native/mcmetal.h'), file('src/main/native/lodmesh.h')
+	inputs.files sources, file('src/main/native/mcmetal.h'), file('src/main/native/lodmesh.h'), file('src/main/native/zstd/zstddeclib.c')
 	outputs.file output
 	doFirst { output.parentFile.mkdirs() }
 	commandLine(['clang', '-fno-objc-arc', '-O2', '-Wall', '-arch', 'arm64', '-mmacosx-version-min=15.0', '-dynamiclib', '-install_name', '@rpath/libmcmetal.dylib',
@@ -39,6 +39,8 @@ jar {
 	// Apache-2.0 asks for LICENSE and NOTICE in every copy.
 	from(rootProject.file('LICENSE'))
 	from(rootProject.file('NOTICE'))
+	// the native library carries Zstandard's decompressor (BSD: its notice goes with the binary)
+	from(file('src/main/native/zstd/LICENSE')) { rename { 'LICENSE-zstd' } }
 }
 
 tasks.withType(JavaCompile).configureEach {
