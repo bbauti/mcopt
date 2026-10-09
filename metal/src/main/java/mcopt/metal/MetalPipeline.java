@@ -91,8 +91,7 @@ final class MetalPipeline implements BackendRenderPipeline {
 		long vlib = 0, flib = 0, plib = 0;
 		try (MemoryStack stack = MemoryStack.stackPush()) {
 			long err = stack.nmalloc(1, 4096);
-			boolean points = info.primitiveTopology() == PrimitiveTopology.POINTS;
-			Translated v = translate(vertex.module(), info.uniforms().size(), points);
+			Translated v = translate(vertex.module(), info.uniforms().size(), info.primitiveTopology() == PrimitiveTopology.POINTS);
 			Translated f = translate(fragment.module(), info.uniforms().size(), false);
 			if (DUMP_DIR != null) dump(info.name(), v, f);
 			if (OVERRIDE_DIR != null) {
@@ -321,8 +320,7 @@ final class MetalPipeline implements BackendRenderPipeline {
 				spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_PLATFORM, SPVC_MSL_PLATFORM_MACOS);
 				spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_TEXTURE_BUFFER_NATIVE, true);
 				if (vertex) spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_FLIP_VERTEX_Y, true);
-				// Metal rejects a pipeline whose vertex function writes point size unless it draws points; GL and Vulkan just
-				// ignore gl_PointSize for lines and triangles, so mods do write it there.
+				// Metal rejects writing point size unless the pipeline draws points (GL and Vulkan ignore gl_PointSize there: mods write it)
 				if (vertex) spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_MSL_ENABLE_POINT_SIZE_BUILTIN, points);
 				check(context, spvc_compiler_install_compiler_options(compiler, options), "install options");
 				for (int i = 0; i < uniformCount; i++) bind(stack, compiler, model, 0, i, i);

@@ -301,6 +301,14 @@ id<MTLBuffer> mc_buffer_private(Ctx *ctx, id<MTLBuffer> src, uint64_t size) {
 		return dst;
 	}
 }
+id<MTLBuffer> mc_buffer_private_bytes(Ctx *ctx, const void *bytes, NSUInteger length) {
+	id<MTLBuffer> shared = [ctx->device newBufferWithBytes:bytes length:length options:MTLResourceStorageModeShared];
+	if (!shared) return nil;
+	id<MTLBuffer> p = mc_buffer_private(ctx, shared, length);
+	if (!p) return shared;
+	[shared release];
+	return p;
+}
 void *mc_buffer_contents(id<MTLBuffer> buffer) { return buffer.contents; }
 uint64_t mc_buffer_gpu_address(id<MTLBuffer> buffer) { return buffer.gpuAddress; }
 
@@ -1718,7 +1726,6 @@ static CVReturn onRefresh(CVDisplayLinkRef link, const CVTimeStamp *now, const C
 
 static CVDisplayLinkRef paceLink;
 static CGDirectDisplayID paceDisplay;
-
 static void startDisplayLink(void) {
 	CVDisplayLinkRef link;
 	if (CVDisplayLinkCreateWithCGDisplay(CGMainDisplayID(), &link) != kCVReturnSuccess) return;
@@ -1727,7 +1734,6 @@ static void startDisplayLink(void) {
 	paceDisplay = CGMainDisplayID();
 	paceLink = link;
 }
-
 #pragma clang diagnostic pop
 
 // 1 if this frame should be presented: it is the first to make some refresh, and the next one, allowing it twice the
@@ -1741,12 +1747,10 @@ static void startDisplayLink(void) {
 // scanout times (presentedTime 0, as on the mini's display) nothing changes: the margin stays the caller's.
 static int paceAdapt;
 static _Atomic double paceExtra;  // seconds added to the caller's margin
-// The lowest lateness of presents lately: the display's own fixed delay. bbauti's external 100 Hz monitor (the main display)
-// showed every paced frame late by more than half a refresh, from the first second on, in menus at 60 fps too: a compositor
-// that scans a frame out a refresh after the one it latched makes every frame that late, and the margin sat at
-// PACE_EXTRA_MAX (6 ms of lead for nothing) while presents ran at 91-96 a second. Lateness is now measured from this floor:
-// only a frame that missed its latch on top of the display's delay counts. It follows a lower lateness at once and rises
-// PACE_FLOOR_RISE a present (2 ms a second at 100 Hz), so a lasting change of delay is taken up too.
+// The lowest lateness of presents lately, the display's own fixed delay: lateness counts from it. On bbauti's external 100 Hz
+// monitor every paced frame was over half a refresh late, at 60 fps in menus too (its compositor scans out a refresh after the
+// latch): the margin sat at PACE_EXTRA_MAX (6 ms of lead for nothing) at 91-96 presents/s. Follows a lower lateness at once,
+// rises PACE_FLOOR_RISE a present (2 ms a second at 100 Hz) to take up a lasting change.
 static _Atomic double paceFloor = INFINITY;
 #define PACE_FLOOR_RISE 0.00002
 static double paceTarget;         // the refresh the frame being presented was paced for (render thread)
@@ -1771,12 +1775,10 @@ static void paceWatch(id<CAMetalDrawable> drawable) {
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations" // CVDisplayLink, as above
-// The pacer's refreshes from the display the window is on: (x, y) is the window's center in global points, top-left origin
-// (SDL's window coordinates, CoreGraphics' display space). The link started on CGMainDisplayID, the menu bar's display: a
-// window on another one (say a 100 Hz monitor beside the laptop's 120 Hz panel) was paced on that display's refreshes, which
-// would leave some of its own refreshes without a frame and make paceAdapt take presents for late (bbauti's, on an external
-// 100 Hz monitor: 93 presents/s, the margin pinned at PACE_EXTRA_MAX within a second). The learned margin starts over on a
-// new display. Returns its refresh rate in Hz when the display changed (-1: unknown), else 0.
+// The pacer's refreshes from the display under (x, y), the window's center in global points, top-left origin (SDL's and
+// CoreGraphics' space). Paced on the main display (the link's first), a window on another one left some of its refreshes without
+// a frame and paceAdapt took presents for late (bbauti's external 100 Hz monitor: 93 presents/s, the margin at PACE_EXTRA_MAX
+// within a second). The margin starts over on a new display. Returns its Hz when the display changed (-1: unknown), else 0.
 double mc_pace_follow(double x, double y) {
 	CVDisplayLinkRef link = paceLink;
 	if (!link) return 0;
@@ -1828,9 +1830,8 @@ void mc_sleep_precise(int64_t ns) {
 id<CAMetalDrawable> mc_layer_next(CAMetalLayer *layer) {
 	@autoreleasepool {
 		id<CAMetalDrawable> drawable = [[layer nextDrawable] retain];
-		// (the pacer's frame interval counts from here: a wait for the drawable isn't frame time. Counted, one wait made every
-		// frame look about a refresh long, so each was presented, and each present waited for a drawable: frames locked at
-		// the display's rate while the CPU needed 4 of the 10 ms, until frames got short enough to break out)
+		// (the pacer's frame interval counts from here: counted, a drawable wait made every frame look a refresh long, so each was
+		// presented and waited for a drawable: frames locked at the display's rate while the CPU needed 4 of the 10 ms)
 		if (lastPace > 0) lastPace = CACurrentMediaTime();
 		return drawable;
 	}

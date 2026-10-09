@@ -76,17 +76,6 @@ typedef struct {
 	uint64_t cullLast[16];
 } LodCols;
 
-// A small index buffer every instanced draw rereads, in private memory (mc_buffer_private: from shared memory it runs about
-// half speed in some processes). Shared if the copy can't be made.
-static id<MTLBuffer> privateIndices(Ctx *ctx, const void *bytes, NSUInteger length) {
-	id<MTLBuffer> shared = [ctx->device newBufferWithBytes:bytes length:length options:MTLResourceStorageModeShared];
-	if (!shared) return nil;
-	id<MTLBuffer> p = mc_buffer_private(ctx, shared, length);
-	if (!p) return shared;
-	[shared release];
-	return p;
-}
-
 LodCols *mcl_cols_new(Ctx *ctx, const char *source, char *err, int errCap) {
 	@autoreleasepool {
 		MTLCompileOptions *o = [[MTLCompileOptions new] autorelease];
@@ -175,10 +164,10 @@ LodCols *mcl_cols_new(Ctx *ctx, const char *source, char *err, int errCap) {
 			uint16_t k[6] = {b, (uint16_t) (b + 1), (uint16_t) (b + 2), (uint16_t) (b + 2), (uint16_t) (b + 3), b};
 			memcpy(idx + q * 6, k, sizeof k);
 		}
-		l->meshIdx = privateIndices(ctx, idx, sizeof idx);
+		l->meshIdx = mc_buffer_private_bytes(ctx, idx, sizeof idx);
 		l->cullDone = [ctx->device newFence];
 		l->drawDone = [ctx->device newFence];
-		l->plantIdx = privateIndices(ctx, idx, 32 * 6 * sizeof(uint16_t));
+		l->plantIdx = mc_buffer_private_bytes(ctx, idx, 32 * 6 * sizeof(uint16_t));
 		return l;
 	}
 }

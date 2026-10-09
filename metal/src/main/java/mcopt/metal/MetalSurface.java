@@ -32,7 +32,6 @@ final class MetalSurface implements GpuSurfaceBackend {
 	 */
 	static final boolean PACE_ADAPT = Boolean.getBoolean("mcopt.metal.paceAdapt");
 	private boolean paced;
-	/** When the pacer next checks which display the window is on (mc_pace_follow), once a second while pacing. */
 	private long followAt;
 	private boolean followLogged;
 	private final long window;

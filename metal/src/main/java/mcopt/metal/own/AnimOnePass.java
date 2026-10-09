@@ -69,6 +69,7 @@ public final class AnimOnePass {
 	private static int flushes, kernelReady;
 	/** Each animation state -> the sprite contents that created it (OwnAnimIdentityMixin); weak keys, so dropped with the atlas. */
 	private static final Map<SpriteContents.AnimationState, SpriteContents> OWNER = java.util.Collections.synchronizedMap(new WeakHashMap<>());
+	private static java.lang.reflect.@org.jspecify.annotations.Nullable Field animationInfo, infoOwner;   // (linkedOwner's, found once)
 
 	/** SpriteContents.createAnimationState returned state for contents. */
 	public static void owned(SpriteContents.AnimationState state, SpriteContents contents) {
@@ -76,9 +77,8 @@ public final class AnimOnePass {
 	}
 
 	/**
-	 * The contents that made state, by vanilla's own link: its animationInfo is an AnimatedTexture, an inner class of the
-	 * SpriteContents that built it (this$0). For states made without SpriteContents.createAnimationState: Fusion's connected
-	 * textures (FusionSpriteContents) override it and build their AnimatedTexture and state themselves. Null if unreadable.
+	 * The contents that made state, by vanilla's own link (its animationInfo's this$0: the SpriteContents that built that AnimatedTexture):
+	 * for states made without createAnimationState, as Fusion's connected textures (FusionSpriteContents) make theirs. Null if unreadable.
 	 */
 	private static @org.jspecify.annotations.Nullable SpriteContents linkedOwner(SpriteContents.AnimationState state) {
 		try {
@@ -96,8 +96,6 @@ public final class AnimOnePass {
 			return null;
 		}
 	}
-
-	private static java.lang.reflect.@org.jspecify.annotations.Nullable Field animationInfo, infoOwner;
 
 	private static final class Entry {
 		List<SpriteContents.AnimationState> states;

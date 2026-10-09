@@ -73,8 +73,8 @@ id<MTLBlitCommandEncoder> mc_profiled_blit(Enc *enc, id<MTLCommandBuffer> c);
 // The profile group of the last compute encoder mc_profiled_compute made (-1: not profiled).
 int mc_last_compute_group(void);
 void mc_pre_end_encoders(Enc *enc);
-// A private copy of src's first size bytes (a one-off at setup: it waits). For index buffers instanced draws reread.
-id<MTLBuffer> mc_buffer_private(Ctx *ctx, id<MTLBuffer> src, uint64_t size);
+// mc_buffer_private of a new buffer of these bytes, for the index buffers instanced draws reread (shared if the copy can't be made)
+id<MTLBuffer> mc_buffer_private_bytes(Ctx *ctx, const void *bytes, NSUInteger length);
 id<MTLComputeCommandEncoder> mc_render_suspend(Enc *enc);
 id<MTLBlitCommandEncoder> mc_blit(Enc *enc);  // the frame's blit encoder, ending any open render encoder (shaderpack runtime)
 void mc_set_rp_log(int on);

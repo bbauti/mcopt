@@ -134,17 +134,6 @@ static void ownErr(NSError *e, const char *what, char *err, int cap) {
 	if (err && cap > 0) snprintf(err, cap, "%s: %s", what, e ? e.description.UTF8String : "unknown error");
 }
 
-// A small index buffer every instanced draw rereads, in private memory (mc_buffer_private: from shared memory it runs about
-// half speed in some processes). Shared if the copy can't be made.
-static id<MTLBuffer> privateIndices(Ctx *ctx, const void *bytes, NSUInteger length) {
-	id<MTLBuffer> shared = [ctx->device newBufferWithBytes:bytes length:length options:MTLResourceStorageModeShared];
-	if (!shared) return nil;
-	id<MTLBuffer> p = mc_buffer_private(ctx, shared, length);
-	if (!p) return shared;
-	[shared release];
-	return p;
-}
-
 Own *mco_new(Ctx *ctx, const char *source, int compact, int fat, int cpuClip, char *err, int errCap) {
 	@autoreleasepool {
 		MTLCompileOptions *o = [[MTLCompileOptions new] autorelease];
@@ -251,14 +240,14 @@ Own *mco_new(Ctx *ctx, const char *source, int compact, int fat, int cpuClip, ch
 			uint16_t k[6] = {b, (uint16_t) (b + 1), (uint16_t) (b + 2), (uint16_t) (b + 2), (uint16_t) (b + 3), b};
 			memcpy(idx + q * 6, k, sizeof k);
 		}
-		w->quadIdx = privateIndices(ctx, idx, sizeof idx);
+		w->quadIdx = mc_buffer_private_bytes(ctx, idx, sizeof idx);
 		uint16_t idxG[256 * 6];
 		for (int q = 0; q < 256; q++) {
 			uint16_t b = (uint16_t) (q * 4);
 			uint16_t k[6] = {b, (uint16_t) (b + 1), (uint16_t) (b + 2), (uint16_t) (b + 2), (uint16_t) (b + 3), b};
 			memcpy(idxG + q * 6, k, sizeof k);
 		}
-		w->quadIdxG = privateIndices(ctx, idxG, sizeof idxG);
+		w->quadIdxG = mc_buffer_private_bytes(ctx, idxG, sizeof idxG);
 		return w;
 	}
 }
