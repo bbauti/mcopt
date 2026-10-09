@@ -1788,7 +1788,12 @@ void mc_sleep_precise(int64_t ns) {
 
 id<CAMetalDrawable> mc_layer_next(CAMetalLayer *layer) {
 	@autoreleasepool {
-		return [[layer nextDrawable] retain];
+		id<CAMetalDrawable> drawable = [[layer nextDrawable] retain];
+		// (the pacer's frame interval counts from here: a wait for the drawable isn't frame time. Counted, one wait made every
+		// frame look about a refresh long, so each was presented, and each present waited for a drawable: frames locked at
+		// the display's rate while the CPU needed 4 of the 10 ms, until frames got short enough to break out)
+		if (lastPace > 0) lastPace = CACurrentMediaTime();
+		return drawable;
 	}
 }
 
