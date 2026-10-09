@@ -118,15 +118,22 @@ final class LodField {
 		this.drainResults();
 		for (LodChunks.Summary s : this.held.values()) this.applyChunk(s, 1, this.clip.levels);
 		this.held.clear();
-		for (Thread t : this.threads) t.interrupt();
-		// (a worker's job in flight, a save or a generation, finishes before the last saves here; then what it handed back)
-		// (2 seconds for all of them: a tile's generation takes milliseconds, and an exit never waits longer than that)
+		// (a worker's job in flight, a save or a generation, finishes before the last saves here; then what it handed back. Only
+		// waiting workers are interrupted, out of the queue or a pause: an interrupt in a save's file write would lose it. 2
+		// seconds for all of them: a tile's generation takes milliseconds, and an exit never waits longer than that)
 		long until = System.nanoTime() + 2_000_000_000L;
-		for (Thread t : this.threads) {
-			long left = (until - System.nanoTime()) / 1_000_000L;
-			if (left <= 0) break;
+		boolean alive = true;
+		while (alive && System.nanoTime() < until) {
+			alive = false;
+			for (Thread t : this.threads) {
+				if (!t.isAlive()) continue;
+				alive = true;
+				Thread.State st = t.getState();
+				if (st == Thread.State.WAITING || st == Thread.State.TIMED_WAITING) t.interrupt();
+			}
+			if (!alive) break;
 			try {
-				t.join(left);
+				Thread.sleep(5);
 			} catch (InterruptedException e) {
 				Thread.currentThread().interrupt();
 				break;
@@ -142,6 +149,8 @@ final class LodField {
 			j.task.run();
 			saved++;
 		}
+		// patches still queued (held back while their tile loaded, and that load won't finish now): into their files
+		for (Long k : new ArrayList<>(this.queued.keySet())) this.patchFile(k);
 		saved += this.saveDirty(true);
 		if (saved > 0) System.out.println("mcopt-lod: saved " + saved + " tiles real chunks changed");
 	}
@@ -932,22 +941,20 @@ final class LodField {
 	/** Worker (or the render thread at close): the tile's queued patch into its cache file, under the tile's lock. */
 	private void patchFile(long key) {
 		int level = LodTile.levelOf(key);
-		int[] g = new int[LodTile.CELLS], c = new int[LodTile.CELLS];
-		int[] cr = level < this.clip.crownLevels ? new int[LodTile.CELLS] : null;
-		int[] tw = level == 0 && LodConfig.TEXTURES ? new int[LodTile.CELLS] : null;
-		int[] rn = cr != null ? new int[LodTile.CELLS] : null;
-		int[] pl = level == 0 && this.clip.plants ? new int[2 * LodTile.CELLS] : null;
 		synchronized (this.lock(key)) {
 			// the tile is being loaded: it takes the patch when it's put (applyPending), or a job is queued again if it isn't
 			if (!this.closed && this.pending.containsKey(key)) return;
-			// a save of the tile from memory is still queued: it goes first (it would overwrite the patched file)
-			if (!this.closed && this.saveQueued.containsKey(key)) {
-				this.requeuePatch(key);
-				return;
-			}
+			// a save of the tile from memory is still queued: it goes first (it would overwrite the patched file) and queues
+			// this patch's job again when it's done
+			if (!this.closed && this.saveQueued.containsKey(key)) return;
 			Patch p = this.queued.remove(key);
 			// (taken by the tile's loading meanwhile, or by the render thread: nothing left to write)
 			if (p == null) return;
+			int[] g = new int[LodTile.CELLS], c = new int[LodTile.CELLS];
+			int[] cr = level < this.clip.crownLevels ? new int[LodTile.CELLS] : null;
+			int[] tw = level == 0 && LodConfig.TEXTURES ? new int[LodTile.CELLS] : null;
+			int[] rn = cr != null ? new int[LodTile.CELLS] : null;
+			int[] pl = level == 0 && this.clip.plants ? new int[2 * LodTile.CELLS] : null;
 			// a tile with nothing cached isn't generated for a patch outside its window (it may never be drawn), nor at close
 			if (this.noise != null && (!p.generate || this.closed) && !Files.exists(this.file(key))) return;
 			this.produce0(key, g, c, cr, tw, rn, pl, false);
@@ -1187,7 +1194,8 @@ final class LodField {
 					if (this.saveQueued.getOrDefault(key, mine) != mine) return;
 					this.save0(key, g, c, cr, tw, rn, pl);
 				} finally {
-					this.saveQueued.remove(key, mine);
+					// (the last queued save of the tile lets a patch that waited for it go)
+					if (this.saveQueued.remove(key, mine)) this.requeuePatch(key);
 				}
 			}
 		}));
