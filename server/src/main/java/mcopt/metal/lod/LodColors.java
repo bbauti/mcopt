@@ -5,11 +5,7 @@ import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.block.state.BlockState;
 
-/**
- * mcopt-server: the client's block looks aren't here (they come from its textures). The generator runs without paint on a
- * server (LodNoise.paint false), so nothing here is asked for a color; only whether a block may be a plant drawn as crossed
- * quads, which a server tells from the block itself (no collision) and the client narrows down by its models.
- */
+/** mcopt-server: no colors (LodNoise without paint never asks); a plant is any block without collision (the client keeps its crossed-quad models). */
 final class LodColors {
 	record Look(int top, int side, int topTint, int sideTint, int constant, float[] topUv, float[] sideUv, boolean cross, int[] profile) {
 	}
@@ -18,7 +14,6 @@ final class LodColors {
 	}
 
 	static Look look(BlockState s) {
-		// (more than the client draws: it keeps those its models show as crossed quads, LodPaint.plants)
 		boolean cross = !s.isAir() && s.getFluidState().isEmpty() && s.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).isEmpty();
 		return new Look(0, 0, 0, 0, 0, new float[4], new float[4], cross, new int[4]);
 	}

@@ -78,10 +78,7 @@ final class LodVoxyImport implements Runnable {
 		this.thread.start();
 	}
 
-	/**
-	 * Render thread, as a field opens: the importer when this dimension has a Voxy save and Voxy isn't loaded, else null.
-	 * worldRoot: the singleplayer world's folder (null on a server); regions: its region folder for this dimension.
-	 */
+	/** Render thread, as a field opens: the importer when this dimension has a Voxy save and Voxy isn't loaded, else null. */
 	static @Nullable LodVoxyImport start(LodField field, net.minecraft.client.multiplayer.ClientLevel level, @Nullable Path worldRoot, @Nullable Path regions) {
 		if (!ON || !LodConfig.DISK_CACHE || net.fabricmc.loader.api.FabricLoader.getInstance().isModLoaded("voxy")) return null;
 		try {
@@ -99,8 +96,7 @@ final class LodVoxyImport implements Runnable {
 			f.setAccessible(true);
 			long seed = f.getLong(level.getBiomeManager());
 			byte[] digest = MessageDigest.getInstance("SHA-256").digest((seed + level.dimension().toString()).getBytes(StandardCharsets.UTF_8));
-			String id = java.util.HexFormat.of().formatHex(digest).substring(0, 32);
-			Path storage = base.resolve(id).resolve("storage");
+			Path storage = base.resolve(java.util.HexFormat.of().formatHex(digest).substring(0, 32)).resolve("storage");
 			if (!Files.isDirectory(storage)) return null;
 			if (!supported(base.resolve("config.json"))) {
 				System.out.println("mcopt-lod: Voxy's save at " + base + " uses a storage this importer doesn't read (only RocksDB, compressed or not)");
@@ -120,8 +116,7 @@ final class LodVoxyImport implements Runnable {
 	private static boolean supported(Path config) {
 		if (!Files.isRegularFile(config)) return true;  // (Voxy writes it; without it, the default: zstd over RocksDB)
 		try {
-			var root = com.google.gson.JsonParser.parseString(Files.readString(config)).getAsJsonObject();
-			var s = root.getAsJsonObject("sectionStorageConfig");
+			var s = com.google.gson.JsonParser.parseString(Files.readString(config)).getAsJsonObject().getAsJsonObject("sectionStorageConfig");
 			if (s == null || !"Serializer".equals(type(s))) return false;
 			var st = s.getAsJsonObject("storage");
 			if (st != null && "CompressionAdaptor".equals(type(st))) {
@@ -189,8 +184,6 @@ final class LodVoxyImport implements Runnable {
 		}
 	}
 
-	// ---- the save ----
-
 	/** A section's voxels: palette indices and the palette's states and biomes (null biome: air). */
 	record Section(short[] idx, BlockState[] states, @Nullable Holder<Biome>[] biomes) {
 		BlockState at(int x, int y, int z) {
@@ -235,32 +228,26 @@ final class LodVoxyImport implements Runnable {
 			if (Math.hypot(sx * 32 + 16 - this.field.camX, sz * 32 + 16 - this.field.camZ) > reach) continue;
 			Map<Integer, Section> secs = new HashMap<>();
 			for (long[] ks : columns.get(c)) {
-				byte[] key = ByteBuffer.allocate(8).putLong(ks[0]).array();
-				var val = all.get(new LodRocks.Key(key));
-				Section s = val == null ? null : this.section(ks[0], val.bytes(), states, biomeIds);
+				var val = all.get(new LodRocks.Key(ByteBuffer.allocate(8).putLong(ks[0]).array()));
+				Section s = val == null ? null : section(ks[0], val.bytes(), states, biomeIds, this.fallbackBiome);
 				if (s != null) secs.put((int) ks[1], s);
 			}
 			this.sections.addAndGet(secs.size());
 			if (secs.isEmpty()) continue;
 			for (int q = 0; q < 4; q++) {
-				int ox = (q & 1) * 16, oz = (q >> 1) * 16;
-				int chunkX = sx * 2 + (q & 1), chunkZ = sz * 2 + (q >> 1);
+				int ox = (q & 1) * 16, oz = (q >> 1) * 16, chunkX = sx * 2 + (q & 1), chunkZ = sz * 2 + (q >> 1);
 				if (this.regions != null && this.saved(headers, chunkX, chunkZ)) {
 					this.skipped.incrementAndGet();
 					continue;
 				}
 				ChunkSource src = new ChunkSource(secs, ox, oz, this.minY, this.fallbackBiome);
-				if (!src.hasData()) continue;
+				if (!src.any) continue;
 				this.pace();
 				if (LodChunks.SPAN_STATS) LodChunks.spanStats(src);
 				this.field.imported(LodChunks.summarize(LodChunks.snapshot(src, chunkX, chunkZ, this.field.roof, false)));
 				this.chunks.incrementAndGet();
 			}
 		}
-	}
-
-	private @Nullable Section section(long key, byte[] raw, Map<Integer, BlockState> states, Map<Integer, Holder<Biome>> biomeIds) {
-		return section(key, raw, states, biomeIds, this.fallbackBiome);
 	}
 
 	/** The palettes' block states and biomes by id (id_mappings). */
@@ -316,8 +303,7 @@ final class LodVoxyImport implements Runnable {
 		int n = (int) (b.getLong(8) & 0xFFFF);
 		if (n < 1 || v.length < 16 + 65536 + 8L * n) return null;
 		short[] idx = new short[32768];
-		b.position(16);
-		b.asShortBuffer().get(idx);
+		b.position(16).asShortBuffer().get(idx);
 		BlockState[] st = new BlockState[n];
 		@SuppressWarnings("unchecked")
 		Holder<Biome>[] bi = new Holder[n];
@@ -325,8 +311,7 @@ final class LodVoxyImport implements Runnable {
 		for (int i = 0; i < n; i++) {
 			long id = b.getLong(16 + 65536 + 8 * i);
 			int block = (int) (id >>> 27 & 0xFFFFF), biome = (int) (id >>> 47 & 0x1FF);
-			BlockState s = block == 0 ? air : states.getOrDefault(block, Blocks.STONE.defaultBlockState());
-			st[i] = s;
+			st[i] = block == 0 ? air : states.getOrDefault(block, Blocks.STONE.defaultBlockState());
 			bi[i] = block == 0 ? null : biomeIds.getOrDefault(biome, fallbackBiome);
 		}
 		for (short s : idx) if ((s & 0xFFFF) >= n) return null;
@@ -335,19 +320,15 @@ final class LodVoxyImport implements Runnable {
 
 	/** zstd (its magic), LZ4 (a little-endian length, then a raw block) or as stored. */
 	private static byte[] decompress(byte[] raw) throws IOException {
-		if (raw.length >= 4 && (raw[0] & 0xFF) == 0x28 && (raw[1] & 0xFF) == 0xB5 && (raw[2] & 0xFF) == 0x2F && (raw[3] & 0xFF) == 0xFD) {
-			return LodZstd.get().decompress(raw, 1 << 24);
-		}
-		if (raw.length > 4) {
-			int len = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN).getInt(0);
-			if (len >= 65552 && len <= 65552 + 8 * 32768) {
-				try {
-					byte[] out = new byte[len];
-					net.jpountz.lz4.LZ4Factory.fastestJavaInstance().safeDecompressor().decompress(raw, 4, raw.length - 4, out, 0, len);
-					return out;
-				} catch (RuntimeException e) {
-					// not LZ4: as stored
-				}
+		int len = raw.length >= 4 ? ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN).getInt(0) : 0;
+		if (len == 0xFD2FB528) return LodZstd.get().decompress(raw, 1 << 24);
+		if (raw.length > 4 && len >= 65552 && len <= 65552 + 8 * 32768) {
+			try {
+				byte[] out = new byte[len];
+				net.jpountz.lz4.LZ4Factory.fastestJavaInstance().safeDecompressor().decompress(raw, 4, raw.length - 4, out, 0, len);
+				return out;
+			} catch (RuntimeException e) {
+				// not LZ4: as stored
 			}
 		}
 		return raw;
@@ -397,27 +378,21 @@ final class LodVoxyImport implements Runnable {
 			for (int z = 0; z < 16; z++) {
 				for (int x = 0; x < 16; x++) {
 					int i = z * 16 + x, top = minY;
-					Holder<Biome> b = null;
 					search:
 					for (int k = ys.length - 1; k >= 0; k--) {
 						Section s = secs.get(ys[k]);
 						for (int y = 31; y >= 0; y--) {
 							if (!s.at(ox + x, y, oz + z).isAir()) {
 								top = ys[k] * 32 + y + 1;
-								b = s.biomeAt(ox + x, y, oz + z);
+								this.topBiome[i] = s.biomeAt(ox + x, y, oz + z);
 								break search;
 							}
 						}
 					}
 					this.surface[i] = Math.max(top, minY);
-					this.topBiome[i] = b;
 					if (top > minY) this.any = true;
 				}
 			}
-		}
-
-		boolean hasData() {
-			return this.any;
 		}
 
 		@Override

@@ -10,15 +10,15 @@ import java.util.zip.Deflater;
 import java.util.zip.Inflater;
 import net.minecraft.core.Holder;
 import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import org.jspecify.annotations.Nullable;
 
 /**
- * The far terrain's structure as bytes, for a server to send what it generated and read from its saves to its clients
- * (shared by the client mod and mcopt-server; nothing here touches a client class): a generated tile's structure (LodNoise
- * without paint: heights, water, blocks, biomes, trees, plants), and a saved chunk's columns (LodChunks.Snapshot). Blocks
- * and biomes go by name in a palette per record (numbers differ between a server and its clients), arrays planar (the
- * bytes of every value's lowest byte, then the next...: neighbors share their high bytes), the whole deflated.
+ * The far terrain's structure as bytes, for a server to send what it generated and read from its saves to its clients (shared by the client mod and
+ * mcopt-server; nothing here touches a client class): a generated tile's structure (LodNoise without paint: heights, water, blocks, biomes, trees,
+ * plants), and a saved chunk's columns (LodChunks.Snapshot). Blocks and biomes go by name in a palette per record (numbers differ between a server
+ * and its clients), arrays planar (the bytes of every value's lowest byte, then the next...: neighbors share their high bytes), the whole deflated.
  */
 final class LodStructure {
 	/** The format: a reader refuses any other (2: a tile's plants are any block without collision; the client keeps its own). */
@@ -26,8 +26,6 @@ final class LodStructure {
 
 	private LodStructure() {
 	}
-
-	// ---- a generated tile ----
 
 	/** A structure tile (level, origin and size from its key) as bytes. */
 	static byte[] encodeTile(LodTile t) {
@@ -54,18 +52,7 @@ final class LodStructure {
 		}
 		o.names(states, LodStructure::stateName);
 		o.names(biomes, LodStructure::biomeName);
-		o.shorts(t.height, n);
-		o.shorts(t.water, n);
-		o.shorts(t.ground, n);
-		o.shorts(t.canopyLo, n);
-		o.shorts(t.canopyHi, n);
-		o.shorts(st, n);
-		o.shorts(below, n);
-		o.shorts(canopy, n);
-		o.shorts(trunk, n);
-		o.shorts(plantLo, n);
-		o.shorts(plantHi, n);
-		o.shorts(bio, n);
+		o.shorts(n, t.height, t.water, t.ground, t.canopyLo, t.canopyHi, st, below, canopy, trunk, plantLo, plantHi, bio);
 		o.ints(t.crownRuns, n);
 		o.bytes(t.plantBlocks, n);
 		o.bytes(t.impostor, n);
@@ -74,9 +61,8 @@ final class LodStructure {
 	}
 
 	/**
-	 * A structure tile from bytes, for tile (level, tx, tz); states and biomes by name through the client's lookups (an
-	 * unknown block reads as stone or leaves, or none for a plant; an unknown biome as fallback). Null when the bytes aren't
-	 * this format.
+	 * A structure tile from bytes, for tile (level, tx, tz); states and biomes by name through the client's lookups (an unknown block reads as stone
+	 * or leaves, or none for a plant; an unknown biome as fallback). Null when the bytes aren't this format.
 	 */
 	static @Nullable LodTile decodeTile(byte[] bytes, int level, int tx, int tz, Function<String, @Nullable BlockState> stateOf,
 		Function<String, @Nullable Holder<Biome>> biomeOf, Holder<Biome> fallback) {
@@ -93,30 +79,16 @@ final class LodStructure {
 			BlockState[] states = in.names(stateOf, BlockState[]::new);
 			@SuppressWarnings("unchecked")
 			Holder<Biome>[] biomes = in.names(biomeOf, Holder[]::new);
-			in.shorts(t.height, n);
-			in.shorts(t.water, n);
-			in.shorts(t.ground, n);
-			in.shorts(t.canopyLo, n);
-			in.shorts(t.canopyHi, n);
+			in.shorts(n, t.height, t.water, t.ground, t.canopyLo, t.canopyHi);
 			short[] idx = new short[n];
-			in.shorts(idx, n);
 			// (a block this client doesn't know (a server's mod): stone for the ground, oak leaves for a tree, so the cell keeps a look)
-			for (int i = 0; i < n; i++) t.state[i] = known(states, idx[i], STONE);
-			in.shorts(idx, n);
-			for (int i = 0; i < n; i++) t.belowState[i] = known(states, idx[i], STONE);
-			in.shorts(idx, n);
-			for (int i = 0; i < n; i++) t.canopyState[i] = known(states, idx[i], LEAVES);
-			in.shorts(idx, n);
-			for (int i = 0; i < n; i++) t.trunk[i] = at(states, idx[i]);
-			in.shorts(idx, n);
-			for (int i = 0; i < n; i++) t.plantLower[i] = at(states, idx[i]);
-			in.shorts(idx, n);
-			for (int i = 0; i < n; i++) t.plantUpper[i] = at(states, idx[i]);
-			in.shorts(idx, n);
-			for (int i = 0; i < n; i++) {
-				Holder<Biome> b = at(biomes, idx[i]);
-				t.biome[i] = b != null ? b : fallback;
-			}
+			values(in, idx, n, states, STONE, null, t.state);
+			values(in, idx, n, states, STONE, null, t.belowState);
+			values(in, idx, n, states, LEAVES, null, t.canopyState);
+			values(in, idx, n, states, null, null, t.trunk);
+			values(in, idx, n, states, null, null, t.plantLower);
+			values(in, idx, n, states, null, null, t.plantUpper);
+			values(in, idx, n, biomes, fallback, fallback, t.biome);
 			in.ints(t.crownRuns, n);
 			in.bytes(t.plantBlocks, n);
 			in.bytes(t.impostor, n);
@@ -135,8 +107,6 @@ final class LodStructure {
 			return null;
 		}
 	}
-
-	// ---- a saved chunk's columns ----
 
 	/** A chunk's columns as bytes (the snapshot's solid runs and section copies are not sent: the real-terrain occluder's). */
 	static void encodeChunk(LodChunks.Snapshot s, Out o) {
@@ -158,18 +128,10 @@ final class LodStructure {
 		o.i32(s.minY());
 		o.names(states, LodStructure::stateName);
 		o.names(biomes, LodStructure::biomeName);
-		o.shorts(s.height(), 256);
-		o.shorts(s.water(), 256);
-		o.shorts(s.crownLo(), 256);
-		o.shorts(s.crownHi(), 256);
+		o.shorts(256, s.height(), s.water(), s.crownLo(), s.crownHi());
 		o.ints(s.crownRuns(), 256);
-		o.shorts(top, 256);
-		o.shorts(under, 256);
-		o.shorts(crown, 256);
-		o.shorts(leaf, 256);
-		o.shorts(trunk, 256);
-		o.shorts(bio, 256);
-		o.shorts(above, 256 * 3);
+		o.shorts(256, top, under, crown, leaf, trunk, bio);
+		o.shorts(256 * 3, above);
 	}
 
 	/** A chunk's columns from bytes (as encodeChunk wrote them, from in's position). Null blocks where this client lacks them. */
@@ -181,40 +143,20 @@ final class LodStructure {
 		Holder<Biome>[] biomes = in.names(biomeOf, Holder[]::new);
 		short[] height = new short[256], water = new short[256], crownLo = new short[256], crownHi = new short[256];
 		int[] runs = new int[256];
-		in.shorts(height, 256);
-		in.shorts(water, 256);
-		in.shorts(crownLo, 256);
-		in.shorts(crownHi, 256);
+		in.shorts(256, height, water, crownLo, crownHi);
 		in.ints(runs, 256);
 		short[] idx = new short[256 * 3];
 		BlockState[] top = new BlockState[256], under = new BlockState[256], crown = new BlockState[256], leaf = new BlockState[256], trunk = new BlockState[256];
 		BlockState[] above = new BlockState[256 * 3];
 		Holder<Biome>[] biome = new Holder[256];
-		BlockState air = net.minecraft.world.level.block.Blocks.AIR.defaultBlockState(), stone = net.minecraft.world.level.block.Blocks.STONE.defaultBlockState();
-		in.shorts(idx, 256);
-		for (int i = 0; i < 256; i++) {
-			BlockState b = at(states, idx[i]);
-			// (a block this client lacks: stone, so the column still stands)
-			top[i] = b != null ? b : idx[i] != 0 ? stone : air;
-		}
-		in.shorts(idx, 256);
-		for (int i = 0; i < 256; i++) {
-			BlockState b = at(states, idx[i]);
-			under[i] = b != null ? b : idx[i] != 0 ? stone : air;
-		}
-		in.shorts(idx, 256);
-		for (int i = 0; i < 256; i++) crown[i] = at(states, idx[i]);
-		in.shorts(idx, 256);
-		for (int i = 0; i < 256; i++) leaf[i] = at(states, idx[i]);
-		in.shorts(idx, 256);
-		for (int i = 0; i < 256; i++) trunk[i] = at(states, idx[i]);
-		in.shorts(idx, 256);
-		for (int i = 0; i < 256; i++) {
-			Holder<Biome> b = at(biomes, idx[i]);
-			biome[i] = b != null ? b : fallback;
-		}
-		in.shorts(idx, 256 * 3);
-		for (int i = 0; i < 256 * 3; i++) above[i] = at(states, idx[i]);
+		// (a block this client lacks: stone, so the column still stands)
+		values(in, idx, 256, states, STONE, Blocks.AIR.defaultBlockState(), top);
+		values(in, idx, 256, states, STONE, Blocks.AIR.defaultBlockState(), under);
+		values(in, idx, 256, states, null, null, crown);
+		values(in, idx, 256, states, null, null, leaf);
+		values(in, idx, 256, states, null, null, trunk);
+		values(in, idx, 256, biomes, fallback, fallback, biome);
+		values(in, idx, 256 * 3, states, null, null, above);
 		for (int i = 0; i < 256; i++) {
 			// a crown whose leaves this client lacks: none
 			if (crown[i] == null && crownLo[i] != Short.MIN_VALUE) crownLo[i] = Short.MIN_VALUE;
@@ -222,8 +164,6 @@ final class LodStructure {
 		}
 		return new LodChunks.Snapshot(cx, cz, top, under, height, water, biome, crown, leaf, crownLo, crownHi, runs, trunk, above, null, null, 0, minY);
 	}
-
-	// ---- names ----
 
 	/** A block state's name: the game's own codec, as JSON (the disk cache's names too). */
 	static String stateName(BlockState s) {
@@ -243,19 +183,16 @@ final class LodStructure {
 		return b.unwrapKey().map(k -> k.identifier().toString()).orElse("");
 	}
 
-	private static final BlockState STONE = net.minecraft.world.level.block.Blocks.STONE.defaultBlockState(),
-		LEAVES = net.minecraft.world.level.block.Blocks.OAK_LEAVES.defaultBlockState();
+	private static final BlockState STONE = Blocks.STONE.defaultBlockState(), LEAVES = Blocks.OAK_LEAVES.defaultBlockState();
 
-	/** The block at palette index i; `unknown` where the name was sent but isn't a block here. */
-	private static @Nullable BlockState known(BlockState[] states, short i, BlockState unknown) {
-		if (i == 0) return null;
-		BlockState s = at(states, i);
-		return s != null ? s : unknown;
-	}
-
-	private static <T> @Nullable T at(T[] table, int index) {
-		int i = index & 0xFFFF;
-		return i > 0 && i < table.length ? table[i] : null;
+	/** The next n palette indices' values into out: `unknown` where a name was sent that isn't one here, `none` for index 0. */
+	private static <T> void values(In in, short[] idx, int n, T[] table, @Nullable T unknown, @Nullable T none, T[] out) {
+		in.shorts(n, idx);
+		for (int i = 0; i < n; i++) {
+			int k = idx[i] & 0xFFFF;
+			T v = k > 0 && k < table.length ? table[k] : null;
+			out[i] = v != null ? v : k != 0 ? unknown : none;
+		}
 	}
 
 	/** Values numbered in order of first use; 0 is null. */
@@ -279,8 +216,6 @@ final class LodStructure {
 			return (short) (int) id;
 		}
 	}
-
-	// ---- bytes ----
 
 	static byte[] inflate(byte[] bytes) throws DataFormatException {
 		Inflater inf = new Inflater();
@@ -309,10 +244,6 @@ final class LodStructure {
 			if (this.size + more > this.buf.length) this.buf = java.util.Arrays.copyOf(this.buf, Math.max(this.buf.length * 2, this.size + more));
 		}
 
-		int size() {
-			return this.size;
-		}
-
 		void u8(int v) {
 			this.ensure(1);
 			this.buf[this.size++] = (byte) v;
@@ -332,13 +263,15 @@ final class LodStructure {
 			this.size += n;
 		}
 
-		void shorts(short[] v, int n) {
-			this.ensure(2 * n);
-			for (int i = 0; i < n; i++) {
-				this.buf[this.size + i] = (byte) v[i];
-				this.buf[this.size + n + i] = (byte) (v[i] >>> 8);
+		void shorts(int n, short[]... arrays) {
+			for (short[] v : arrays) {
+				this.ensure(2 * n);
+				for (int i = 0; i < n; i++) {
+					this.buf[this.size + i] = (byte) v[i];
+					this.buf[this.size + n + i] = (byte) (v[i] >>> 8);
+				}
+				this.size += 2 * n;
 			}
-			this.size += 2 * n;
 		}
 
 		void ints(int[] v, int n) {
@@ -359,9 +292,7 @@ final class LodStructure {
 				DataOutputStream d = new DataOutputStream(b);
 				d.writeShort(p.values.size() - 1);
 				for (int i = 1; i < p.values.size(); i++) d.writeUTF(name.apply(p.values.get(i)));
-				d.flush();
-				byte[] a = b.toByteArray();
-				this.bytes(a, a.length);
+				this.bytes(b.toByteArray(), b.size());
 			} catch (IOException e) {
 				throw new IllegalStateException(e);
 			}
@@ -386,25 +317,12 @@ final class LodStructure {
 		}
 	}
 
-	/** writeUTF's bytes with their length in front again (readUTF reads both). */
-	private static byte[] withLength(byte[] b) {
-		byte[] out = new byte[b.length + 2];
-		out[0] = (byte) (b.length >>> 8);
-		out[1] = (byte) b.length;
-		System.arraycopy(b, 0, out, 2, b.length);
-		return out;
-	}
-
 	/** Bytes being read (as Out wrote them). Throws a RuntimeException when they run out. */
 	static final class In {
 		private final ByteBuffer buf;
 
 		In(byte[] bytes) {
 			this.buf = ByteBuffer.wrap(bytes);
-		}
-
-		boolean more() {
-			return this.buf.hasRemaining();
 		}
 
 		int u8() {
@@ -419,12 +337,14 @@ final class LodStructure {
 			this.buf.get(v, 0, n);
 		}
 
-		void shorts(short[] v, int n) {
+		void shorts(int n, short[]... arrays) {
 			byte[] a = this.buf.array();
-			int p = this.buf.position();
-			if (p + 2 * n > this.buf.limit()) throw new java.nio.BufferUnderflowException();
-			for (int i = 0; i < n; i++) v[i] = (short) ((a[p + i] & 255) | (a[p + n + i] & 255) << 8);
-			this.buf.position(p + 2 * n);
+			for (short[] v : arrays) {
+				int p = this.buf.position();
+				if (p + 2 * n > this.buf.limit()) throw new java.nio.BufferUnderflowException();
+				for (int i = 0; i < n; i++) v[i] = (short) ((a[p + i] & 255) | (a[p + n + i] & 255) << 8);
+				this.buf.position(p + 2 * n);
+			}
 		}
 
 		void ints(int[] v, int n) {
@@ -439,12 +359,12 @@ final class LodStructure {
 			int count = this.buf.getShort() & 0xFFFF;
 			T[] out = array.apply(count + 1);
 			for (int i = 1; i <= count; i++) {
-				int len = this.buf.getShort() & 0xFFFF;
-				byte[] b = new byte[len];
-				this.buf.get(b);
+				int p = this.buf.position(), len = this.buf.getShort() & 0xFFFF;
+				if (len > this.buf.remaining()) throw new java.nio.BufferUnderflowException();
+				this.buf.position(p + 2 + len);
 				String s;
 				try {
-					s = java.io.DataInputStream.readUTF(new java.io.DataInputStream(new java.io.ByteArrayInputStream(withLength(b))));
+					s = new java.io.DataInputStream(new java.io.ByteArrayInputStream(this.buf.array(), p, 2 + len)).readUTF();
 				} catch (IOException e) {
 					s = "";
 				}

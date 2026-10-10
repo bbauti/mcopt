@@ -28,10 +28,7 @@ final class LodPaint {
 		}
 	}
 
-	/**
-	 * Plants as this client draws them: a server tells them by their blocks alone (anything without collision), this side
-	 * by their models (crossed quads), as LodForest does here.
-	 */
+	/** Plants as this client draws them: a server's are any block without collision, this side's only crossed-quad models (as LodForest). */
 	private static void plants(LodTile t) {
 		for (int i = 0; i < t.cells(); i++) {
 			BlockState p = t.plantLower[i];
@@ -40,10 +37,7 @@ final class LodPaint {
 				t.plantLower[i] = null;
 				t.plantUpper[i] = null;
 				t.plantBlocks[i] = 0;
-				continue;
-			}
-			BlockState u = t.plantUpper[i];
-			if (u != null && !LodColors.look(u).cross()) {
+			} else if (t.plantUpper[i] != null && !LodColors.look(t.plantUpper[i]).cross()) {
 				t.plantUpper[i] = null;
 				t.plantBlocks[i] = 1;
 			}
@@ -62,22 +56,19 @@ final class LodPaint {
 				int bx = x0 + x * c + c / 2, bz = z0 + z * c + c / 2;
 				BlockState below = t.belowState[i] != null ? t.belowState[i] : surface;
 				Biome b = t.biome[i].value();
-				int topColor = LodColors.top(surface, b, bx, bz);
-				int belowColor = LodColors.top(below, b, bx, bz);
+				int topColor = LodColors.top(surface, b, bx, bz), belowColor = LodColors.top(below, b, bx, bz);
 				int sideColor = c == 1 ? LodColors.side(surface, b, bx, bz) : LodColors.mix(LodColors.side(surface, b, bx, bz), belowColor, 0.6F);
 				t.below[i] = belowColor;
 				t.fringe[i] = LodColors.fringed(surface);
 				BlockState texTop = surface, texSide = surface;
 				if (t.water[i] != LodTile.DRY) {
-					int waterTop = t.water[i];
-					int depth = waterTop - t.ground[i];
-					pos.set(bx, waterTop, bz);
+					pos.set(bx, t.water[i], bz);
 					if (b.coldEnoughToSnow(pos, seaLevel)) {
 						topColor = LodColors.top(ICE, b, bx, bz);
 						texTop = ICE;
 					} else {
 						texTop = null;
-						t.clear[i] = (byte) Math.clamp(depth, 1, 127);
+						t.clear[i] = (byte) Math.clamp(t.water[i] - t.ground[i], 1, 127);
 						sideColor = topColor;
 						t.below[i] = topColor;
 						topColor = LodColors.top(WATER, b, bx, bz);
@@ -101,8 +92,7 @@ final class LodPaint {
 						pos.set(bx, t.height[i], bz);
 						if (b.coldEnoughToSnow(pos, seaLevel)) leaves = LodColors.mix(leaves, LodColors.top(SNOW, b, bx, bz), 0.45F);
 						topColor = c >= 16 ? LodColors.mix(topColor, leaves, cover) : leaves;
-						int shade = LodColors.multiply(raw, 0x8C8C8C);
-						sideColor = LodColors.mix(sideColor, shade, c >= 16 ? cover : 0.9F);
+						sideColor = LodColors.mix(sideColor, LodColors.multiply(raw, 0x8C8C8C), c >= 16 ? cover : 0.9F);
 					}
 				}
 				t.top[i] = topColor;
@@ -119,30 +109,24 @@ final class LodPaint {
 		for (int z = 0; z < t.size; z++) {
 			for (int x = 0; x < t.size; x++) {
 				int i = z * t.size + x;
-				if (t.canopyHi[i] < t.canopyLo[i]) continue;
 				BlockState top = t.canopyState[i];
-				if (top == null) continue;
+				if (t.canopyHi[i] < t.canopyLo[i] || top == null) continue;
 				int bx = t.x0 + x * c, bz = t.z0 + z * c;
 				Biome b = t.biome[i].value();
-				boolean leaves = top.is(net.minecraft.tags.BlockTags.LEAVES);
-				int topColor = LodColors.top(top, b, bx, bz);
 				pos.set(bx, t.canopyHi[i] + 1, bz);
-				boolean snowy = leaves && b.coldEnoughToSnow(pos, seaLevel);
-				if (snowy) topColor = LodColors.top(SNOW, b, bx, bz);
+				boolean snowy = top.is(net.minecraft.tags.BlockTags.LEAVES) && b.coldEnoughToSnow(pos, seaLevel);
+				int topColor = LodColors.top(snowy ? SNOW : top, b, bx, bz);
 				int sideColor = LodColors.side(top, b, bx, bz);
 				t.crownTop[i] = topColor;
 				t.crownSide[i] = sideColor;
-				if (LodConfig.TEXTURES) {
-					BlockState ground = t.state[i] != null ? t.state[i] : top;
-					t.tex[i] = LodPalette.word(LodPalette.id(snowy ? SNOW : top), LodPalette.id(top), LodPalette.id(ground));
-				}
+				BlockState ground = t.state[i] != null ? t.state[i] : top;
+				if (LodConfig.TEXTURES) t.tex[i] = LodPalette.word(LodPalette.id(snowy ? SNOW : top), LodPalette.id(top), LodPalette.id(ground));
 				if (t.standing[i] || t.level >= LodConfig.CROWN_LEVELS) {
 					BlockState trunk = t.trunk[i];
-					int trunkColor = trunk != null ? LodColors.side(trunk, b, bx, bz) : sideColor;
 					t.height[i] = (short) Math.max(t.height[i], t.canopyHi[i] + 1);
 					t.top[i] = topColor;
 					t.side[i] = sideColor;
-					t.below[i] = trunkColor;
+					t.below[i] = trunk != null ? LodColors.side(trunk, b, bx, bz) : sideColor;
 					t.fringe[i] = false;
 					t.standing[i] = true;
 					if (LodConfig.TEXTURES) t.tex[i] = LodPalette.word(LodPalette.id(snowy ? SNOW : top), LodPalette.id(top), LodPalette.id(trunk != null ? trunk : top));
@@ -156,14 +140,12 @@ final class LodPaint {
 		if (t.level != 0) return;
 		for (int z = 0; z < t.size; z++) {
 			for (int x = 0; x < t.size; x++) {
-				int i = z * t.size + x;
-				int bx = t.x0 + x, bz = t.z0 + z;
+				int i = z * t.size + x, bx = t.x0 + x, bz = t.z0 + z;
 				Biome b = t.biome[i].value();
 				boolean crown = t.canopyHi[i] >= t.canopyLo[i] && !t.standing[i];
 				BlockState p = t.plantLower[i];
 				if (p != null) t.plantColor[i] = LodColors.side(p, b, bx, bz);
-				if (p == null && !crown || t.standing[i] || t.state[i] == null) continue;
-				if (t.water[i] != LodTile.DRY && t.water[i] > t.ground[i]) continue;
+				if (p == null && !crown || t.standing[i] || t.state[i] == null || t.water[i] != LodTile.DRY && t.water[i] > t.ground[i]) continue;
 				BlockState ground = t.state[i];
 				t.top[i] = LodColors.top(ground, b, bx, bz);
 				if (!crown) {

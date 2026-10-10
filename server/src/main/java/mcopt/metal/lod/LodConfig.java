@@ -1,11 +1,6 @@
 package mcopt.metal.lod;
 
-/**
- * mcopt-server: the generator's switches (the client's LodConfig has the same names and meanings): the structure a server
- * makes is the most a client draws (plants, the game's trees on level 0, crowns floating on levels 0-1); each client paints
- * and keeps what it uses. Set with -D flags or in config/mcopt-server.properties (trees, treeLevels, plants, ...:
- * LodServerService copies them to the flags before anything here is read).
- */
+/** mcopt-server: the client's switches, at the most it draws; -D flags or config/mcopt-server.properties (LodServerService sets the flags first). */
 public final class LodConfig {
 	public static final boolean TEXTURES = true;
 	public static final boolean PLANTS = Boolean.parseBoolean(System.getProperty("mcopt.lod.plants", "true"));

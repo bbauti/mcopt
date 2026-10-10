@@ -6,8 +6,7 @@ import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.resources.Identifier;
 
 /**
- * Far terrain between a server running mcopt-server and its mcopt clients (shared by both; registered through Fabric API's
- * networking by each side, LodRemote and mcopt-server's LodServer). The client asks, the server answers:
+ * Far terrain between mcopt-server (LodServerService) and mcopt clients (LodRemote), compiled into both. The client asks, the server answers:
  * <ul>
  * <li>Hello (client, per dimension it enters) -> DimInfo: whether the server generates far terrain there and sends its
  * saved chunks, its sea level, the farthest it serves, and a token naming that world (the client's cache key).</li>
@@ -23,17 +22,10 @@ public final class LodNet {
 	public static final int PROTOCOL = 2;
 	/** Most keys a request carries (serverbound payloads stay under 32 KB). */
 	public static final int MAX_KEYS = 3000;
-	/**
-	 * How far from the player a level-0 tile is made (blocks, past its own size); level L's reach doubles with L. A client's
-	 * window holds a level that far (half the largest preset's 2048 cells, and a tile more): no client needs more of the
-	 * finest tiles, which are the costliest to make and keep.
-	 */
+	/** How far a level-0 tile is made (blocks past its size; doubles per level): half the largest preset's 2048-cell window and a tile. */
 	public static final int LEVEL0_REACH = 1024 + 128;
 
-	/**
-	 * Whether a server serving `radius` chunks makes the tile of `level` whose center is (dx, dz) blocks from the player
-	 * (both sides ask this: the client doesn't ask what the server won't make).
-	 */
+	/** Whether a server serving `radius` chunks makes the tile of `level` centered (dx, dz) blocks from the player (both sides ask). */
 	public static boolean serves(int radius, int level, double dx, double dz) {
 		if (level < 0 || level > 15) return false;
 		double span = LodTile.SIZE << level;
@@ -50,10 +42,8 @@ public final class LodNet {
 
 	public record Hello(int protocol, String dimension) implements CustomPacketPayload {
 		public static final Type<Hello> TYPE = new Type<>(id("lod_hello"));
-		public static final StreamCodec<FriendlyByteBuf, Hello> CODEC = StreamCodec.of((b, v) -> {
-			b.writeVarInt(v.protocol);
-			b.writeUtf(v.dimension, 256);
-		}, b -> new Hello(b.readVarInt(), b.readUtf(256)));
+		public static final StreamCodec<FriendlyByteBuf, Hello> CODEC = StreamCodec.of((b, v) -> b.writeVarInt(v.protocol).writeUtf(v.dimension, 256),
+			b -> new Hello(b.readVarInt(), b.readUtf(256)));
 
 		@Override
 		public Type<? extends CustomPacketPayload> type() {
@@ -61,22 +51,14 @@ public final class LodNet {
 		}
 	}
 
-	/**
-	 * generate: the server makes tiles for this dimension; chunks: it sends its saved chunks; radius: the farthest it serves,
-	 * in chunks; token: names the world (a server that resets its map gets a new one).
-	 */
+	/** radius: in chunks; token: names the world (a server that resets its map gets a new one). */
 	public record DimInfo(int protocol, String dimension, boolean generate, boolean chunks, int seaLevel, int radius, long token)
 		implements CustomPacketPayload {
 		public static final Type<DimInfo> TYPE = new Type<>(id("lod_dim"));
-		public static final StreamCodec<FriendlyByteBuf, DimInfo> CODEC = StreamCodec.of((b, v) -> {
-			b.writeVarInt(v.protocol);
-			b.writeUtf(v.dimension, 256);
-			b.writeBoolean(v.generate);
-			b.writeBoolean(v.chunks);
-			b.writeVarInt(v.seaLevel);
-			b.writeVarInt(v.radius);
-			b.writeLong(v.token);
-		}, b -> new DimInfo(b.readVarInt(), b.readUtf(256), b.readBoolean(), b.readBoolean(), b.readVarInt(), b.readVarInt(), b.readLong()));
+		public static final StreamCodec<FriendlyByteBuf, DimInfo> CODEC = StreamCodec.of(
+			(b, v) -> b.writeVarInt(v.protocol).writeUtf(v.dimension, 256).writeBoolean(v.generate).writeBoolean(v.chunks).writeVarInt(v.seaLevel)
+				.writeVarInt(v.radius).writeLong(v.token),
+			b -> new DimInfo(b.readVarInt(), b.readUtf(256), b.readBoolean(), b.readBoolean(), b.readVarInt(), b.readVarInt(), b.readLong()));
 
 		@Override
 		public Type<? extends CustomPacketPayload> type() {
@@ -86,11 +68,8 @@ public final class LodNet {
 
 	public record TileReq(String dimension, boolean reset, long[] keys) implements CustomPacketPayload {
 		public static final Type<TileReq> TYPE = new Type<>(id("lod_tile_req"));
-		public static final StreamCodec<FriendlyByteBuf, TileReq> CODEC = StreamCodec.of((b, v) -> {
-			b.writeUtf(v.dimension, 256);
-			b.writeBoolean(v.reset);
-			b.writeLongArray(v.keys);
-		}, b -> new TileReq(b.readUtf(256), b.readBoolean(), readLongs(b)));
+		public static final StreamCodec<FriendlyByteBuf, TileReq> CODEC = StreamCodec.of((b, v) -> b.writeUtf(v.dimension, 256).writeBoolean(v.reset)
+			.writeLongArray(v.keys), b -> new TileReq(b.readUtf(256), b.readBoolean(), readLongs(b)));
 
 		@Override
 		public Type<? extends CustomPacketPayload> type() {
@@ -101,11 +80,8 @@ public final class LodNet {
 	/** A tile's structure, deflated (LodStructure.encodeTile); empty: the server won't make this one (past its radius). */
 	public record Tile(String dimension, long key, byte[] data) implements CustomPacketPayload {
 		public static final Type<Tile> TYPE = new Type<>(id("lod_tile"));
-		public static final StreamCodec<FriendlyByteBuf, Tile> CODEC = StreamCodec.of((b, v) -> {
-			b.writeUtf(v.dimension, 256);
-			b.writeLong(v.key);
-			b.writeByteArray(v.data);
-		}, b -> new Tile(b.readUtf(256), b.readLong(), b.readByteArray(1 << 20)));
+		public static final StreamCodec<FriendlyByteBuf, Tile> CODEC = StreamCodec.of((b, v) -> b.writeUtf(v.dimension, 256).writeLong(v.key)
+			.writeByteArray(v.data), b -> new Tile(b.readUtf(256), b.readLong(), b.readByteArray(1 << 20)));
 
 		@Override
 		public Type<? extends CustomPacketPayload> type() {
@@ -116,10 +92,8 @@ public final class LodNet {
 	/** Regions as (rx << 32 | rz & 0xFFFFFFFF). */
 	public record RegionReq(String dimension, long[] regions) implements CustomPacketPayload {
 		public static final Type<RegionReq> TYPE = new Type<>(id("lod_region_req"));
-		public static final StreamCodec<FriendlyByteBuf, RegionReq> CODEC = StreamCodec.of((b, v) -> {
-			b.writeUtf(v.dimension, 256);
-			b.writeLongArray(v.regions);
-		}, b -> new RegionReq(b.readUtf(256), readLongs(b)));
+		public static final StreamCodec<FriendlyByteBuf, RegionReq> CODEC = StreamCodec.of((b, v) -> b.writeUtf(v.dimension, 256)
+			.writeLongArray(v.regions), b -> new RegionReq(b.readUtf(256), readLongs(b)));
 
 		@Override
 		public Type<? extends CustomPacketPayload> type() {
@@ -130,12 +104,8 @@ public final class LodNet {
 	/** A region's 1024 chunks' save times (seconds, its file's header; 0: no chunk there), z-major as the file has them. */
 	public record Manifest(String dimension, int rx, int rz, int[] stamps) implements CustomPacketPayload {
 		public static final Type<Manifest> TYPE = new Type<>(id("lod_manifest"));
-		public static final StreamCodec<FriendlyByteBuf, Manifest> CODEC = StreamCodec.of((b, v) -> {
-			b.writeUtf(v.dimension, 256);
-			b.writeInt(v.rx);
-			b.writeInt(v.rz);
-			b.writeVarIntArray(v.stamps);
-		}, b -> new Manifest(b.readUtf(256), b.readInt(), b.readInt(), b.readVarIntArray(1024)));
+		public static final StreamCodec<FriendlyByteBuf, Manifest> CODEC = StreamCodec.of((b, v) -> b.writeUtf(v.dimension, 256).writeInt(v.rx)
+			.writeInt(v.rz).writeVarIntArray(v.stamps), b -> new Manifest(b.readUtf(256), b.readInt(), b.readInt(), b.readVarIntArray(1024)));
 
 		@Override
 		public Type<? extends CustomPacketPayload> type() {
@@ -146,10 +116,8 @@ public final class LodNet {
 	/** Chunks as ChunkPos.pack(x, z). */
 	public record ChunkReq(String dimension, long[] chunks) implements CustomPacketPayload {
 		public static final Type<ChunkReq> TYPE = new Type<>(id("lod_chunk_req"));
-		public static final StreamCodec<FriendlyByteBuf, ChunkReq> CODEC = StreamCodec.of((b, v) -> {
-			b.writeUtf(v.dimension, 256);
-			b.writeLongArray(v.chunks);
-		}, b -> new ChunkReq(b.readUtf(256), readLongs(b)));
+		public static final StreamCodec<FriendlyByteBuf, ChunkReq> CODEC = StreamCodec.of((b, v) -> b.writeUtf(v.dimension, 256)
+			.writeLongArray(v.chunks), b -> new ChunkReq(b.readUtf(256), readLongs(b)));
 
 		@Override
 		public Type<? extends CustomPacketPayload> type() {
@@ -160,10 +128,8 @@ public final class LodNet {
 	/** Deflated: a count, then per chunk its save time and its columns (LodStructure.encodeChunk). */
 	public record Chunks(String dimension, byte[] data) implements CustomPacketPayload {
 		public static final Type<Chunks> TYPE = new Type<>(id("lod_chunks"));
-		public static final StreamCodec<FriendlyByteBuf, Chunks> CODEC = StreamCodec.of((b, v) -> {
-			b.writeUtf(v.dimension, 256);
-			b.writeByteArray(v.data);
-		}, b -> new Chunks(b.readUtf(256), b.readByteArray(1 << 20)));
+		public static final StreamCodec<FriendlyByteBuf, Chunks> CODEC = StreamCodec.of((b, v) -> b.writeUtf(v.dimension, 256).writeByteArray(v.data),
+			b -> new Chunks(b.readUtf(256), b.readByteArray(1 << 20)));
 
 		@Override
 		public Type<? extends CustomPacketPayload> type() {

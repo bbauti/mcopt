@@ -52,7 +52,7 @@ final class LodRocks implements AutoCloseable {
 		byte[] bytes() throws IOException;
 	}
 
-	private static final long TABLE_MAGIC = 0x88e241b785f4cff7L, LEGACY_TABLE_MAGIC = 0xdb4775248b80fb57L;
+	private static final long TABLE_MAGIC = 0x88e241b785f4cff7L;
 	private static final int TYPE_DELETION = 0x0, TYPE_VALUE = 0x1, TYPE_SINGLE_DELETION = 0x7, TYPE_DELETION_TS = 0x14;
 
 	private final Path dir;
@@ -74,9 +74,7 @@ final class LodRocks implements AutoCloseable {
 	private record Entry(long seq, int type, Value value) {
 	}
 
-	/**
-	 * A column family's live keys (those `keep` takes) and their values, in key order. Empty when there's no such family.
-	 */
+	/** A column family's live keys (those `keep` takes) and their values, in key order. Empty when there's no such family. */
 	NavigableMap<Key, Value> family(String name, Predicate<byte[]> keep) throws IOException {
 		Integer id = this.families.get(name);
 		TreeMap<Key, Value> out = new TreeMap<>();
@@ -123,8 +121,6 @@ final class LodRocks implements AutoCloseable {
 		if (old == null || seq >= old.seq) latest.put(k, new Entry(seq, type, v));
 	}
 
-	// ---- the MANIFEST: column families, their live table files and log numbers ----
-
 	/** Per family id: its live table files (number -> level) and the log number its tables cover the logs up to. */
 	private final Map<Integer, Map<Long, Integer>> files = new HashMap<>();
 	private final Map<Integer, Long> logNumbers = new HashMap<>();
@@ -132,9 +128,8 @@ final class LodRocks implements AutoCloseable {
 	private void readManifest() throws IOException {
 		Path current = this.dir.resolve("CURRENT");
 		if (!Files.isRegularFile(current)) throw new IOException("not a RocksDB database: " + this.dir);
-		Path manifest = this.dir.resolve(Files.readString(current, StandardCharsets.US_ASCII).strip());
 		this.families.put("default", 0);
-		for (byte[] rec : records(Files.readAllBytes(manifest))) {
+		for (byte[] rec : records(Files.readAllBytes(this.dir.resolve(Files.readString(current, StandardCharsets.US_ASCII).strip())))) {
 			ByteBuffer b = ByteBuffer.wrap(rec).order(ByteOrder.LITTLE_ENDIAN);
 			int cf = 0;
 			String added = null;
@@ -158,7 +153,7 @@ final class LodRocks implements AutoCloseable {
 						customFields(b);
 					}
 					case 200 -> cf = (int) varint(b);
-					case 201 -> added = string(b);
+					case 201 -> added = new String(bytes(b), StandardCharsets.UTF_8);
 					case 202 -> dropped = true;
 					case 203, 300 -> varint(b);                                        // max column family, in atomic group
 					case 400 -> { varint(b); varint(b); varint(b); skipString(b); skipString(b); customFields(b); }
@@ -186,18 +181,12 @@ final class LodRocks implements AutoCloseable {
 	}
 
 	private static void customFields(ByteBuffer b) {
-		while (true) {
-			int t = (int) varint(b);
-			if (t == 1) return;   // kTerminate
-			skipString(b);
-		}
+		while ((int) varint(b) != 1) skipString(b);   // (1: kTerminate)
 	}
 
-	// ---- log files (the write-ahead logs, the MANIFEST): 32 KB blocks of fragments ----
-
 	/**
-	 * A log file's records, reassembled from their fragments. A block's zero header (preallocated space) skips the rest of
-	 * the block; reading stops at the first record cut short or whose checksum is wrong (a torn tail).
+	 * A log file's records (32 KB blocks of fragments), reassembled. A block's zero header (preallocated space) skips the rest
+	 * of the block; reading stops at the first record cut short or whose checksum is wrong (a torn tail).
 	 */
 	static List<byte[]> records(byte[] f) {
 		List<byte[]> out = new ArrayList<>();
@@ -221,14 +210,13 @@ final class LodRocks implements AutoCloseable {
 			// the checksum: masked CRC32C of the type byte (and a recyclable header's log number) and the payload
 			crc.reset();
 			crc.update(f, at + 6, header - 6 + len);
-			int c = (int) crc.getValue();
-			int masked = ((c >>> 15) | (c << 17)) + 0xa282ead8;
+			int c = (int) crc.getValue(), masked = ((c >>> 15) | (c << 17)) + 0xa282ead8;
 			int stored = (f[at] & 0xFF) | (f[at + 1] & 0xFF) << 8 | (f[at + 2] & 0xFF) << 16 | (f[at + 3] & 0xFF) << 24;
 			if (masked != stored) break;
 			int from = at + header;
 			at += header + len;
 			int kind = type >= 5 && type <= 8 ? type - 4 : type;
-			switch (kind) {
+			switch (kind) {   // (compression, timestamp-size and predecessor records: none written with the options read here)
 				case 1 -> {
 					out.add(Arrays.copyOfRange(f, from, from + len));
 					partial = null;
@@ -247,9 +235,6 @@ final class LodRocks implements AutoCloseable {
 					}
 					partial = null;
 				}
-				default -> {
-					// (compression, timestamp-size and predecessor records: none written with the options read here)
-				}
 			}
 		}
 		return out;
@@ -259,18 +244,12 @@ final class LodRocks implements AutoCloseable {
 	private void log(Path file, int cf, Predicate<byte[]> keep, Map<Key, Entry> latest) throws IOException {
 		for (byte[] rec : records(Files.readAllBytes(file))) {
 			if (rec.length < 12) continue;
-			ByteBuffer b = ByteBuffer.wrap(rec).order(ByteOrder.LITTLE_ENDIAN);
+			ByteBuffer b = ByteBuffer.wrap(rec).order(ByteOrder.LITTLE_ENDIAN).position(12);
 			long seq = b.getLong(0);
-			b.position(12);
 			try {
 				while (b.hasRemaining()) {
 					int tag = b.get() & 0xFF;
-					int family = 0;
-					switch (tag) {
-						case 0x4, 0x5, 0x6, 0x8, 0xE, 0x10, 0x17, 0x19 -> family = (int) varint(b);
-						default -> {
-						}
-					}
+					int family = switch (tag) { case 0x4, 0x5, 0x6, 0x8, 0xE, 0x10, 0x17, 0x19 -> (int) varint(b); default -> 0; };
 					switch (tag) {
 						case 0x1, 0x5 -> {                                                 // value
 							byte[] k = bytes(b), v = bytes(b);
@@ -282,21 +261,14 @@ final class LodRocks implements AutoCloseable {
 							if (family == cf && keep.test(k)) put(latest, k, seq, TYPE_DELETION, () -> new byte[0]);
 							seq++;
 						}
-						case 0x2, 0x6, 0x10, 0x11, 0x16, 0x17, 0x18, 0x19 -> {             // merge, blob index, entity, preferred seqno: not read
+						// merge, blob index, entity, preferred seqno: not read; range deletion: not written by these writers
+						case 0x2, 0x6, 0x10, 0x11, 0x16, 0x17, 0x18, 0x19, 0xE, 0xF -> {
 							bytes(b);
 							bytes(b);
 							seq++;
 						}
-						case 0xE, 0xF -> {                                                 // range deletion: not written by these writers
-							bytes(b);
-							bytes(b);
-							seq++;
-						}
-						case 0x3 -> bytes(b);                                              // log data
-						case 0x9, 0xA, 0xB, 0xC, 0x12, 0x13 -> {                           // transactions' markers
-							if (tag != 0x9 && tag != 0x12 && tag != 0x13) bytes(b);
-						}
-						case 0xD -> {
+						case 0x3, 0xA, 0xB, 0xC -> bytes(b);                               // log data, transactions' markers with an id
+						case 0x9, 0xD, 0x12, 0x13 -> {                                     // transactions' markers without an id, no-op
 						}
 						default -> throw new IOException("unknown write batch tag " + tag);
 					}
@@ -306,8 +278,6 @@ final class LodRocks implements AutoCloseable {
 			}
 		}
 	}
-
-	// ---- table files ----
 
 	private record Handle(long offset, long size) {
 	}
@@ -320,19 +290,15 @@ final class LodRocks implements AutoCloseable {
 			long size = ch.size();
 			if (size < 53) return;
 			ByteBuffer foot = read(ch, size - 53, 53);
-			long magic = foot.getLong(45);
-			if (magic != TABLE_MAGIC) return;   // (legacy or other table formats: not written by these writers)
-			int version = foot.getInt(41);
+			if (foot.getLong(45) != TABLE_MAGIC) return;   // (legacy or other table formats: not written by these writers)
 			ByteBuffer meta;
-			Handle indexHandle;
-			if (version >= 6) {
-				// the metaindex sits right before the footer, its size in the footer; the index's handle is in it
+			Handle indexHandle = null;
+			if (foot.getInt(41) >= 6) {
+				// (format version 6 on) the metaindex sits right before the footer, its size in the footer; the index's handle is in it
 				int metaSize = foot.getInt(1 + 4 + 4 + 4);
-				Handle mh = new Handle(size - 53 - 5 - metaSize, metaSize);
-				meta = this.block(ch, mh);
-				indexHandle = null;
-				for (byte[][] kv : entries(meta, false)) {
-					if (new String(kv[0], StandardCharsets.UTF_8).equals("rocksdb.index")) indexHandle = handle(ByteBuffer.wrap(kv[1]).order(ByteOrder.LITTLE_ENDIAN));
+				meta = this.block(ch, new Handle(size - 53 - 5 - metaSize, metaSize));
+				for (byte[][] kv : entries(meta)) {
+					if (new String(kv[0], StandardCharsets.UTF_8).equals("rocksdb.index")) indexHandle = handle(ByteBuffer.wrap(kv[1]));
 				}
 				if (indexHandle == null) throw new IOException(file + ": no index");
 			} else {
@@ -343,11 +309,9 @@ final class LodRocks implements AutoCloseable {
 			}
 			// the properties: the family, the index's kind and encoding
 			Map<String, byte[]> props = new HashMap<>();
-			for (byte[][] kv : entries(meta, false)) {
+			for (byte[][] kv : entries(meta)) {
 				if (new String(kv[0], StandardCharsets.UTF_8).equals("rocksdb.properties")) {
-					for (byte[][] p : entries(this.block(ch, handle(ByteBuffer.wrap(kv[1]).order(ByteOrder.LITTLE_ENDIAN))), false)) {
-						props.put(new String(p[0], StandardCharsets.UTF_8), p[1]);
-					}
+					for (var p : entries(this.block(ch, handle(ByteBuffer.wrap(kv[1]))))) props.put(new String(p[0], StandardCharsets.UTF_8), p[1]);
 				}
 			}
 			byte[] fam = props.get("rocksdb.column.family.id");
@@ -364,13 +328,11 @@ final class LodRocks implements AutoCloseable {
 			}
 			for (Handle h : data) {
 				Block blk = this.rawBlock(ch, h);
-				for (Item e : dataEntries(blk.buf)) {
-					byte[] ik = e.key;
-					if (ik.length < 8) continue;
-					byte[] k = Arrays.copyOf(ik, ik.length - 8);
-					long trailer = ByteBuffer.wrap(ik, ik.length - 8, 8).order(ByteOrder.LITTLE_ENDIAN).getLong();
+				for (Item e : items(blk.buf, true)) {
+					if (e.key.length < 8) continue;
+					byte[] k = Arrays.copyOf(e.key, e.key.length - 8);
+					long trailer = ByteBuffer.wrap(e.key, e.key.length - 8, 8).order(ByteOrder.LITTLE_ENDIAN).getLong(), seq = trailer >>> 8;
 					int type = (int) (trailer & 0xFF);
-					long seq = trailer >>> 8;
 					if (!keep.test(k)) continue;
 					if (type == TYPE_VALUE) {
 						Value v;
@@ -382,12 +344,7 @@ final class LodRocks implements AutoCloseable {
 							// read when asked, from the file (kept open)
 							long at = h.offset + e.valueAt;
 							int len = e.valueLen;
-							v = () -> {
-								ByteBuffer b = read(ch, at, len);
-								byte[] out = new byte[len];
-								b.get(out);
-								return out;
-							};
+							v = () -> read(ch, at, len).array();
 							kept = true;
 						}
 						put(latest, k, seq, TYPE_VALUE, v);
@@ -427,8 +384,7 @@ final class LodRocks implements AutoCloseable {
 		if (type != 7) throw new IOException("block compression " + type + " not read");
 		// zstd: the decompressed size as a varint, then a frame
 		long n = varint(b);
-		byte[] src = new byte[b.remaining()];
-		b.get(src);
+		byte[] src = Arrays.copyOfRange(b.array(), b.position(), b.limit());
 		byte[] out = LodZstd.get().decompress(src, (int) Math.min(Integer.MAX_VALUE - 16, Math.max(n, 1)));
 		return new Block(ByteBuffer.wrap(out).order(ByteOrder.LITTLE_ENDIAN), true);
 	}
@@ -446,23 +402,16 @@ final class LodRocks implements AutoCloseable {
 
 	/** The restart array's end: a data block's last word packs its index type in bit 31 (1: a hash index before it). */
 	private static int entriesEnd(ByteBuffer b, boolean data) {
-		int n = b.limit();
-		int packed = b.getInt(n - 4);
+		int n = b.limit(), packed = b.getInt(n - 4);
 		// (a block over 64 KiB never has the hash index: its word is the count alone)
-		boolean hash = data && n <= 65536 && packed < 0;
-		int restarts = hash ? packed & 0x7FFFFFFF : packed;
-		int end = n - 4;
-		if (hash) {
-			int buckets = b.getShort(n - 6) & 0xFFFF;
-			end = n - 6 - buckets;
-		}
-		return end - 4 * restarts;
+		if (data && n <= 65536 && packed < 0) return n - 6 - (b.getShort(n - 6) & 0xFFFF) - 4 * (packed & 0x7FFFFFFF);
+		return n - 4 - 4 * packed;
 	}
 
 	/** A block's entries as (key, value) with prefix-compressed keys (metaindex, properties). */
-	private static List<byte[][]> entries(ByteBuffer b, boolean data) {
+	private static List<byte[][]> entries(ByteBuffer b) {
 		List<byte[][]> out = new ArrayList<>();
-		for (Item it : items(b, data)) {
+		for (Item it : items(b, false)) {
 			byte[] v = new byte[it.valueLen];
 			b.get(it.valueAt, v);
 			out.add(new byte[][] {it.key, v});
@@ -470,19 +419,13 @@ final class LodRocks implements AutoCloseable {
 		return out;
 	}
 
-	private static List<Item> dataEntries(ByteBuffer b) {
-		return items(b, true);
-	}
-
 	private static List<Item> items(ByteBuffer b, boolean data) {
 		List<Item> out = new ArrayList<>();
 		int end = entriesEnd(b, data);
-		ByteBuffer r = b.duplicate().order(ByteOrder.LITTLE_ENDIAN);
-		r.position(0);
+		ByteBuffer r = b.duplicate().position(0);
 		byte[] last = new byte[0];
 		while (r.position() < end) {
-			int shared = (int) varint(r), nonShared = (int) varint(r);
-			int vlen = (int) varint(r);
+			int shared = (int) varint(r), nonShared = (int) varint(r), vlen = (int) varint(r);
 			byte[] key = new byte[shared + nonShared];
 			System.arraycopy(last, 0, key, 0, shared);
 			r.get(key, shared, nonShared);
@@ -501,25 +444,17 @@ final class LodRocks implements AutoCloseable {
 	private static List<Handle> indexHandles(ByteBuffer b, boolean delta) {
 		List<Handle> out = new ArrayList<>();
 		int end = entriesEnd(b, false);
-		ByteBuffer r = b.duplicate().order(ByteOrder.LITTLE_ENDIAN);
-		r.position(0);
+		ByteBuffer r = b.duplicate().position(0);
 		Handle prev = null;
 		while (r.position() < end) {
 			int shared = (int) varint(r), nonShared = (int) varint(r);
 			if (!delta) {
-				int vlen = (int) varint(r);
-				r.position(r.position() + nonShared);
-				int at = r.position();
-				prev = handle(r);
+				int vlen = (int) varint(r), at = r.position() + nonShared;
+				prev = handle(r.position(at));
 				r.position(at + vlen);
 			} else {
 				r.position(r.position() + nonShared);
-				if (shared == 0 || prev == null) {
-					prev = handle(r);
-				} else {
-					long size = prev.size + zigzag(varint(r));
-					prev = new Handle(prev.offset + prev.size + 5, size);
-				}
+				prev = shared == 0 || prev == null ? handle(r) : new Handle(prev.offset + prev.size + 5, prev.size + zigzag(varint(r)));
 			}
 			out.add(prev);
 		}
@@ -529,8 +464,6 @@ final class LodRocks implements AutoCloseable {
 	private static long zigzag(long v) {
 		return (v >>> 1) ^ -(v & 1);
 	}
-
-	// ---- encodings ----
 
 	private static long varint(ByteBuffer b) {
 		long v = 0;
@@ -543,14 +476,9 @@ final class LodRocks implements AutoCloseable {
 	}
 
 	private static byte[] bytes(ByteBuffer b) {
-		int n = (int) varint(b);
-		byte[] out = new byte[n];
+		byte[] out = new byte[(int) varint(b)];
 		b.get(out);
 		return out;
-	}
-
-	private static String string(ByteBuffer b) {
-		return new String(bytes(b), StandardCharsets.UTF_8);
 	}
 
 	private static void skipString(ByteBuffer b) {

@@ -59,9 +59,8 @@ final class LodDhImport implements Runnable {
 	private final Thread thread;
 	final AtomicLong chunks = new AtomicLong(), sections = new AtomicLong(), skipped = new AtomicLong();
 	/**
-	 * FullData's rows passed (all of them, in the file's order) and the ones before resumeRow skipped unread: a session that closes
-	 * first leaves "<signature> <rows done>" in dh-import.txt, and the next one goes on from there (a 225 MB save takes longer than a
-	 * short session, and starting over each time it never finished). By detail level: level 0 is read, coarser ones aren't.
+	 * FullData's rows passed (all, in the file's order; those before resumeRow skipped unread): a session that closes first leaves
+	 * "<signature> <rows done>" in dh-import.txt and the next goes on from there (starting over, a 225 MB save never finished).
 	 */
 	private long rowsDone, resumeRow, rowsXz, rowsFar, lastReport;
 	/** A save imported before, read again for -Dmcopt.lod.spanStats only. */
@@ -78,16 +77,12 @@ final class LodDhImport implements Runnable {
 		this.biomes = biomes;
 		this.fallbackBiome = fallbackBiome;
 		this.done = field.cache.resolve("dh-import.txt");
-		this.thread = new Thread(this, "mcopt-lod-dh-import");
-		this.thread.setDaemon(true);
-		this.thread.setPriority(Thread.MIN_PRIORITY);
-		this.thread.start();
+		this.thread = Thread.ofPlatform().name("mcopt-lod-dh-import").daemon().priority(Thread.MIN_PRIORITY).start(this);
 	}
 
 	/** Render thread, as a field opens: the importer when this dimension has a Distant Horizons database, else null. */
 	static @Nullable LodDhImport start(LodField field, net.minecraft.client.multiplayer.ClientLevel level, @Nullable Path worldRoot, @Nullable Path regions) {
-		var loader = net.fabricmc.loader.api.FabricLoader.getInstance();
-		if (!ON || !LodConfig.DISK_CACHE || loader.isModLoaded("distanthorizons")) return null;
+		if (!ON || !LodConfig.DISK_CACHE || net.fabricmc.loader.api.FabricLoader.getInstance().isModLoaded("distanthorizons")) return null;
 		try {
 			Path db = worldRoot != null
 				? net.minecraft.world.level.dimension.DimensionType.getStorageFolder(level.dimension(), worldRoot).resolve("data").resolve("DistantHorizons.sqlite")
@@ -170,8 +165,7 @@ final class LodDhImport implements Runnable {
 		// (65 bits: the 64 of the seed and a zero; base32hex: 0-9 then a-v)
 		char[] c = new char[13];
 		for (int i = 0; i < 13; i++) {
-			int shift = 59 - 5 * i;
-			int v = (int) ((shift >= 0 ? seed >>> shift : seed << -shift) & 31);
+			int shift = 59 - 5 * i, v = (int) ((shift >= 0 ? seed >>> shift : seed << -shift) & 31);
 			c[i] = (char) (v < 10 ? '0' + v : 'a' + v - 10);
 		}
 		return new String(c);
@@ -202,7 +196,6 @@ final class LodDhImport implements Runnable {
 				System.out.println("mcopt-lod: Distant Horizons' save " + this.db + " was imported before" + (note.isEmpty() ? "" : " (" + note + ")")
 					+ "; delete " + this.done + " to import it again");
 				if (!LodChunks.SPAN_STATS) return;
-				// -Dmcopt.lod.spanStats: read again for the span stats only (nothing imported, no progress saved)
 				this.measure = true;
 				System.out.println("mcopt-lod: reading Distant Horizons' save again for the span stats (nothing is imported)");
 				try (LodSqlite sql = new LodSqlite(this.db)) {
@@ -283,8 +276,6 @@ final class LodDhImport implements Runnable {
 		}
 	}
 
-	// ---- the database ----
-
 	/** A section's columns: per column (x * 64 + z) its runs from the top down: bottom (relative), height, state, biome. */
 	record Section(int[][] bottom, int[][] height, BlockState[][] state, Holder<Biome>[][] biome, boolean[] generated) {
 	}
@@ -331,9 +322,9 @@ final class LodDhImport implements Runnable {
 			try {
 				byte[][] adj = new byte[4][];
 				for (int k = 0; k < 4; k++) adj[k] = cAdj[k] >= 0 && row[cAdj[k]] instanceof byte[] b ? b : null;
-				s = this.section(row[cData] instanceof byte[] d ? d : null, adj, cGen >= 0 && row[cGen] instanceof byte[] g ? g : null,
+				s = section(row[cData] instanceof byte[] d ? d : null, adj, cGen >= 0 && row[cGen] instanceof byte[] g ? g : null,
 					row[cMap] instanceof byte[] m ? m : null, cFormat >= 0 && row[cFormat] instanceof Long f ? (int) (long) f : 2,
-					row[cMode] instanceof Long md ? (int) (long) md : 0, pairs);
+					row[cMode] instanceof Long md ? (int) (long) md : 0, pairs, this::pair, this.fallbackBiome);
 			} catch (IOException | RuntimeException e) {
 				if (unreadable[0]++ < 3) System.out.println("mcopt-lod: Distant Horizons section " + px + "," + pz + " unreadable: " + e);
 				this.rowsDone++;
@@ -345,8 +336,7 @@ final class LodDhImport implements Runnable {
 			}
 			this.sections.incrementAndGet();
 			for (int q = 0; q < 16; q++) {
-				int ox = (q & 3) * 16, oz = (q >> 2) * 16;
-				int chunkX = (x0 + ox) >> 4, chunkZ = (z0 + oz) >> 4;
+				int ox = (q & 3) * 16, oz = (q >> 2) * 16, chunkX = (x0 + ox) >> 4, chunkZ = (z0 + oz) >> 4;
 				if (this.regions != null && this.saved(headers, chunkX, chunkZ)) {
 					this.skipped.incrementAndGet();
 					continue;
@@ -373,17 +363,11 @@ final class LodDhImport implements Runnable {
 	record Pair(BlockState state, Holder<Biome> biome) {
 	}
 
-	@Nullable Section section(byte @Nullable [] data, byte[][] adj, byte @Nullable [] gen, byte @Nullable [] mapping, int format, int mode,
-		Map<String, Pair> pairs) throws IOException {
-		return section(data, adj, gen, mapping, format, mode, pairs, this::pair, this.fallbackBiome);
-	}
-
 	/** One section's row decoded (null: nothing in it); pairOf: a mapping entry's block state and biome. */
 	static @Nullable Section section(byte @Nullable [] data, byte[][] adj, byte @Nullable [] gen, byte @Nullable [] mapping, int format, int mode,
 		Map<String, Pair> pairs, java.util.function.Function<String, Pair> pairOf, Holder<Biome> fallbackBiome) throws IOException {
 		if (data == null || mapping == null) return null;
 		if (mode == 3) throw new IOException("xz-compressed (LZMA2) data isn't read");
-		// the mapping: per id, its block state and biome
 		List<Pair> ids = new ArrayList<>();
 		try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(decompress(mapping, mode)))) {
 			int n = in.readInt();
@@ -391,8 +375,7 @@ final class LodDhImport implements Runnable {
 			for (int i = 0; i < n; i++) {
 				byte[] b = new byte[in.readUnsignedShort()];
 				in.readFully(b);
-				String entry = new String(b, StandardCharsets.ISO_8859_1);
-				ids.add(pairs.computeIfAbsent(entry, pairOf));
+				ids.add(pairs.computeIfAbsent(new String(b, StandardCharsets.ISO_8859_1), pairOf));
 			}
 		}
 		int[][] bottom = new int[WIDTH * WIDTH][], height = new int[WIDTH * WIDTH][];
@@ -403,9 +386,8 @@ final class LodDhImport implements Runnable {
 				for (int i = 0; i < WIDTH * WIDTH; i++) {
 					int n = in.readShort();
 					if (n < 0) throw new IOException("bad column size");
-					long[] p = new long[n];
-					for (int k = 0; k < n; k++) p[k] = in.readLong();
-					points[i] = p;
+					points[i] = new long[n];
+					for (int k = 0; k < n; k++) points[i][k] = in.readLong();
 				}
 			}
 		} else {
@@ -431,10 +413,9 @@ final class LodDhImport implements Runnable {
 			state[i] = new BlockState[n];
 			biome[i] = new Holder[n];
 			for (int k = 0; k < n; k++) {
-				long d = p[k];
-				int id = (int) (d & 0x7FFFFFFFL);
-				height[i][k] = (int) (d >>> 32 & 0xFFF);
-				bottom[i][k] = (int) (d >>> 44 & 0xFFF);
+				int id = (int) (p[k] & 0x7FFFFFFFL);
+				height[i][k] = (int) (p[k] >>> 32 & 0xFFF);
+				bottom[i][k] = (int) (p[k] >>> 44 & 0xFFF);
 				Pair pr = id < ids.size() ? ids.get(id) : null;
 				state[i][k] = pr != null ? pr.state : air;
 				biome[i][k] = pr != null ? pr.biome : fallbackBiome;
@@ -452,45 +433,32 @@ final class LodDhImport implements Runnable {
 		int[] at = {0};
 		for (int x = x0; x < x1; x++) for (int z = z0; z < z1; z++) out[x * WIDTH + z] = new long[varint(b, at)];
 		int[][] flags = new int[WIDTH * WIDTH][];
-		for (int x = x0; x < x1; x++) {
-			for (int z = z0; z < z1; z++) {
-				long[] col = out[x * WIDTH + z];
-				int[] f = new int[col.length];
-				for (int i = 0; i < col.length; i++) {
-					int e = varint(b, at);
-					col[i] = e >>> 2;
-					f[i] = e & 3;
-				}
-				flags[x * WIDTH + z] = f;
+		for (int x = x0; x < x1; x++) for (int z = z0; z < z1; z++) {
+			long[] col = out[x * WIDTH + z];
+			int[] f = new int[col.length];
+			for (int i = 0; i < col.length; i++) {
+				int e = varint(b, at);
+				col[i] = e >>> 2;
+				f[i] = e & 3;
 			}
+			flags[x * WIDTH + z] = f;
 		}
-		for (int x = x0; x < x1; x++) {
-			for (int z = z0; z < z1; z++) {
-				long[] col = out[x * WIDTH + z];
-				for (int i = 0; i < col.length; i++) col[i] |= (long) (varint(b, at) & 0xFFF) << 32;
-			}
+		for (int x = x0; x < x1; x++) for (int z = z0; z < z1; z++) {
+			long[] col = out[x * WIDTH + z];
+			for (int i = 0; i < col.length; i++) col[i] |= (long) (varint(b, at) & 0xFFF) << 32;
 		}
 		int prev = 0;
-		for (int x = x0; x < x1; x++) {
-			for (int z = z0; z < z1; z++) {
-				long[] col = out[x * WIDTH + z];
-				int[] f = flags[x * WIDTH + z];
-				for (int i = 0; i < col.length; i++) {
-					int err = (f[i] & 1) != 0 ? zigzag(varint(b, at)) : 0;
-					int h = (int) (col[i] >>> 32 & 0xFFF);
-					int bottomY = prev - h + err;
-					col[i] |= (long) (bottomY & 0xFFF) << 44;
-					prev = bottomY;
-				}
+		for (int x = x0; x < x1; x++) for (int z = z0; z < z1; z++) {
+			long[] col = out[x * WIDTH + z];
+			int[] f = flags[x * WIDTH + z];
+			for (int i = 0; i < col.length; i++) {
+				int err = (f[i] & 1) != 0 ? zigzag(varint(b, at)) : 0;
+				prev = prev - (int) (col[i] >>> 32 & 0xFFF) + err;
+				col[i] |= (long) (prev & 0xFFF) << 44;
 			}
 		}
 		// (the lights: not needed, but read past)
-		for (int x = x0; x < x1; x++) {
-			for (int z = z0; z < z1; z++) {
-				int[] f = flags[x * WIDTH + z];
-				for (int v : f) if ((v & 2) != 0) at[0]++;
-			}
-		}
+		for (int x = x0; x < x1; x++) for (int z = z0; z < z1; z++) for (int v : flags[x * WIDTH + z]) if ((v & 2) != 0) at[0]++;
 		if (at[0] > b.length) throw new IOException("data cut short");
 	}
 
@@ -511,18 +479,11 @@ final class LodDhImport implements Runnable {
 
 	/** A blob as Distant Horizons compressed it. */
 	static byte[] decompress(byte[] b, int mode) throws IOException {
-		switch (mode) {
-			case 0:
-				return b;
-			case 1:
-				try (InputStream in = new net.jpountz.lz4.LZ4FrameInputStream(new ByteArrayInputStream(b))) {
-					return in.readAllBytes();
-				}
-			case 2:
-			case 4:
-				return LodZstd.get().decompress(b, 1 << 26);
-			default:
-				throw new IOException("compression " + mode + " isn't read");
+		if (mode == 0) return b;
+		if (mode == 2 || mode == 4) return LodZstd.get().decompress(b, 1 << 26);
+		if (mode != 1) throw new IOException("compression " + mode + " isn't read");
+		try (InputStream in = new net.jpountz.lz4.LZ4FrameInputStream(new ByteArrayInputStream(b))) {
+			return in.readAllBytes();
 		}
 	}
 
@@ -549,9 +510,7 @@ final class LodDhImport implements Runnable {
 		if (block == null) return Blocks.STONE.defaultBlockState();
 		if (props.isEmpty()) return block.defaultBlockState();
 		// as Distant Horizons matches them: each of the block's states printed the same way, compared ignoring case
-		for (BlockState c : block.getStateDefinition().getPossibleStates()) {
-			if (properties(c).equalsIgnoreCase(props)) return c;
-		}
+		for (BlockState c : block.getStateDefinition().getPossibleStates()) if (properties(c).equalsIgnoreCase(props)) return c;
 		return block.defaultBlockState();
 	}
 
@@ -586,19 +545,7 @@ final class LodDhImport implements Runnable {
 	}
 
 	/** One chunk (16 x 16 columns at (ox, oz) of a section) as LodChunks.snapshot reads blocks. */
-	static final class ChunkSource implements LodChunks.Source {
-		private final Section s;
-		private final int ox, oz, minY;
-		private final Holder<Biome> fallback;
-
-		ChunkSource(Section s, int ox, int oz, int minY, Holder<Biome> fallback) {
-			this.s = s;
-			this.ox = ox;
-			this.oz = oz;
-			this.minY = minY;
-			this.fallback = fallback;
-		}
-
+	record ChunkSource(Section s, int ox, int oz, int minY, Holder<Biome> fallback) implements LodChunks.Source {
 		private int col(int x, int z) {
 			return (this.ox + x) * WIDTH + this.oz + z;
 		}
@@ -610,17 +557,10 @@ final class LodDhImport implements Runnable {
 		}
 
 		@Override
-		public int minY() {
-			return this.minY;
-		}
-
-		@Override
 		public int surface(int x, int z) {
 			int c = this.col(x, z);
 			BlockState[] st = this.s.state[c];
-			for (int k = 0; k < st.length; k++) {
-				if (!st[k].isAir()) return this.minY + this.s.bottom[c][k] + this.s.height[c][k];
-			}
+			for (int k = 0; k < st.length; k++) if (!st[k].isAir()) return this.minY + this.s.bottom[c][k] + this.s.height[c][k];
 			return this.minY;
 		}
 
@@ -628,9 +568,7 @@ final class LodDhImport implements Runnable {
 		public BlockState state(int x, int y, int z) {
 			int c = this.col(x, z), rel = y - this.minY;
 			int[] bottom = this.s.bottom[c], height = this.s.height[c];
-			for (int k = 0; k < bottom.length; k++) {
-				if (rel >= bottom[k] && rel < bottom[k] + height[k]) return this.s.state[c][k];
-			}
+			for (int k = 0; k < bottom.length; k++) if (rel >= bottom[k] && rel < bottom[k] + height[k]) return this.s.state[c][k];
 			return Blocks.AIR.defaultBlockState();
 		}
 

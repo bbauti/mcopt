@@ -11,10 +11,7 @@ import java.lang.invoke.MethodHandle;
 import static java.lang.foreign.ValueLayout.JAVA_BYTE;
 import static java.lang.foreign.ValueLayout.JAVA_LONG;
 
-/**
- * Zstandard decompression (native/mczstd.c: the reference decoder in the native library), for Distant Horizons' saved
- * terrain (LodDhImport), which it compresses with zstd by default. Any thread.
- */
+/** Zstandard decompression (native/mczstd.c: the reference decoder) for DH's and Voxy's saved terrain. Any thread. */
 final class LodZstd {
 	private final MethodHandle size, decompress;
 
@@ -27,18 +24,15 @@ final class LodZstd {
 
 	private static volatile LodZstd instance;
 
-	/** The native library's (mcopt.metal.MetalBridge.library()). */
 	static LodZstd get() {
-		LodZstd z = instance;
-		if (z == null) instance = z = new LodZstd(mcopt.metal.MetalBridge.library());
-		return z;
+		if (instance == null) instance = new LodZstd(mcopt.metal.MetalBridge.library());
+		return instance;
 	}
 
 	/** src's zstd frames, decompressed (at most max bytes). */
 	byte[] decompress(byte[] src, int max) throws IOException {
 		try (Arena a = Arena.ofConfined()) {
-			MemorySegment in = a.allocate(Math.max(1, src.length));
-			MemorySegment.copy(src, 0, in, JAVA_BYTE, 0, src.length);
+			MemorySegment in = a.allocateFrom(JAVA_BYTE, src);
 			long named = (long) this.size.invokeExact(in.address(), (long) src.length);
 			if (named == -2) throw new IOException("not zstd data");
 			if (named > max) throw new IOException("zstd data too large: " + named);

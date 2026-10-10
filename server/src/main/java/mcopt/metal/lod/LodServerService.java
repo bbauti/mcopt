@@ -16,7 +16,6 @@ import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
@@ -42,14 +41,9 @@ import net.minecraft.world.ticks.ProtoChunkTicks;
 import org.jspecify.annotations.Nullable;
 
 /**
- * mcopt-server: the server makes far terrain for its players' mcopt clients (LodNet). It has what they lack: the world's
- * generator (its seed and datapacks stay here: only the result is sent) and its saved chunks. Per player, the tiles they ask
- * for are generated (LodNoise without paint: the structure, which the client paints with its own textures) or read from this
- * server's cache, nearest first as the client asked; the regions they ask about get their chunks' save times, and the chunks
- * they lack come as their columns (LodStructure.encodeChunk). Generation runs on its own low-priority threads and waits while
- * the server's ticks are slow; what goes out to each player is metered per tick (kilobytes a second) on the server thread.
- *
- * Settings: config/mcopt-server.properties (written on first start).
+ * mcopt-server: far terrain for players' mcopt clients (LodNet) from the world's generator (its seed and datapacks stay here: only the structure is
+ * sent, for the client to paint) and its saved chunks, per player in the order asked (nearest first). Generation runs on low-priority threads that
+ * wait while the server's ticks are slow; sends are metered per tick on the server thread. Settings: config/mcopt-server.properties.
  */
 public final class LodServerService {
 	private static final String VERSION = FabricLoader.getInstance().getModContainer("mcopt-server").map(m -> m.getMetadata().getVersion().getFriendlyString())
@@ -65,7 +59,6 @@ public final class LodServerService {
 	private static final List<Thread> workers = new ArrayList<>();
 	private static volatile boolean running;
 	private static final Object signal = new Object();
-	static final AtomicLong tilesGenerated = new AtomicLong(), tilesCached = new AtomicLong(), chunksSent = new AtomicLong(), bytesSent = new AtomicLong();
 
 	private LodServerService() {
 	}
@@ -132,7 +125,6 @@ public final class LodServerService {
 		}
 	}
 
-	/** At startup (mcopt-server's entrypoint): settings, payloads, and the server's events. */
 	public static void init() {
 		cfg = loadConfig();
 		PayloadTypeRegistry.serverboundPlay().register(LodNet.Hello.TYPE, LodNet.Hello.CODEC);
@@ -169,9 +161,7 @@ public final class LodServerService {
 
 	private static void stop() {
 		running = false;
-		synchronized (signal) {
-			signal.notifyAll();
-		}
+		wake();
 		for (Thread t : workers) t.interrupt();
 		workers.clear();
 		peers.clear();
@@ -276,7 +266,6 @@ public final class LodServerService {
 					int size = size(out);
 					peer.outBytes -= size;
 					peer.allowance -= size;
-					bytesSent.addAndGet(size);
 					if (ServerPlayNetworking.canSend(peer.player, out.type())) ServerPlayNetworking.send(peer.player, out);
 				}
 			}
@@ -400,12 +389,9 @@ public final class LodServerService {
 		Path f = d.cache.resolve("L" + level).resolve(tx + "." + tz + ".t");
 		byte[] data = null;
 		try {
-			if (Files.isRegularFile(f)) {
-				data = Files.readAllBytes(f);
-				tilesCached.incrementAndGet();
-			}
+			if (Files.isRegularFile(f)) data = Files.readAllBytes(f);
 		} catch (IOException e) {
-			data = null;
+			// (unreadable: generated again below)
 		}
 		if (data == null) {
 			LodTile t = new LodTile(level, tx, tz);
@@ -420,7 +406,6 @@ public final class LodServerService {
 				d.noise.dressGround(t);
 			}
 			data = LodStructure.encodeTile(t);
-			tilesGenerated.incrementAndGet();
 			try {
 				Files.createDirectories(f.getParent());
 				Path tmp = f.resolveSibling(f.getFileName() + ".tmp" + Thread.currentThread().threadId());
@@ -489,7 +474,6 @@ public final class LodServerService {
 				batch.i32(Math.max(1, h[1024 + idx]));
 				LodStructure.encodeChunk(LodChunks.snapshot(chunk, d.roof), batch);
 				count++;
-				chunksSent.incrementAndGet();
 			} catch (InterruptedException e) {
 				Thread.currentThread().interrupt();
 				return;
@@ -522,10 +506,7 @@ public final class LodServerService {
 
 	// ---- the cache's owner, settings ----
 
-	/**
-	 * The cache belongs to this world's seed, this version's structure and the generator's switches (generator.txt): any
-	 * other moves it aside (deleted in the background). The token names the world to clients (a hash, never the seed).
-	 */
+	/** The cache is this seed's, structure's and switches' (generator.txt; any other is moved aside, deleted); the token: a hash, never the seed. */
 	private static long claim(Path dir, long seed) {
 		String want = "seed " + seed + " structure " + LodStructure.VERSION + " mcopt " + VERSION + " trees " + LodConfig.TREES + " " + LodConfig.TREE_LEVELS
 			+ " plants " + LodConfig.PLANTS + " crowns " + LodConfig.CROWN_LEVELS + " fine " + LodConfig.FINE_DENSITY + " " + LodConfig.FINE_LEVELS;
