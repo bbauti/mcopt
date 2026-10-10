@@ -69,8 +69,21 @@ public final class LodConfig {
 	 */
 	public static final boolean PLANTS = TEXTURES && Boolean.parseBoolean(System.getProperty("mcopt.lod.plants", String.valueOf(QUALITY.plants)));
 	/** -Dmcopt.lod.clearWater=false: far water drawn opaque, mixed with its floor's color by depth; default see-through, as the game's water is. */
-	/** -Dmcopt.lod.plantPx=N: no plants where a block is under N pixels tall on screen (0: everywhere they're drawn). */
-	public static final float PLANT_PX = Float.parseFloat(System.getProperty("mcopt.lod.plantPx", "0"));
+	/**
+	 * -Dmcopt.lod.plantPx=N: no far plants where a block is under N pixels tall on screen (by the options' field of view); what
+	 * they hid is folded into the terrain's color there (columns.metal meshPlantCover). Default 3: at 1920x1080 the high preset
+	 * runs 642 -> 920 fps on an M4 Pro, the far savanna within ~1 of 255 of its color with them drawn. 0: every plant drawn.
+	 */
+	public static final float PLANT_PX = Float.parseFloat(System.getProperty("mcopt.lod.plantPx", "3"));
+	/** -Dmcopt.lod.plantCover=WALL,TOP,MAX: how much a folded-in plant hides of a wall and of a top, and of either at most. */
+	public static final float[] PLANT_COVER = floats(System.getProperty("mcopt.lod.plantCover", "0.75,0.75,0.9"), 3);
+
+	private static float[] floats(String v, int n) {
+		String[] p = v.split(",");
+		float[] out = new float[n];
+		for (int i = 0; i < n; i++) out[i] = i < p.length ? Float.parseFloat(p[i].strip()) : 0;
+		return out;
+	}
 	public static final boolean CLEAR_WATER = Boolean.parseBoolean(System.getProperty("mcopt.lod.clearWater", "true"));
 	/**
 	 * -Dmcopt.lod.treeLevels=N: the N finest levels (at most 2) get the game's own trees (its tree features run on the far

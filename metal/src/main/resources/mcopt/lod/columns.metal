@@ -1060,6 +1060,7 @@ struct CompFrame {
     int4 origin;         // floor(camera) xyz, w: log2 N
     float4 camFrac;      // camera - origin
     float4 tex;          // x: radians a pixel spans, y: the block atlas's highest mip, z: 1 = textures on level 0
+    float4 plants;       // x: blocks past which level 0's plants aren't drawn (0: all drawn), y-w: their cover (meshPlantCover)
 };
 
 struct CompVOut {
@@ -3090,6 +3091,46 @@ static inline half3 seamTaa(constant CompFrame& f, constant SeamTaaFrame& tf, te
 }
 #endif
 
+// Level 0's plants past f.plants.x (MeshFrame caps.z: where a block is a few pixels) aren't drawn; what they would hide is folded
+// in here instead. From a ground surface toward the camera over a few cells (a top from its own, a wall from the one in front of
+// it), every plant the view's ray passes through (its height over that cell within the plant's blocks) hides f.plants.y (walls)
+// or f.plants.z (tops) of what is left, at most f.plants.w. A crown's faces are left out (ground plants can't reach them), and
+// one read a cell: plant bits on a geometry word always come with the plant's words. Returns the share, `plant` the nearest
+// such plant's color. Past the cull's own test at the surface's cell (16-cell blocks from their nearest point), so a drawn
+// plant is hardly ever also folded in.
+#define PLANT_STEPS 2
+static inline half meshPlantCover(constant CompFrame& f, device const uint* geom, device const uint* texWords, thread const CompSurface& s,
+                                  uint info, thread half3& plant) {
+    if (f.plants.x <= 0.0 || (info & 0x1F8u) != 0u || s.face == FACE_BOTTOM) return 0.0h;   // level 0, ground faces only
+    float3 p = s.rel + f.camFrac.xyz;
+    int ax = int(floor(p.x)) + f.origin.x, az = int(floor(p.z)) + f.origin.z;
+    float bx = float((ax & ~15) - f.origin.x), bz = float((az & ~15) - f.origin.z);
+    float nx = max(0.0, max(bx - f.camFrac.x, f.camFrac.x - bx - 16.0)), nz = max(0.0, max(bz - f.camFrac.z, f.camFrac.z - bz - 16.0));
+    if (nx * nx + nz * nz <= f.plants.x * f.plants.x) return 0.0h;
+    float lh = max(length(s.rel.xz), 1e-6);
+    float2 toCam = -s.rel.xz / lh;
+    float slope = max(-s.rel.y / lh, 0.0);   // the ray's rise toward the camera, per block across
+    bool top = s.face == FACE_TOP;
+    float y = p.y + float(f.origin.y), miss = 1.0, hide = top ? f.plants.z : f.plants.y;
+    float2 start = p.xz + (s.face == FACE_XP ? float2(0.5, 0) : s.face == FACE_XN ? float2(-0.5, 0) : s.face == FACE_ZP ? float2(0, 0.5)
+        : s.face == FACE_ZN ? float2(0, -0.5) : float2(0));
+    int logN = f.origin.w, m = (1 << logN) - 1;
+    uint n2 = 1u << uint(2 * logN), first = 0xFFFFFFFFu;
+    for (int k = 0; k < PLANT_STEPS; k++) {
+        float2 q = start + toCam * float(k);
+        uint idx = uint((((int(floor(q.y)) + f.origin.z) & m) << logN) | ((int(floor(q.x)) + f.origin.x) & m));
+        uint g = geom[idx];
+        int blocks = GEOM_PLANT_BLOCKS(g);
+        float yr = y + (float(k) + (top ? 0.5 : 0.0)) * slope - float(GEOM_Y(g));
+        if (blocks == 0 || yr < 0.0 || yr >= float(blocks) * 0.8) continue;
+        if (first == 0xFFFFFFFFu) first = idx;
+        miss *= 1.0 - hide;
+    }
+    if (first == 0xFFFFFFFFu) return 0.0h;
+    plant = comp565(texWords[2u * n2 + first] & 0xFFFFu);
+    return half(min(1.0 - miss, f.plants.w));
+}
+
 fragment half4 lod_mesh_vanilla(MeshVOut in [[stage_in]], constant CompFrame& f [[buffer(22)]], device const uint* geom [[buffer(24)]],
                                 device const uint* color [[buffer(25)]], device const uint* crowns [[buffer(26)]],
                                 device const uint* texWords [[buffer(27)]], device const PaletteEntry* palette [[buffer(28)]],
@@ -3119,7 +3160,11 @@ fragment half4 lod_mesh_vanilla(MeshVOut in [[stage_in]], constant CompFrame& f 
     seamThin(f, in.info, s, geom, color, crowns, lit);
     half4 o = half4(compFog(f, s.rel, lit * half3(s.ao * s.sky * f.skyLight.rgb)), 1.0h);
 #else
-    half4 o = half4(compFog(f, s.rel, s.albedo * half3(shade * s.ao * s.sky * f.skyLight.rgb)), 1.0h);
+    half3 plant = half3(0.0h), lit = s.albedo * half(shade * s.ao * s.sky);
+    half cover = meshPlantCover(f, geom, texWords, s, in.info, plant);
+    // (the plants in their own light: a wall's occlusion and shade don't reach them)
+    if (cover > 0.0h) lit = mix(lit, plant * half(f.faceShade.x), cover);
+    half4 o = half4(compFog(f, s.rel, lit * half3(f.skyLight.rgb)), 1.0h);
 #endif
 #ifdef SEAM_TAA
     o.rgb = seamTaa(f, tf, hist, in.info, s, color, o.rgb);

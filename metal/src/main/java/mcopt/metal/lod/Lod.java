@@ -44,7 +44,7 @@ public final class Lod {
 	/** ColFrame in columns.metal: A, B, C, cam, origin, cols, lines, screen, mask, maskDist (10 x 16) + 12 levels x 32. */
 	static final int COL_FRAME_BYTES = 10 * 16 + MAX_LEVELS * 32;
 	/** CompFrame: float4x4 + A, B, C, screen, fogColor, fog, skyLight, faceShade, quadDepth, origin, camFrac, tex (12 x 16). */
-	static final int COMP_FRAME_BYTES = 64 + 12 * 16;
+	static final int COMP_FRAME_BYTES = 64 + 13 * 16;
 	private static final int MASK_MAX = 128;
 	private static final int RING = 4;
 	/** -Dmcopt.lod.debugView=N: the far terrain's debug coloring (0: none). */
@@ -85,7 +85,7 @@ public final class Lod {
 	// this frame
 	private double camX, camY, camZ;
 	private final Matrix4f viewProj = new Matrix4f();
-	private float projScale;
+	private float plantDist;
 	private final Vector3f forward = new Vector3f();
 	private final FrustumIntersection frustum = new FrustumIntersection();
 	private float fogR, fogG, fogB, fogStart, fogEnd, envStart, envEnd;
@@ -482,7 +482,6 @@ public final class Lod {
 		// the projection the level is drawn with (bobbing, hurt tilt, nausea, camera rolls), else the camera's alone
 		Matrix4f proj = levelProjectionSet ? LEVEL_PROJECTION : camera.projectionMatrix;
 		this.viewProj.set(proj).mul(camera.viewRotationMatrix);
-		this.projScale = proj.m11();
 		levelProjectionSet = false;
 		camera.viewRotationMatrix.positiveZ(this.forward).negate();
 		this.frustum.set(this.viewProj, false);
@@ -670,13 +669,17 @@ public final class Lod {
 				this.partNanos[3] += System.nanoTime() - t3;
 			}
 			// (hidden: the tiles' meshes still install and publish above, so nothing piles up; only the cull and draw are left out)
+			// (where a block is under PLANT_PX pixels tall: no plants drawn past it; the mesh's cull and fragment stages read it. From
+			// the options' field of view: sprinting's wider view would move the line under the player's eyes)
+			this.plantDist = LodConfig.PLANT_PX > 0
+				? (float) (height * 0.5 / Math.tan(Math.toRadians(Minecraft.getInstance().options.fov().get()) * 0.5) / LodConfig.PLANT_PX) : 0;
 			int columns = drawEnabled ? this.packFrames(clip, width, height, rd) : 0;
 			LodMesh mesh = this.mesh;
 			if (columns > 0 && mesh != null) {
 				boolean gbuffer = false;
 				if (this.dumpNow(w)) this.dump(clip, this.maskAddrs[(int) (this.frames % RING)], width, height);
 				mesh.pack(this.viewProj, this.camX, this.camY, this.camZ, LodConfig.reachBlocks(), this.maskOn, this.maskX, this.maskZ, this.maskSize, this.maskWords,
-					rd * 16.0F + 48.0F, LodConfig.PLANT_PX > 0 ? this.projScale * height * 0.5F / LodConfig.PLANT_PX : 0);
+					rd * 16.0F + 48.0F, this.plantDist);
 				long table = mesh.table(this.frames);
 				LodPk pk = this.pk;
 				// (the load switch: every TIME_EVERY-th frame's cull samples its GPU time, read TIME_EVERY frames later)
@@ -1101,6 +1104,10 @@ public final class Lod {
 		MemoryUtil.memPutFloat(c + 244, this.atlasMips);
 		MemoryUtil.memPutFloat(c + 248, LodConfig.TEXTURES && this.atlasMips >= 0 ? 1 : 0);
 		MemoryUtil.memPutFloat(c + 252, DEBUG_VIEW);
+		MemoryUtil.memPutFloat(c + 256, this.plantDist);
+		MemoryUtil.memPutFloat(c + 260, LodConfig.PLANT_COVER[0]);
+		MemoryUtil.memPutFloat(c + 264, LodConfig.PLANT_COVER[1]);
+		MemoryUtil.memPutFloat(c + 268, LodConfig.PLANT_COVER[2]);
 	}
 
 	private static void putD(long at, double[] v) {
