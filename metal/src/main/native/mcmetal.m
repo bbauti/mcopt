@@ -1759,9 +1759,9 @@ static double paceTarget;         // the refresh the frame being presented was p
 #define PACE_EXTRA_MAX 0.006
 void mc_pace_adapt(int on) { paceAdapt = on; }
 double mc_pace_extra_ms(void) { return paceExtra * 1e3; }
-static void paceWatch(id<CAMetalDrawable> drawable) {
-	if (!paceAdapt || paceTarget <= 0) return;
-	double target = paceTarget, period = refreshPeriod;
+static void paceWatch(id<CAMetalDrawable> drawable, double target) {
+	if (!paceAdapt || target <= 0) return;
+	double period = refreshPeriod;
 	[drawable addPresentedHandler:^(id<MTLDrawable> d) {
 		double shown = d.presentedTime;
 		if (shown <= 0 || period <= 0) return;
@@ -1802,7 +1802,10 @@ int mc_pace(double margin) {
 	double now = CACurrentMediaTime(), anchor = nextRefresh, period = refreshPeriod, lead = gpuLatency + margin + paceExtra;
 	if (lastPace > 0) frameInterval += (now - lastPace - frameInterval) * 0.1;
 	lastPace = now;
-	if (period <= 0 || now - anchor > 0.25) return 1; // no refreshes lately (starting, display asleep): present everything
+	if (period <= 0 || now - anchor > 0.25) { // no refreshes lately (starting, display asleep): present everything, unpaced
+		paceTarget = 0;
+		return 1;
+	}
 	double target = anchor + ceil((now + lead - anchor) / period) * period;
 	if (target < pacedFor + period / 2 || now + 2 * frameInterval + lead < target) return 0;
 	pacedFor = target;
@@ -1853,7 +1856,7 @@ void mc_present(Enc *enc, id<CAMetalDrawable> drawable, id<MTLTexture> src) {
 		[r endEncoding];
 		double encodedAt = CACurrentMediaTime();
 		[cmd(enc) addCompletedHandler:^(id<MTLCommandBuffer> b) { gpuLatency += (CACurrentMediaTime() - encodedAt - gpuLatency) * 0.1; }];
-		paceWatch(drawable);
+		paceWatch(drawable, paceTarget);
 		[cmd(enc) presentDrawable:drawable];
 	}
 }
@@ -1873,6 +1876,9 @@ static id<MTLEvent> pqEvent;
 static uint64_t pqValue;
 static id<MTLTexture> pqStaging[PQ_SLOTS];
 static _Atomic int pqBusy[PQ_SLOTS];
+// The refresh each slot's frame was paced for: the present side runs behind, when the render thread's paceTarget is a later
+// frame's (measured against that, presents looked a refresh early or late and the margin sat at PACE_EXTRA_MAX)
+static double pqTarget[PQ_SLOTS];
 static int pqNext;
 static id<CAMetalDrawable> pqDrawable;  // retained: encoded by mc_present_queued, presented by pqSubmit after the commit
 static int pqSlot;
@@ -1935,7 +1941,7 @@ static void pqEncodePresent(id<CAMetalDrawable> drawable, int slot, uint64_t wai
 		gpuLatency += (CACurrentMediaTime() - queuedAt - gpuLatency) * 0.1;
 		atomic_store(&pqBusy[slot], 0);
 	}];
-	paceWatch(drawable);
+	paceWatch(drawable, pqTarget[slot]);
 	[p presentDrawable:drawable];
 	[p commit];
 }
@@ -1949,6 +1955,7 @@ int mc_present_queued(Enc *enc, id<CAMetalDrawable> drawable, id<MTLTexture> src
 	}
 	pqDrawable = [drawable retain];
 	pqSlot = k;
+	pqTarget[k] = paceTarget;
 	pqWait = pqValue;
 	return 1;
 }
@@ -1973,6 +1980,7 @@ int mc_present_queued_acquire(Enc *enc, CAMetalLayer *layer, id<MTLTexture> src,
 	if (pqAcq) atomic_store(&pqBusy[pqAcq & 3], 0);  // two presents in one frame: the newer one wins
 	pqLayer = layer;
 	pqCadence[k] = cadence;
+	pqTarget[k] = paceTarget;
 	pqQueuedAt[k] = CACurrentMediaTime();
 	pqAcq = pqValue << 2 | (uint64_t) k;
 	return 1;

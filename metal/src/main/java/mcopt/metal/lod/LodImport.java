@@ -156,6 +156,7 @@ final class LodImport implements Runnable {
 		}
 		for (int i = 0; i < sections.length; i++) if (sections[i] == null) sections[i] = new LevelChunkSection(factory);
 		ProtoChunk chunk = new ProtoChunk(data.chunkPos(), UpgradeData.EMPTY, sections, new ProtoChunkTicks<>(), new ProtoChunkTicks<>(), this.level, factory, null);
+		chunk.setPersistedStatus(data.chunkStatus());   // (a new ProtoChunk is EMPTY: its biomes would throw "before we have biomes")
 		long[] surface = data.heightmaps().get(Heightmap.Types.WORLD_SURFACE);
 		if (surface != null) chunk.setHeightmap(Heightmap.Types.WORLD_SURFACE, surface);
 		else Heightmap.primeHeightmaps(chunk, java.util.EnumSet.of(Heightmap.Types.WORLD_SURFACE));
