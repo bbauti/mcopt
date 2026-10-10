@@ -1779,7 +1779,7 @@ static void paceWatch(id<MTLCommandBuffer> cb, id<CAMetalDrawable> drawable, dou
 		double off = late - paceFloor;
 		int k = off > period * 0.5 ? (slack > s ? -1 : 1) : 0, i = atomic_fetch_add(&paceShown, 1);
 		if (i < PACE_SAMPLES) paceLateMs[i] = (float) (late * 1e3);
-		if (k || off < -period * 0.5) atomic_fetch_add(k > 0 ? &paceLate : k ? &paceLateSlack : &paceEarly, 1);
+		if (k || (isfinite(off) && off < -period * 0.5)) atomic_fetch_add(k > 0 ? &paceLate : k ? &paceLateSlack : &paceEarly, 1);
 		if (paceAdapt != 1) return;
 		double e = paceExtra + (k > 0 ? PACE_UP : k ? -PACE_UP : -PACE_DOWN);
 		paceExtra = e < 0 ? 0 : e > PACE_EXTRA_MAX ? PACE_EXTRA_MAX : e;
