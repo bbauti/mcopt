@@ -1110,16 +1110,19 @@ static inline float compVertexAo(bool s1, bool s2, bool c) {
 // The real texture of a level-0 face: its block's sprite at the mip the distance and the angle call for, scaled so its
 // average is the cell's own color (which holds the biome tint). Leaves' transparent texels show the crown's shaded inside.
 static inline half3 compTexture(constant CompFrame& f, device const PaletteEntry* palette, texture2d<half> atlas, sampler smp, uint id, bool top,
-                                float2 uv, float3 rel, float3 n, half3 albedo) {
+                                float2 uv, float3 rel, float3 n, half3 albedo, bool solid = false) {
     if (id == 0u) return albedo;
-    PaletteEntry e = palette[id];
-    float4 rect = top ? e.topUv : e.sideUv;
-    if (rect.z <= rect.x) return albedo;
-    float3 avg = max(top ? e.topAvg.rgb : e.sideAvg.rgb, float3(0.02));
     float dist = length(rel);
     float cosA = abs(dot(n, rel)) / max(dist, 1e-3);
     // texels a pixel covers: 16 a block, a pixel covers dist x angle blocks, stretched by the incidence
     float lod = clamp(log2(16.0 * dist * f.tex.x / max(cosA, 0.08)), 0.0, f.tex.y);
+    // (a solid block's sprite at the atlas's top mip is its average, which the color word already is: nothing to read; leaves
+    // aren't solid, their mostly clear top mip shades them below it)
+    if (solid && lod >= f.tex.y && f.tex.w < 2.0) return albedo;
+    PaletteEntry e = palette[id];
+    float4 rect = top ? e.topUv : e.sideUv;
+    if (rect.z <= rect.x) return albedo;
+    float3 avg = max(top ? e.topAvg.rgb : e.sideAvg.rgb, float3(0.02));
 #ifdef SEAM_THIN_TEX
     // (-Dmcopt.lod.thinTex: textures minified with linear filtering and half a mip more, inset by half a texel of that mip so the
     // atlas's neighbouring sprites don't bleed in: far texels no longer crawl as faces slide under the pixel grid)
@@ -1358,7 +1361,7 @@ static inline bool compShade(constant CompFrame& f, uint2 v, device const uint* 
         return true;
     }
     if (s.face == FACE_TOP) {
-        s.albedo = compTexture(f, palette, atlas, smp, tw & 1023u, true, float2(fx, fz), s.rel, nrm, s.albedo);
+        s.albedo = compTexture(f, palette, atlas, smp, tw & 1023u, true, float2(fx, fz), s.rel, nrm, s.albedo, true);
 #ifdef MESH_BENCH_NOAO
         return true;
 #endif
@@ -1399,9 +1402,9 @@ static inline bool compShade(constant CompFrame& f, uint2 v, device const uint* 
     if ((g & GEOM_FRINGE) != 0u && depth < 3.0 / 16.0) {
         s.albedo = comp565(color[idx] & 0xFFFFu);
     } else if (depth >= 1.0 && f.quadDepth.w > 0.0) {
-        s.albedo = compTexture(f, palette, atlas, smp, (tw >> 20) & 1023u, false, wuv, s.rel, nrm, comp565((crowns[idx] >> 12) & 0xFFFFu));
+        s.albedo = compTexture(f, palette, atlas, smp, (tw >> 20) & 1023u, false, wuv, s.rel, nrm, comp565((crowns[idx] >> 12) & 0xFFFFu), true);
     } else {
-        s.albedo = compTexture(f, palette, atlas, smp, (tw >> 10) & 1023u, false, wuv, s.rel, nrm, s.albedo);
+        s.albedo = compTexture(f, palette, atlas, smp, (tw >> 10) & 1023u, false, wuv, s.rel, nrm, s.albedo, true);
     }
     return true;
 }
