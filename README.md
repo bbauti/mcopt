@@ -46,6 +46,10 @@ mcopt's LODs: terrain past the render distance, out to 512 chunks by default, dr
   and kept on disk per server and dimension: what you've seen once is there next time.
 - **Your saved world too:** in singleplayer, the chunks already saved in the world (explored before, builds included) are
   read in the background once and replace the estimate there.
+- **Coming from Voxy or Distant Horizons:** their saved far terrain (Voxy: `<world>/voxy`, `.voxy/saves/<server>`;
+  Distant Horizons: `DistantHorizons.sqlite` in the world's `data` folder, `Distant_Horizons_server_data/<server>`, found
+  by the world's seed when the server named the folder) is read in the background and becomes ours, for the dimension
+  you're in, while that mod isn't installed. In singleplayer the world's own saved chunks win where both have one.
 - **Kept on disk:** `mcopt-lod/` in the game folder, compressed. Places you've seen from close by stay when you see them
   from farther away. Saved every few seconds and when you leave the world.
 - **F6** hides and shows it while playing.
@@ -67,6 +71,8 @@ Settings: Options > Video Settings > **Far Terrain (mcopt)...**, or in `config/m
 | `mcopt.lod.plants`, `mcopt.lod.trees`, `mcopt.lod.textures` | by quality / `true` | Detail on the nearest far terrain |
 | `mcopt.lod.clearWater` | `true` | See-through water: the bed shows under shallow water, deep water darkens (tiles cached before this version stay opaque until regenerated) |
 | `mcopt.lod.import` | `true` | Read the singleplayer world's saved chunks |
+| `mcopt.lod.importVoxy` | `true` | Read Voxy's saved far terrain for the world or server you're in (with Voxy uninstalled), once per change of its files |
+| `mcopt.lod.importDh` | `true` | Read Distant Horizons' saved far terrain the same way (with Distant Horizons uninstalled) |
 | `mcopt.lod.cache` | `true` | The disk cache (`mcopt.lod.cacheDir` moves it) |
 | `mcopt.lod.meshDouble` | `true` | Two sets of the far terrain cull's outputs used in turn, so a frame's cull doesn't wait for the previous frame's level pass (~50 MB of GPU memory; `false`: one) |
 

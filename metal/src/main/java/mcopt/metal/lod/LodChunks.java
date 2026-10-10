@@ -111,7 +111,7 @@ final class LodChunks {
 		return DEPTH_MAX;
 	}
 
-	/** Where a snapshot's blocks come from (a game chunk); x, z: 0-15, y the world's. */
+	/** Where a snapshot's blocks come from: a game chunk or another mod's saved terrain (LodVoxyImport, LodDhImport); x, z: 0-15, y the world's. */
 	interface Source {
 		int minY();
 
@@ -162,6 +162,10 @@ final class LodChunks {
 		}, chunk, chunk.getPos().x(), chunk.getPos().z(), roof, RUNS);
 		if (SPAN_STATS) spanStatsLater(chunk);
 		return s;
+	}
+
+	static Snapshot snapshot(Source src, int chunkX, int chunkZ, int roof, boolean runs) {
+		return snapshot(src, null, chunkX, chunkZ, roof, runs);
 	}
 
 	/** A chunk's columns from any source; runs (-Dmcopt.lod.realOcc's chunks): where each column's run starts, and chunk's sections it reaches. */
@@ -278,7 +282,7 @@ final class LodChunks {
 	 * Such a gap is open when a neighbor column in the chunk has its top under the gap's top (seen from that side), else
 	 * enclosed (a cave pocket, which far terrain would leave solid). Leaf crowns (leaves over air, which far terrain already
 	 * draws) are counted on their own. Logged every 30 s while chunks come in. ~16k block reads a chunk while on: the game's
-	 * chunks are walked on a thread of its own (spanStatsLater).
+	 * chunks are walked on a thread of its own (spanStatsLater), the imports' on their thread.
 	 */
 	static final boolean SPAN_STATS = Boolean.getBoolean("mcopt.lod.spanStats");
 	/** The game's chunks' walks (one thread, low priority; chunks past 256 waiting aren't counted). */

@@ -13,14 +13,25 @@ dependencies {
 }
 
 def nativeOut = layout.buildDirectory.dir('natives/natives')
+// Zstandard's decompressor (mczstd.c, for the far terrain's imports): its pinned release, fetched once into build/
+def zstd = layout.buildDirectory.dir('zstd').get().asFile
+
+tasks.register('fetchZstd', Exec) {
+	outputs.dir zstd
+	doFirst { zstd.mkdirs() }
+	commandLine 'sh', '-c', 'cd "$0" && curl -sSfL -o z.tar.gz https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-1.5.6.tar.gz && echo ' +
+		'"8c29e06cf42aacc1eafc4077ae2ec6c6fcb96a626157e0593d5e82a34fd403c1  z.tar.gz" | shasum -a 256 -c --status && tar xzf z.tar.gz', zstd
+}
 
 tasks.register('compileNative', Exec) {
-	def sources = ['mcmetal.m', 'mclod.m', 'lodseam.m', 'lodmesh.c', 'lodnoise.c', 'rec.m', 'mcown.m', 'mccap.m'].collect { file("src/main/native/$it") }
+	dependsOn 'fetchZstd'
+	def sources = ['mcmetal.m', 'mclod.m', 'lodseam.m', 'lodmesh.c', 'lodnoise.c', 'rec.m', 'mcown.m', 'mccap.m', 'mczstd.c'].collect { file("src/main/native/$it") }
 	def output = nativeOut.get().file('libmcmetal.dylib').asFile
 	inputs.files sources, file('src/main/native/mcmetal.h'), file('src/main/native/lodmesh.h')
 	outputs.file output
 	doFirst { output.parentFile.mkdirs() }
 	commandLine(['clang', '-fno-objc-arc', '-O2', '-Wall', '-arch', 'arm64', '-mmacosx-version-min=15.0', '-dynamiclib', '-install_name', '@rpath/libmcmetal.dylib',
+		'-I', "$zstd/zstd-1.5.6/lib", '-I', "$zstd/zstd-1.5.6/build/single_file_libs",
 		'-framework', 'CoreGraphics', '-framework', 'CoreVideo', '-framework', 'Foundation', '-framework', 'Metal', '-framework', 'QuartzCore', '-o', output] + sources)
 }
 
@@ -37,6 +48,8 @@ jar {
 	// Apache-2.0 asks for LICENSE and NOTICE in every copy.
 	from(rootProject.file('LICENSE'))
 	from(rootProject.file('NOTICE'))
+	// the native library carries Zstandard's decompressor (BSD: its notice goes with the binary)
+	from("$zstd/zstd-1.5.6/LICENSE") { rename { 'LICENSE-zstd' } }
 }
 
 tasks.withType(JavaCompile).configureEach {
