@@ -635,7 +635,7 @@ final class LodMesh implements LodClip.Listener {
 
 	/** MeshFrame (columns.metal): the camera, the mask, the windows and switch distances. */
 	void pack(org.joml.Matrix4f viewProj, double camX, double camY, double camZ, double reach, boolean maskOn, int maskX, int maskZ, int maskSize,
-		int maskWords, float maskDist) {
+		int maskWords, float maskDist, float plantDist) {
 		long f = this.frame;
 		MemoryUtil.memSet(f, 0, FRAME_BYTES);
 		viewProj.getToAddress(f);
@@ -664,6 +664,7 @@ final class LodMesh implements LodClip.Listener {
 		MemoryUtil.memPutFloat(f + 404, (float) (128.0 / Math.log(Math.max(2.0, reach * 2.0 / 48.0))));
 		MemoryUtil.memPutInt(f + 416, MAX_SURVIVORS);
 		MemoryUtil.memPutInt(f + 420, MAX_LISTED);
+		MemoryUtil.memPutInt(f + 424, (int) plantDist);
 		for (int l = 0; l < this.clip.levels; l++) {
 			MemoryUtil.memPutInt(f + 144 + l * 16L, this.clip.winTx[l]);
 			MemoryUtil.memPutInt(f + 148 + l * 16L, this.clip.winTz[l]);

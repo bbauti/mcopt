@@ -85,6 +85,7 @@ public final class Lod {
 	// this frame
 	private double camX, camY, camZ;
 	private final Matrix4f viewProj = new Matrix4f();
+	private float projScale;
 	private final Vector3f forward = new Vector3f();
 	private final FrustumIntersection frustum = new FrustumIntersection();
 	private float fogR, fogG, fogB, fogStart, fogEnd, envStart, envEnd;
@@ -481,6 +482,7 @@ public final class Lod {
 		// the projection the level is drawn with (bobbing, hurt tilt, nausea, camera rolls), else the camera's alone
 		Matrix4f proj = levelProjectionSet ? LEVEL_PROJECTION : camera.projectionMatrix;
 		this.viewProj.set(proj).mul(camera.viewRotationMatrix);
+		this.projScale = proj.m11();
 		levelProjectionSet = false;
 		camera.viewRotationMatrix.positiveZ(this.forward).negate();
 		this.frustum.set(this.viewProj, false);
@@ -674,7 +676,7 @@ public final class Lod {
 				boolean gbuffer = false;
 				if (this.dumpNow(w)) this.dump(clip, this.maskAddrs[(int) (this.frames % RING)], width, height);
 				mesh.pack(this.viewProj, this.camX, this.camY, this.camZ, LodConfig.reachBlocks(), this.maskOn, this.maskX, this.maskZ, this.maskSize, this.maskWords,
-					rd * 16.0F + 48.0F);
+					rd * 16.0F + 48.0F, LodConfig.PLANT_PX > 0 ? this.projScale * height * 0.5F / LodConfig.PLANT_PX : 0);
 				long table = mesh.table(this.frames);
 				LodPk pk = this.pk;
 				// (the load switch: every TIME_EVERY-th frame's cull samples its GPU time, read TIME_EVERY frames later)

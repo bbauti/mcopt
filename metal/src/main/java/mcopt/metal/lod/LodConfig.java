@@ -69,6 +69,8 @@ public final class LodConfig {
 	 */
 	public static final boolean PLANTS = TEXTURES && Boolean.parseBoolean(System.getProperty("mcopt.lod.plants", String.valueOf(QUALITY.plants)));
 	/** -Dmcopt.lod.clearWater=false: far water drawn opaque, mixed with its floor's color by depth; default see-through, as the game's water is. */
+	/** -Dmcopt.lod.plantPx=N: no plants where a block is under N pixels tall on screen (0: everywhere they're drawn). */
+	public static final float PLANT_PX = Float.parseFloat(System.getProperty("mcopt.lod.plantPx", "0"));
 	public static final boolean CLEAR_WATER = Boolean.parseBoolean(System.getProperty("mcopt.lod.clearWater", "true"));
 	/**
 	 * -Dmcopt.lod.treeLevels=N: the N finest levels (at most 2) get the game's own trees (its tree features run on the far

@@ -1503,7 +1503,8 @@ struct MeshFrame {
     float4 sw[3];            // switch distances (level L: sw[L / 4][L % 4])
     int4 opts;               // x: levels drawn (bit mask; 0: all), y: groups drawn (bit mask; 0: all), z: 1 = the horizon cull
     float4 hz;               // the horizon's bands: x the first band's start (blocks), y 1 / log(the bands' ratio)
-    int4 caps;               // x: surviving quads the buffer holds, y: blocks the list holds (lod_mesh_cull -> lod_mesh_emit)
+    int4 caps;               // x: surviving quads the buffer holds, y: blocks the list holds (lod_mesh_cull -> lod_mesh_emit),
+                             // z: no plants past this distance (blocks; 0: none cut)
 };
 
 // ---- the horizon cull: what nearer terrain surely hides ----
@@ -2362,6 +2363,11 @@ static inline void meshEmitBlock(constant MeshFrame& f, device const uint* arena
                 }
             }
         }
+    }
+    if (f.caps.z > 0 && ((bits >> 14) & 1u) != 0u) {
+        // plants too far to be more than a few pixels: none
+        float nx = max(0.0, max(float(ox0) - f.cam.x, f.cam.x - float(ox0 + size))), nz = max(0.0, max(float(oz0) - f.cam.z, f.cam.z - float(oz0 + size)));
+        if (nx * nx + nz * nz > float(f.caps.z) * float(f.caps.z)) bits &= ~(1u << 14);
     }
     bool own = sh == 0;
     uint quadBase = (hdr + uint(bpt * bpt * MESH_HDR)) / 2u;
