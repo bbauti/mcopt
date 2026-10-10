@@ -851,12 +851,19 @@ final class LodField {
 		}
 	}
 
-	/** Render thread: tiles real chunks wrote into, refreshed once a frame (a refresh per chunk copied and remeshed the tile per chunk per level). */
+	/** Render thread: tiles real chunks wrote into, refreshed together (a refresh per chunk copied and remeshed the tile per chunk per level). */
 	private final it.unimi.dsi.fastutil.longs.LongOpenHashSet touched = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+	private long touchedFlushed;
 
-	/** Render thread, once a frame after the chunks were applied: every touched tile still resident refreshed (its maxima, its mesh). */
+	/**
+	 * Render thread, after the chunks were applied, at most every 100 ms: every touched tile still resident refreshed (its maxima, its
+	 * mesh). Once a frame, a server's chunks at ~1000 fps came a frame apart: 13,000 meshes (a 64-112 KB copy each, on this thread)
+	 * for 1,800 chunks and ~3,600 tiles in 20 s, each chunk's tile meshed again at every level.
+	 */
 	void flushTouched() {
-		if (this.touched.isEmpty()) return;
+		long now = System.nanoTime();
+		if (this.touched.isEmpty() || now - this.touchedFlushed < 100_000_000L) return;
+		this.touchedFlushed = now;
 		for (var it = this.touched.iterator(); it.hasNext();) {
 			long key = it.nextLong();
 			int level = LodTile.levelOf(key), tx = LodTile.txOf(key), tz = LodTile.tzOf(key);
