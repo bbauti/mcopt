@@ -29,8 +29,9 @@ final class MetalSurface implements GpuSurfaceBackend {
 	/**
 	 * -Dmcopt.metal.paceAdapt=true: the pacer's margin learns the compositor's latch from scanout times (mc_pace in mcmetal.m): a
 	 * paced frame shown more than half a refresh after the refresh it was aimed at adds lead, a frame on time takes a little away.
+	 * =watch: presents are only measured (the stats line), with the caller's margin.
 	 */
-	static final boolean PACE_ADAPT = Boolean.getBoolean("mcopt.metal.paceAdapt");
+	static final int PACE_ADAPT = "watch".equals(System.getProperty("mcopt.metal.paceAdapt")) ? 2 : Boolean.getBoolean("mcopt.metal.paceAdapt") ? 1 : 0;
 	private boolean paced;
 	private long followAt;
 	private boolean followLogged;
@@ -52,7 +53,7 @@ final class MetalSurface implements GpuSurfaceBackend {
 	public void configure(GpuSurface.Configuration config) {
 		boolean vsync = config.presentMode() == GpuSurface.PresentMode.FIFO;
 		this.paced = !vsync && PACE;
-		if (PACE_ADAPT) Native.paceAdapt(this.paced ? 1 : 0);
+		if (PACE_ADAPT > 0) Native.paceAdapt(this.paced ? PACE_ADAPT : 0);
 		Native.layerConfigure(this.ctx, this.layer, config.width(), config.height(), (vsync || PACE_SYNC && this.paced ? 1 : 0) | DRAWABLES << 8);
 	}
 

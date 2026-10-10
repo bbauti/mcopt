@@ -1745,32 +1745,60 @@ static void startDisplayLink(void) {
 // refresh, right before its successor: the paired presents of LATENCY.md lt4), and the lead grows by PACE_UP; a frame on time
 // shrinks it by PACE_DOWN. That settles at about PACE_DOWN / PACE_UP (2%) late frames, just at the latch deadline. Without
 // scanout times (presentedTime 0, as on the mini's display) nothing changes: the margin stays the caller's.
-static int paceAdapt;
+static int paceAdapt;             // 1: the margin learns; 2 (-Dmcopt.metal.paceAdapt=watch): presents are only measured
 static _Atomic double paceExtra;  // seconds added to the caller's margin
-// The lowest lateness of presents lately, the display's own fixed delay: lateness counts from it. On bbauti's external 100 Hz
-// monitor every paced frame was over half a refresh late, at 60 fps in menus too (its compositor scans out a refresh after the
-// latch): the margin sat at PACE_EXTRA_MAX (6 ms of lead for nothing) at 91-96 presents/s. Follows a lower lateness at once,
-// rises PACE_FLOOR_RISE a present (2 ms a second at 100 Hz) to take up a lasting change.
-static _Atomic double paceFloor = INFINITY;
+// Lateness counts from the lowest lately (rising PACE_FLOOR_RISE a present to take up a lasting change), the display's own delay:
+// on bbauti's external 100 Hz monitor every paced frame was over half a refresh late, at 60 fps in menus too. Only presents with
+// under a refresh of slack (target - GPU done) set it: one with more is shown a refresh before its target when the compositor
+// takes it early. Counted, those put the floor a refresh low and presents on time looked late; the lead that added made more
+// presents early, and a simulation of the pacer held at PACE_EXTRA_MAX as d37b2e4 did in every segment after a world load. A
+// present shown late with more slack than usual (paceSlack, a running median) had its lead, a stall did it: it takes PACE_UP
+// away, so lateness as common with more slack as with less (none of the lead's doing: ~3% of in-world presents, in bursts)
+// cancels out, and only lateness the lead helps adds it.
+static _Atomic double paceFloor = INFINITY, paceSlack;
 #define PACE_FLOOR_RISE 0.00002
+#define PACE_SLACK_STEP 0.00005
 static double paceTarget;         // the refresh the frame being presented was paced for (render thread)
 #define PACE_UP 0.00025
 #define PACE_DOWN 0.000005
 #define PACE_EXTRA_MAX 0.006
-void mc_pace_adapt(int on) { paceAdapt = on; }
-double mc_pace_extra_ms(void) { return paceExtra * 1e3; }
-static void paceWatch(id<CAMetalDrawable> drawable, double target) {
+#define PACE_SAMPLES 512
+static float paceLateMs[PACE_SAMPLES];  // shown - target of the presents since the last stats line (mc_pace_stats)
+static _Atomic int paceShown, paceLate, paceLateSlack, paceEarly;
+void mc_pace_adapt(int mode) { paceAdapt = mode; }
+static void paceWatch(id<MTLCommandBuffer> cb, id<CAMetalDrawable> drawable, double target) {
 	if (!paceAdapt || target <= 0) return;
 	double period = refreshPeriod;
+	__block double done = 0;
+	[cb addCompletedHandler:^(id<MTLCommandBuffer> b) { done = CACurrentMediaTime(); }];
 	[drawable addPresentedHandler:^(id<MTLDrawable> d) {
-		double shown = d.presentedTime;
-		if (shown <= 0 || period <= 0) return;
-		double late = shown - target, floor = fmin(paceFloor + PACE_FLOOR_RISE, late);
-		paceFloor = floor;
-		double e = paceExtra;
-		e = late - floor > period * 0.5 ? e + PACE_UP : e - PACE_DOWN;
+		double shown = d.presentedTime, late = shown - target, slack = target - done, s = paceSlack;
+		if (shown <= 0 || period <= 0 || done <= 0) return;
+		if (slack < period) paceFloor = fmin(paceFloor + PACE_FLOOR_RISE, late);
+		paceSlack = s = s == 0 ? slack : s + (slack > s ? PACE_SLACK_STEP : -PACE_SLACK_STEP);
+		double off = late - paceFloor;
+		int k = off > period * 0.5 ? (slack > s ? -1 : 1) : 0, i = atomic_fetch_add(&paceShown, 1);
+		if (i < PACE_SAMPLES) paceLateMs[i] = (float) (late * 1e3);
+		if (k || off < -period * 0.5) atomic_fetch_add(k > 0 ? &paceLate : k ? &paceLateSlack : &paceEarly, 1);
+		if (paceAdapt != 1) return;
+		double e = paceExtra + (k > 0 ? PACE_UP : k ? -PACE_UP : -PACE_DOWN);
 		paceExtra = e < 0 ? 0 : e > PACE_EXTRA_MAX ? PACE_EXTRA_MAX : e;
 	}];
+}
+
+static int cmpFloat(const void *a, const void *b) { float x = *(const float *) a, y = *(const float *) b; return (x > y) - (x < y); }
+// The pacing part of the stats line (-Dmcopt.metal.stats): the presents shown since the last one.
+const char *mc_pace_stats(void) {
+	static char line[384];
+	static float v[PACE_SAMPLES];
+	int n = atomic_exchange(&paceShown, 0), m = n < PACE_SAMPLES ? n : PACE_SAMPLES;
+	memcpy(v, paceLateMs, m * sizeof(float));
+	qsort(v, m, sizeof(float), cmpFloat);
+	snprintf(line, sizeof line, " (pace margin +%.2f ms%s; of %d shown: %d late, %d late with more slack than usual, %d early; shown - target"
+		" min/median/p90 %+.2f/%+.2f/%+.2f ms, on time %+.2f; slack %.2f ms, GPU %.2f ms)", paceExtra * 1e3, paceAdapt == 1 ? " learned" : "",
+		n, atomic_exchange(&paceLate, 0), atomic_exchange(&paceLateSlack, 0), atomic_exchange(&paceEarly, 0), m ? v[0] : 0, m ? v[m / 2] : 0,
+		m ? v[m * 9 / 10] : 0, paceFloor * 1e3, paceSlack * 1e3, gpuLatency * 1e3);
+	return line;
 }
 
 #pragma clang diagnostic push
@@ -1786,7 +1814,7 @@ double mc_pace_follow(double x, double y) {
 	if (CGGetDisplaysWithPoint(CGPointMake(x, y), 1, &d, &n) != kCGErrorSuccess || n == 0 || d == paceDisplay) return 0;
 	if (CVDisplayLinkSetCurrentCGDisplay(paceLink, d) != kCVReturnSuccess) return 0;
 	paceDisplay = d;
-	paceExtra = 0;
+	paceExtra = paceSlack = 0;
 	paceFloor = INFINITY;
 	CVTime t = CVDisplayLinkGetNominalOutputVideoRefreshPeriod(paceLink);
 	return t.timeValue > 0 && !(t.flags & kCVTimeIsIndefinite) ? (double) t.timeScale / t.timeValue : -1;
@@ -1856,7 +1884,7 @@ void mc_present(Enc *enc, id<CAMetalDrawable> drawable, id<MTLTexture> src) {
 		[r endEncoding];
 		double encodedAt = CACurrentMediaTime();
 		[cmd(enc) addCompletedHandler:^(id<MTLCommandBuffer> b) { gpuLatency += (CACurrentMediaTime() - encodedAt - gpuLatency) * 0.1; }];
-		paceWatch(drawable, paceTarget);
+		paceWatch(cmd(enc), drawable, paceTarget);
 		[cmd(enc) presentDrawable:drawable];
 	}
 }
@@ -1941,7 +1969,7 @@ static void pqEncodePresent(id<CAMetalDrawable> drawable, int slot, uint64_t wai
 		gpuLatency += (CACurrentMediaTime() - queuedAt - gpuLatency) * 0.1;
 		atomic_store(&pqBusy[slot], 0);
 	}];
-	paceWatch(drawable, pqTarget[slot]);
+	paceWatch(p, drawable, pqTarget[slot]);
 	[p presentDrawable:drawable];
 	[p commit];
 }
