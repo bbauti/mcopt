@@ -44,6 +44,9 @@ mcopt's LODs: terrain past the render distance, out to 512 chunks by default, dr
   really there.
 - **Servers, flat and modded generators, the Nether:** built from the chunks the client receives (under the Nether's roof)
   and kept on disk per server and dimension: what you've seen once is there next time.
+- **Servers running mcopt-server:** the server generates the far terrain for you (its seed stays on the server) and
+  sends the chunks saved in its world, so everything out to the server's radius shows from the first visit. See
+  [mcopt-server](#mcopt-server).
 - **Your saved world too:** in singleplayer, the chunks already saved in the world (explored before, builds included) are
   read in the background once and replace the estimate there.
 - **Kept on disk:** `mcopt-lod/` in the game folder, compressed. Places you've seen from close by stay when you see them
@@ -69,6 +72,28 @@ Settings: Options > Video Settings > **Far Terrain (mcopt)...**, or in `config/m
 | `mcopt.lod.import` | `true` | Read the singleplayer world's saved chunks |
 | `mcopt.lod.cache` | `true` | The disk cache (`mcopt.lod.cacheDir` moves it) |
 | `mcopt.lod.meshDouble` | `true` | Two sets of the far terrain cull's outputs used in turn, so a frame's cull doesn't wait for the previous frame's level pass (~50 MB of GPU memory; `false`: one) |
+| `mcopt.lod.server` | `true` | Ask servers running mcopt-server for far terrain (needs Fabric API) |
+
+### mcopt-server
+
+A server-side Fabric mod (`mcopt-server-*.jar`, environment `server`, needs Fabric API) that makes far terrain for the
+players who have mcopt. Vanilla and other clients are unaffected. Put the jar in the server's `mods` folder; the first
+start writes `config/mcopt-server.properties`:
+
+| Setting | Default | |
+|---|---|---|
+| `generate` | `true` | Generate far terrain from the world's generator (the structure only: each client paints it with its own textures) |
+| `savedChunks` | `true` | Send the chunks saved in the world (builds and explored land, as they are) |
+| `radius` | `512` | How far out, in chunks |
+| `threads` | `0` | Generation threads (0: half the cores); they run at the lowest priority |
+| `kbps` | `2048` | Kilobytes a second for each player |
+| `queue` | `4096` | Most tiles a player can have waiting |
+| `lagMs` | `40` | Generation pauses while the server's average tick takes longer |
+| `trees`, `treeLevels`, `plants` | `true`, `1`, `true` | The game's trees (on level 1 too with `treeLevels=2`, as clients on Ultra draw them) and plants |
+
+Generated tiles are cached in the world folder (`mcopt-lod-server/`); the cache starts anew when the seed, the mod's
+version or these switches change. The finest tiles are made only within about 1,150 blocks of a player (each coarser level
+twice as far), so a client can't make the server generate more than a far-terrain window needs.
 
 Modded blocks get their colors from their own textures. For blocks whose models can't be read that way (dynamic or
 connected textures), `config/mcopt-lod-colors.properties` sets them: `modid:block=RRGGBB` or `modid:block=RRGGBB,RRGGBB`
@@ -100,7 +125,8 @@ For the most fps: Options > Video Settings, VSync off and Max Framerate Unlimite
   switches its renderer off for it.
 - Far terrain is experimental. On Macs with fewer than 10 GPU cores, `quality=auto` picks `low`; it still costs fps
   there.
-- On a server, far terrain only shows what you've already seen there (the client has no seed to generate from).
+- On a server without mcopt-server, far terrain only shows what you've already seen there (the client has no seed to
+  generate from).
 - With Distant Horizons installed, mcopt's far terrain stays off (DH draws the distance);
   `mcopt.lod.withDistantHorizons=true` keeps both.
 

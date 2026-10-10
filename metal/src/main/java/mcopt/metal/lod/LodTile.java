@@ -60,6 +60,9 @@ final class LodTile {
 	final BlockState[] plantLower, plantUpper;
 	final byte[] plantBlocks;
 	final int[] plantColor;
+	/** For LodPaint (a server's tiles, LodNoise without paint): the block under the top block, the height an impostor canopy added (0: none). */
+	final BlockState[] belowState;
+	final byte[] impostor;
 	/** Open water seen through (LodClip.depthBits): its depth over the floor, 1-127; 0 where dry, frozen or a crown's. */
 	final byte[] clear;
 	/** The water is known (the game's aquifers asked, levels 0-1): `water` holds it; else the sea fills what lies under its level. */
@@ -105,6 +108,8 @@ final class LodTile {
 		this.plantUpper = new BlockState[n];
 		this.plantBlocks = new byte[n];
 		this.plantColor = new int[n];
+		this.belowState = new BlockState[n];
+		this.impostor = new byte[n];
 		this.clear = new byte[n];
 	}
 

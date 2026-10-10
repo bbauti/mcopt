@@ -74,9 +74,85 @@ final class LodField {
 	volatile boolean settled;
 	/** The camera's position at the last update (for other threads: the importer's order). */
 	volatile double camX, camZ;
+	/** Another thread: a task for the workers, before generation (a server's tile to paint, its chunks to summarize). */
+	void submit(Runnable task) {
+		this.jobs.add(new Job(-1e8, this.seq.incrementAndGet(), 0, task));
+	}
+
+	/** Any thread: a task for the render thread's next frames (as the workers' results). */
+	void post(Runnable task) {
+		this.results.add(task);
+	}
+
+	/** On a server running mcopt-server: what it offers for this dimension (LodRemote), else null. */
+	volatile LodRemote.@Nullable Link remote;
+	/** Tiles every cell of which has its data (generated here, or merged with a server's): never asked of a server again. */
+	final java.util.Set<Long> completeKeys = ConcurrentHashMap.newKeySet();
+
+	/** Render thread: a server's tile fills the cells with no data (real chunks' stay), resident or else in its cache file; complete from now on. */
+	void remoteTile(long key, int[] g, int[] c, int @Nullable [] cr, int @Nullable [] tw, int @Nullable [] rn, int @Nullable [] pl) {
+		// (resident: merged; without the cache not complete: asked again when the tile is made)
+		if (this.mergeResident(key, g, c, cr, tw, rn, pl) || !LodConfig.DISK_CACHE) return;
+		this.jobs.add(new Job(SAVE_PRIORITY, this.seq.incrementAndGet(), SAVE_KEY, () -> {
+			synchronized (this.lock(key)) {
+				int[] og = new int[LodTile.CELLS], oc = new int[LodTile.CELLS];
+				int[] ocr = cr != null ? new int[LodTile.CELLS] : null, otw = tw != null ? new int[LodTile.CELLS] : null;
+				int[] orn = rn != null ? new int[LodTile.CELLS] : null, opl = pl != null ? new int[2 * LodTile.CELLS] : null;
+				// (complete once the merged file is written: its trailer says so)
+				this.completeKeys.add(key);
+				if (this.load(key, og, oc, ocr, otw, orn, opl)) {
+					fillMissing(og, oc, ocr, otw, orn, opl, g, c, cr, tw, rn, pl);
+					this.save0(key, og, oc, ocr, otw, orn, opl);
+				} else {
+					this.save0(key, g, c, cr, tw, rn, pl);
+				}
+			}
+			// a load of the tile that began before this write took the old file: what's resident takes the cells too
+			this.post(() -> this.mergeResident(key, g, c, cr, tw, rn, pl));
+		}));
+	}
+
+	/** Render thread: a server's tile into the cells of the resident tile that have no data; false when it isn't resident. */
+	private boolean mergeResident(long key, int[] g, int[] c, int @Nullable [] cr, int @Nullable [] tw, int @Nullable [] rn, int @Nullable [] pl) {
+		int level = LodTile.levelOf(key), tx = LodTile.txOf(key), tz = LodTile.tzOf(key);
+		if (!this.clip.resident(level, tx, tz)) return false;
+		int[] og = new int[LodTile.CELLS], oc = new int[LodTile.CELLS];
+		this.clip.readForSave(level, tx, tz, og, oc, null, null, null, null);
+		// cell by cell through the staged copy (a put would race the GPU's copies of the tile's last publishes)
+		int x0 = tx * LodTile.SIZE, z0 = tz * LodTile.SIZE, put = 0;
+		for (int i = 0; i < LodTile.CELLS; i++) {
+			if ((og[i] & LodClip.GEOM_VALID) != 0 || (g[i] & LodClip.GEOM_VALID) == 0) continue;
+			if (this.clip.putCell(level, x0 + i % LodTile.SIZE, z0 + i / LodTile.SIZE, g[i], c[i], cr != null ? cr[i] : 0, tw != null ? tw[i] : 0,
+				rn != null ? rn[i] : 0, pl != null ? pl[i] : 0, pl != null ? pl[LodTile.CELLS + i] : 0)) put++;
+		}
+		this.completeKeys.add(key);
+		if (put > 0) {
+			this.touched.add(key);
+			this.dirtyTiles.add(key);
+		}
+		return true;
+	}
+
 	/** A crown cell's GEOM_CLEAR and depth bits: over water the depth bits are the water's, which a crown word doesn't carry. */
 	private static int crownClear(int clear, boolean wet) {
 		return wet ? clear & ~LodClip.depthBits(127) : clear;
+	}
+
+	/** The cells of (og...) with no data take (g...)'s. */
+	private static void fillMissing(int[] og, int[] oc, int @Nullable [] ocr, int @Nullable [] otw, int @Nullable [] orn, int @Nullable [] opl,
+		int[] g, int[] c, int @Nullable [] cr, int @Nullable [] tw, int @Nullable [] rn, int @Nullable [] pl) {
+		for (int i = 0; i < LodTile.CELLS; i++) {
+			if ((og[i] & LodClip.GEOM_VALID) != 0) continue;
+			og[i] = g[i];
+			oc[i] = c[i];
+			if (ocr != null && cr != null) ocr[i] = cr[i];
+			if (otw != null && tw != null) otw[i] = tw[i];
+			if (orn != null && rn != null) orn[i] = rn[i];
+			if (opl != null && pl != null) {
+				opl[i] = pl[i];
+				opl[LodTile.CELLS + i] = pl[LodTile.CELLS + i];
+			}
+		}
 	}
 
 	/** Singleplayer: the saved chunks' importer (LodImport), else null. */
@@ -281,11 +357,15 @@ final class LodField {
 		int level = LodTile.levelOf(key), tx = LodTile.txOf(key), tz = LodTile.tzOf(key);
 		long start = System.nanoTime();
 		boolean fromDisk = LodConfig.DISK_CACHE && this.load(key, g, c, cr, tw, rn, pl);
+		// a server that generates far terrain: what isn't complete here is asked of it (its tile fills the cells real chunks didn't)
+		LodRemote.Link link = this.remote;
+		if (link != null && link.generate() && this.noise == null && !this.completeKeys.contains(key)) LodRemote.want(this, key);
 		if (!fromDisk && this.noise == null) {
 			// nothing to generate from: an empty tile (no cell valid) for real chunks to fill (and nothing of a file that failed to load halfway)
 			for (int[] a : new int[][] {g, c, cr, tw, rn, pl}) if (a != null) java.util.Arrays.fill(a, 0);
 			this.empty.incrementAndGet();
 		} else if (!fromDisk) {
+			this.completeKeys.add(key);
 			LodTile t = new LodTile(level, tx, tz);
 			LodForest forest = this.forest;
 			boolean exact = level < Math.min(2, LodConfig.TREE_LEVELS) && forest != null && forest.available();
@@ -425,6 +505,8 @@ final class LodField {
 				java.util.Arrays.fill(pl, 0);
 			}
 			if (pl == null || !hasPlants) for (int i = 0; i < LodTile.CELLS; i++) g[i] &= ~LodClip.GEOM_PLANT_BITS;
+			// (files without the trailer: complete when this world is generated here)
+			if (in.more() ? in.readBoolean() : this.noise != null) this.completeKeys.add(key);
 			return true;
 		} catch (IOException | RuntimeException e) {
 			return false;
@@ -486,6 +568,8 @@ final class LodField {
 				out.names(local);
 				out.ints(both, 2 * LodTile.CELLS);
 			}
+			// (a trailer older readers of format 11 never reach: whether every cell has its data, generated or a server's)
+			out.writeBoolean(this.noise != null || this.completeKeys.contains(key));
 			Deflater d = new Deflater(Deflater.BEST_SPEED);
 			try (OutputStream os = new DeflaterOutputStream(Files.newOutputStream(tmp), d, 65536)) {
 				out.writeTo(os);
@@ -521,6 +605,10 @@ final class LodField {
 
 		boolean readBoolean() {
 			return this.buf.get() != 0;
+		}
+
+		boolean more() {
+			return this.buf.hasRemaining();
 		}
 
 		void ints(int[] into, int n, boolean planar) {

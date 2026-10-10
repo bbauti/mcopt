@@ -1,0 +1,13 @@
+{
+	"schemaVersion": 1,
+	"id": "mcopt-server",
+	"version": "${version}",
+	"name": "mcopt server",
+	"description": "Far terrain for mcopt clients: the server generates it from the world's own generator and sends its saved chunks.",
+	"license": ["Apache-2.0"],
+	"authors": ["Noah Dunnagan"],
+	"environment": "server",
+	"entrypoints": { "server": ["mcopt.server.McoptServer"] },
+	"mixins": ["mcopt-server.mixins.json"],
+	"depends": { "fabricloader": ">=0.19.5", "minecraft": "~26.3", "java": ">=25", "fabric-networking-api-v1": "*", "fabric-lifecycle-events-v1": "*" }
+}
