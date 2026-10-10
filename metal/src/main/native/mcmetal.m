@@ -1849,8 +1849,8 @@ int mc_pace(double margin) {
 		return 1;
 	}
 	double target = anchor + ceil((now + lead - anchor) / period) * period;
-	if (atomic_exchange(&paceDrain, 0)) {  // (this refresh gets no new frame: see paceDrain)
-		pacedFor = fmax(pacedFor, target);
+	if (atomic_exchange(&paceDrain, 0)) {  // (a refresh gets no new frame: this one, or the next if this one has its frame)
+		pacedFor = fmax(pacedFor + period, target);
 		paceDrains++;
 	}
 	if (target < pacedFor + period / 2 || now + 2 * frameInterval + lead < target) return 0;
