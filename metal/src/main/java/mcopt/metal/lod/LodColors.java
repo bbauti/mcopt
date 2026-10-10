@@ -63,8 +63,81 @@ final class LodColors {
 		} catch (RuntimeException e) {
 			l = FALLBACK;
 		}
+		l = override(state, l);
 		LOOKS.put(state, l);
 		return l;
+	}
+
+	/**
+	 * Colors set by block id over what the textures give (modded blocks whose models the averaging can't read: dynamic or
+	 * connected textures): {top, side} RGB as drawn, untinted; -1 keeps the computed one. From McoptFarTerrain.setBlockColor
+	 * and config/mcopt-lod-colors.properties (modid:block=RRGGBB, or modid:block=RRGGBB,RRGGBB for top and side).
+	 */
+	private static final ConcurrentHashMap<String, int[]> OVERRIDES = new ConcurrentHashMap<>(loadOverrides());
+
+	private static Look override(BlockState state, Look l) {
+		if (OVERRIDES.isEmpty()) return l;
+		int[] o = OVERRIDES.get(net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString());
+		if (o == null) return l;
+		int top = o[0] >= 0 ? o[0] : l.top(), side = o[1] >= 0 ? o[1] : l.side();
+		// an overridden face is drawn flat in its color: no sprite (the textured path scales the sprite by color / average, which
+		// for an override would be the raw texture)
+		return new Look(top, side, o[0] >= 0 ? TINT_NONE : l.topTint(), o[1] >= 0 ? TINT_NONE : l.sideTint(), l.constant(),
+			o[0] >= 0 ? new float[4] : l.topUv(), o[1] >= 0 ? new float[4] : l.sideUv(), l.cross(), l.profile());
+	}
+
+	/** The resources were reloaded (a resource pack changed): every look is read again from the new models and textures. */
+	static void reloaded() {
+		LOOKS.clear();
+		TEXTURES.clear();
+		PROFILES.clear();
+	}
+
+	/** A block's colors from now on (tiles already made keep theirs until made again); -1 keeps the computed color. */
+	static void setOverride(String blockId, int top, int side) {
+		String id = blockId.contains(":") ? blockId : "minecraft:" + blockId;
+		OVERRIDES.put(id, new int[] {top < 0 ? -1 : top & 0xFFFFFF, side < 0 ? -1 : side & 0xFFFFFF});
+		LOOKS.keySet().removeIf(s -> net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(s.getBlock()).toString().equals(id));
+	}
+
+	private static java.util.Map<String, int[]> loadOverrides() {
+		java.util.Map<String, int[]> out = new java.util.HashMap<>();
+		java.nio.file.Path f = net.fabricmc.loader.api.FabricLoader.getInstance().getConfigDir().resolve("mcopt-lod-colors.properties");
+		if (!java.nio.file.Files.isRegularFile(f)) return out;
+		// (lines split at their '=' here: java.util.Properties would split modid:block at its ':')
+		try {
+			for (String line : java.nio.file.Files.readAllLines(f, java.nio.charset.StandardCharsets.UTF_8)) {
+				// (a byte order mark some editors put first is no part of the key)
+				String t = line.replace("\uFEFF", "").strip();
+				if (t.isEmpty() || t.startsWith("#") || t.startsWith("!")) continue;
+				int eq = t.indexOf('=');
+				if (eq <= 0) {
+					System.out.println("mcopt-lod: " + f.getFileName() + ": '" + t + "' isn't block=RRGGBB (ignored)");
+					continue;
+				}
+				String k = t.substring(0, eq).strip();
+				String[] v = t.substring(eq + 1).split(",");
+				try {
+					int top = rgb(v[0]), side = v.length > 1 ? rgb(v[1]) : top;
+					out.put(k.contains(":") ? k : "minecraft:" + k, new int[] {top, side});
+				} catch (NumberFormatException e) {
+					System.out.println("mcopt-lod: " + f.getFileName() + ": " + k + " isn't RRGGBB or RRGGBB,RRGGBB (ignored)");
+				}
+			}
+		} catch (java.io.IOException e) {
+			System.out.println("mcopt-lod: can't read " + f + ": " + e);
+			return out;
+		}
+		System.out.println("mcopt-lod: " + out.size() + " block colors from " + f.getFileName());
+		return out;
+	}
+
+	private static int rgb(String s) {
+		String t = s.strip();
+		if (t.equals("-") || t.isEmpty()) return -1;
+		if (t.startsWith("#")) t = t.substring(1);
+		if (t.startsWith("0x") || t.startsWith("0X")) t = t.substring(2);
+		return Integer.parseInt(t, 16) & 0xFFFFFF;
 	}
 
 	/** The color of a block's top seen at a column in biome b. */
@@ -100,6 +173,11 @@ final class LodColors {
 		int g = (int) (((a >> 8) & 255) * (1 - f) + ((b >> 8) & 255) * f);
 		int bl = (int) ((a & 255) * (1 - f) + (b & 255) * f);
 		return r << 16 | g << 8 | bl;
+	}
+
+	/** Water over its floor as one opaque color, by depth (where nothing looks through it: the ground under a crown). */
+	static int waterOver(int floor, int water, int depth) {
+		return mix(floor, water, Math.min(1.0F, 0.55F + depth / 24.0F));
 	}
 
 	static int multiply(int a, int b) {

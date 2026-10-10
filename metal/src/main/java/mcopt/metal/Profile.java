@@ -190,8 +190,17 @@ public final class Profile {
 			#
 			# Single switches win over the profile, e.g. our renderer off but the rest on:
 			#mcopt.own=false
-			# Far terrain (EXPERIMENTAL, off by default; for Macs with 10 or more GPU cores): remove the # below.
+			# Far terrain (EXPERIMENTAL, off by default): remove the # below.
 			#mcopt.lod=true
+			# Its quality: auto (by the Mac's GPU), low, medium, high or ultra. auto picks low under 10 GPU cores.
+			#mcopt.lod.quality=auto
+			# Its reach in chunks (the preset's: low 256, medium 384, high 512, ultra 1024).
+			#mcopt.lod.radius=512
+			# On servers it's built from the chunks you receive and kept for next time; false turns it off there.
+			#mcopt.lod.multiplayer=true
+			# Only some dimensions, or all but some (e.g. minecraft:the_nether).
+			#mcopt.lod.dimensions=minecraft:overworld
+			#mcopt.lod.excludeDimensions=minecraft:the_end
 			""".formatted(name);
 		try {
 			Files.createDirectories(cfg.getParent());

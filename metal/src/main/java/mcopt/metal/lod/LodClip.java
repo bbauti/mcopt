@@ -51,6 +51,8 @@ final class LodClip {
 	final java.util.concurrent.atomic.AtomicLongArray[] writing;
 	/** Staged copies of resident tiles that real chunks changed (PAIRS), by tile key. Render thread only. */
 	private final java.util.HashMap<Long, Snapshot> staged = new java.util.HashMap<>();
+	/** Snapshot.edges: the neighbor at +x, -x, +z, -z reads a border cell that changed (the bits of LodMesh.NEIGHBORS). */
+	static final int EDGE_PX = 2, EDGE_NX = 1, EDGE_PZ = 8, EDGE_NZ = 4;
 
 	/** A tile's words (crown, runs, tex, plants where the level has them), and the staged version they are. */
 	static final class Snapshot {
@@ -60,6 +62,9 @@ final class LodClip {
 		long version;
 		/** The slot's residency epoch it was staged in (a clear or a new put makes it void). */
 		long epoch;
+		long publishedAt;
+		/** Border cells changed while staged: a bit (EDGE_*) per neighbor whose mesh reads them (its one-cell ring, lodmesh.c REGION). */
+		int edges;
 
 		Snapshot(int level, int tx, int tz, boolean crowns, boolean texture, boolean plants) {
 			this.level = level;
@@ -81,6 +86,7 @@ final class LodClip {
 			if (this.pl != null) System.arraycopy(this.pl, 0, s.pl, 0, this.pl.length);
 			s.version = this.version;
 			s.epoch = this.epoch;
+			s.edges = this.edges;
 			return s;
 		}
 	}
@@ -279,6 +285,9 @@ final class LodClip {
 		if (this.publisher != null) this.writeGpu(s.level, s.tx, s.tz, s.g, s.c, s.cr, s.tw, s.runs, s.pl);
 		else this.write(s.level, s.tx, s.tz, s.g, s.c, s.cr, s.tw, s.runs, s.pl);
 		long key = LodTile.key(s.level, s.tx, s.tz);
+		// (publish=gpu: the GPU writes these words a few frames from now: until then they're what the disk cache must get)
+		s.publishedAt = this.frame;
+		if (this.publisher != null) this.published.put(key, s);
 		Snapshot st = this.staged.get(key);
 		if (st != null && st.version == s.version) this.staged.remove(key);
 		return true;
@@ -371,6 +380,45 @@ final class LodClip {
 		MemoryUtil.memPutShort(this.mip + (this.tileMaxOffset(level) + s) * 2, (short) (hi == Integer.MIN_VALUE ? 0 : hi));
 	}
 
+	/** publish=gpu: tiles published in the last frames (their words reach the live buffer when the GPU's copy has run). */
+	private final java.util.HashMap<Long, Snapshot> published = new java.util.HashMap<>();
+	/** The frame the mesh path is on (set by LodMesh.integrate), for the published copies' age. */
+	private long frame;
+
+	/** Render thread, once a frame: published copies the GPU has surely written by now are let go. */
+	void frame(long frame) {
+		this.frame = frame;
+		if (this.published.isEmpty()) return;
+		for (var it = this.published.values().iterator(); it.hasNext();) {
+			if (frame - it.next().publishedAt > 8) it.remove();
+		}
+	}
+
+	/** A tile's newest words, for the disk cache: staged, else last published (the GPU may not have written it yet), else live. Render thread. */
+	void readForSave(int level, int tx, int tz, int[] g, int[] c, int @org.jspecify.annotations.Nullable [] cr, int @org.jspecify.annotations.Nullable [] tw,
+		int @org.jspecify.annotations.Nullable [] runs, int @org.jspecify.annotations.Nullable [] pl) {
+		long key = LodTile.key(level, tx, tz);
+		long ep = this.epoch[level][this.slot(tx, tz)];
+		Snapshot s = this.staged.get(key);
+		if (s == null || s.epoch != ep) s = this.published.get(key);
+		if (s == null || s.epoch != ep) {
+			this.read(level, tx, tz, g, c, cr, tw, runs, pl);
+			return;
+		}
+		copyOrZero(s.g, g);
+		copyOrZero(s.c, c);
+		copyOrZero(s.cr, cr);
+		copyOrZero(s.runs, runs);
+		copyOrZero(s.tw, tw);
+		copyOrZero(s.pl, pl);
+	}
+
+	private static void copyOrZero(int @org.jspecify.annotations.Nullable [] from, int @org.jspecify.annotations.Nullable [] to) {
+		if (to == null) return;
+		if (from != null) System.arraycopy(from, 0, to, 0, to.length);
+		else java.util.Arrays.fill(to, 0);
+	}
+
 	/** A resident tile's words, read back (for the disk cache after real chunks changed it); cr may be null. */
 	void read(int level, int tx, int tz, int[] g, int[] c, int @org.jspecify.annotations.Nullable [] cr) {
 		this.read(level, tx, tz, g, c, cr, null, null, null);
@@ -416,15 +464,19 @@ final class LodClip {
 	}
 
 	/** Overwrites one cell of a resident tile (real chunks); the caller refreshes the tile's maxima with refresh(). */
-	void putCell(int level, int cx, int cz, int g, int c, int cr, int tw, int runs, int plantA, int plantB) {
+	boolean putCell(int level, int cx, int cz, int g, int c, int cr, int tw, int runs, int plantA, int plantB) {
+		boolean crowns = level < this.crownLevels, texture = level == 0 && LodConfig.TEXTURES, plant = level == 0 && this.plants;
+		if (!plant) g &= ~GEOM_PLANT_BITS;
+		if (!crowns) g &= ~GEOM_CROWN_BITS;
+		// (false, nothing written, when the cell holds these words already: a chunk unloaded or sent again unchanged writes what it
+		// wrote when it loaded, and each write cost its tile a staged copy, a remesh with its 4 neighbours', a publish and a save)
 		if (this.staging()) {
-			this.putStaged(level, cx, cz, g, c, cr, tw, runs, plantA, plantB);
-			return;
+			return this.putStaged(level, cx, cz, g, c, cr, tw, runs, plantA, plantB, crowns, texture, plant);
 		}
+		long at = this.cellOffset(level, cx, cz) * 4;
+		if (this.liveEquals(at, g, c, cr, tw, runs, plantA, plantB, crowns, texture, plant)) return false;
 		int ps = this.slot(Math.floorDiv(cx, TILE), Math.floorDiv(cz, TILE));
 		this.beginWrite(level, ps);
-		long at = this.cellOffset(level, cx, cz) * 4;
-		boolean crowns = level < this.crownLevels;
 		if (crowns) MemoryUtil.memPutInt(this.crown + this.runsOffset() * 4 + at, runs);
 		if (level == 0 && LodConfig.TEXTURES) MemoryUtil.memPutInt(this.tex + at, tw);
 		if (level == 0 && this.plants) {
@@ -438,22 +490,46 @@ final class LodClip {
 		MemoryUtil.memPutInt(this.geom + at, g);
 		MemoryUtil.memPutInt(this.color + at, c);
 		this.endWrite(level, ps);
+		return true;
 	}
 
-	/** putCell into the tile's staged copy (made from its live words on first use). */
-	private void putStaged(int level, int cx, int cz, int g, int c, int cr, int tw, int runs, int plantA, int plantB) {
+	/** Whether the live words at byte offset at already are these (g masked as putCell writes it). */
+	private boolean liveEquals(long at, int g, int c, int cr, int tw, int runs, int plantA, int plantB, boolean crowns, boolean texture, boolean plant) {
+		return MemoryUtil.memGetInt(this.geom + at) == g && MemoryUtil.memGetInt(this.color + at) == c
+			&& (!crowns || MemoryUtil.memGetInt(this.crown + at) == cr && MemoryUtil.memGetInt(this.crown + this.runsOffset() * 4 + at) == runs)
+			&& (!texture || MemoryUtil.memGetInt(this.tex + at) == tw)
+			&& (!plant || MemoryUtil.memGetInt(this.tex + this.levelWords * 4 + at) == plantA && MemoryUtil.memGetInt(this.tex + this.levelWords * 8 + at) == plantB);
+	}
+
+	/** Whether cell i of snapshot s already holds these words (an array s lacks reads as 0, as readForSave copies it). */
+	private static boolean snapshotEquals(Snapshot s, int i, int g, int c, int cr, int tw, int runs, int plantA, int plantB, boolean crowns, boolean texture,
+		boolean plant) {
+		return s.g[i] == g && s.c[i] == c && (!crowns || (s.cr != null ? s.cr[i] : 0) == cr && (s.runs != null ? s.runs[i] : 0) == runs)
+			&& (!texture || (s.tw != null ? s.tw[i] : 0) == tw)
+			&& (!plant || (s.pl != null ? s.pl[i] : 0) == plantA && (s.pl != null ? s.pl[TILE * TILE + i] : 0) == plantB);
+	}
+
+	/** putCell into the tile's staged copy (made from its newest words, readForSave's, on first use); false if the cell holds them already. */
+	private boolean putStaged(int level, int cx, int cz, int g, int c, int cr, int tw, int runs, int plantA, int plantB, boolean crowns, boolean texture,
+		boolean plant) {
 		int tx = Math.floorDiv(cx, TILE), tz = Math.floorDiv(cz, TILE);
 		long key = LodTile.key(level, tx, tz);
 		Snapshot s = this.staged.get(key);
-		boolean crowns = level < this.crownLevels;
+		int lx = cx - tx * TILE, lz = cz - tz * TILE, i = lz * TILE + lx;
 		if (s == null) {
+			long ep = this.epoch[level][this.slot(tx, tz)];
+			Snapshot pub = this.published.get(key);
+			if (pub != null && pub.epoch == ep ? snapshotEquals(pub, i, g, c, cr, tw, runs, plantA, plantB, crowns, texture, plant)
+				: this.liveEquals(this.cellOffset(level, cx, cz) * 4, g, c, cr, tw, runs, plantA, plantB, crowns, texture, plant)) return false;
 			s = new Snapshot(level, tx, tz, crowns, level == 0 && LodConfig.TEXTURES, level == 0 && this.plants);
-			this.read(level, tx, tz, s.g, s.c, s.cr, s.tw, s.runs, s.pl);
+			this.readForSave(level, tx, tz, s.g, s.c, s.cr, s.tw, s.runs, s.pl);
 			s.epoch = this.epoch[level][this.slot(tx, tz)];
 			this.staged.put(key, s);
+		} else if (snapshotEquals(s, i, g, c, cr, tw, runs, plantA, plantB, crowns, texture, plant)) {
+			return false;
 		}
-		int i = (cz - tz * TILE) * TILE + (cx - tx * TILE);
 		if (crowns) s.runs[i] = runs;
+		s.edges |= (lx == TILE - 1 ? EDGE_PX : 0) | (lx == 0 ? EDGE_NX : 0) | (lz == TILE - 1 ? EDGE_PZ : 0) | (lz == 0 ? EDGE_NZ : 0);
 		if (s.tw != null) s.tw[i] = tw;
 		if (s.pl != null) {
 			s.pl[i] = plantA;
@@ -465,16 +541,21 @@ final class LodClip {
 		else g &= ~GEOM_CROWN_BITS;
 		s.g[i] = g;
 		s.c[i] = c;
+		return true;
 	}
 
 	private final int[] scratchG = new int[TILE * TILE], scratchC = new int[TILE * TILE];
+	/** The staged copies' versions (render thread). */
+	private long stageSeq;
 
 	void refresh(int level, int tx, int tz) {
 		if (this.staging()) {
 			Snapshot s = this.staged.get(LodTile.key(level, tx, tz));
 			Listener l = this.listener;
 			if (s == null || l == null) return;
-			s.version++;
+			// (versions from one counter: a tile's next staged copy is always newer than the one it last published, whose
+			// version LodMesh keeps; counting from each copy's own 0 held back every other round of changes)
+			s.version = ++this.stageSeq;
 			l.tileStaged(s.copy());
 			return;
 		}
@@ -492,6 +573,7 @@ final class LodClip {
 	/**
 	 * A real chunk's column (-Dmcopt.lod.realOcc): how deep its top solid run reaches (LodChunks.Snapshot.depth), bits 25-31; 0:
 	 * solid all the way down (the generated terrain). The real terrain occludes only for a camera at or over a run's bottom.
+	 * Wet: clear water's depth over its floor (1-127; 0: opaque, ice, older data); the color word is then the water's (top) and the floor's (side).
 	 */
 	static final int GEOM_DEPTH_SHIFT = 25;
 

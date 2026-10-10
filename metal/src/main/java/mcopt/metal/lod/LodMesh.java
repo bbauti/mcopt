@@ -27,6 +27,13 @@ final class LodMesh implements LodClip.Listener {
 	static final int FRAME_BYTES = 432;
 	/** -Dmcopt.lod.meshFences=true: the cull's outputs ordered by fences instead of hazard tracking (see mclod.m). */
 	static final boolean FENCES = Boolean.getBoolean("mcopt.lod.meshFences") && !LodPk.ENABLED;
+	/**
+	 * -Dmcopt.lod.meshDouble=false: one set of the cull's outputs the draw reads (args, instances, plants, survivors), not two in turn.
+	 * With one, hazard tracking makes frame N + 1's cull wait for frame N's whole level pass (no overlap); with two, for the pass two
+	 * frames back. Exact: each cull rewrites its set whole (lod_mesh_reset), a skipped cull's frame draws the set the last one wrote.
+	 * ~50 MB of GPU memory. Not with -Dmcopt.lod.meshFences (fences order it) or the pk lists (the first set).
+	 */
+	static final boolean DOUBLE = !FENCES && !LodPk.ENABLED && Boolean.parseBoolean(System.getProperty("mcopt.lod.meshDouble", "true"));
 	/** -Dmcopt.lod.horizonCull=false: no occlusion cull (what nearer terrain hides). */
 	static final boolean HORIZON = Boolean.parseBoolean(System.getProperty("mcopt.lod.horizonCull", "true"));
 	/** -Dmcopt.lod.realOcc=true: the real terrain (level 0's blocks the hand-off masks) raises the horizon cull's horizon too. */
@@ -80,6 +87,10 @@ final class LodMesh implements LodClip.Listener {
 	private final long tableHost;
 	private final long[] tableBufs = new long[RING];
 	final long argsBuf, instBuf, plantBuf, survBuf, horizonBuf, listBuf;
+	/** DOUBLE: the second set of the draw's inputs {args, inst, plant, surv}; else null. */
+	private final long @org.jspecify.annotations.Nullable [] second;
+	/** The set the last cull wrote and the draw reads: false the fields above, true second. */
+	private boolean onSecond;
 	private static final int MAX_LISTED = 1 << 16;
 	final long frame = MemoryUtil.nmemCalloc(1, FRAME_BYTES);
 	// meshing
@@ -140,7 +151,10 @@ final class LodMesh implements LodClip.Listener {
 		// (bins x bands, then per bin the far terrain's lowest tangent: columns.metal HZ_FARMIN)
 		this.horizonBuf = gpu.applyAsLong(4096L * 129 * 4);
 		this.listBuf = gpu.applyAsLong((long) MAX_LISTED * 16);
-		int n = Math.max(1, Integer.getInteger("mcopt.lod.meshThreads", 2));
+		this.second = DOUBLE ? new long[] {gpu.applyAsLong(512), gpu.applyAsLong((long) MAX_INSTANCES * 32), gpu.applyAsLong((long) MAX_PLANT_INSTANCES * 32),
+			gpu.applyAsLong((long) MAX_SURVIVORS * 16)} : null;
+		// (2, as measured on 8-10 core Macs; one more per 4 cores past that, up to 4: a 12-16 core Mac meshes a world's join sooner)
+		int n = Math.max(1, Integer.getInteger("mcopt.lod.meshThreads", Math.clamp(Runtime.getRuntime().availableProcessors() / 4, 2, 4)));
 		this.workers = new Thread[n];
 		for (int i = 0; i < n; i++) {
 			Thread t = new Thread(this::work, "mcopt-lod-mesh-" + i);
@@ -154,13 +168,15 @@ final class LodMesh implements LodClip.Listener {
 
 	// ---- the clipmap's changes (render thread) ----
 
+	/** The 4 neighbors: dx, dz, and their bit in builtNeighbors, the same as the LodClip.EDGE_* bit of the border cells their meshes read. */
+	private static final int[][] NEIGHBORS = {{1, 0, 2}, {-1, 0, 1}, {0, 1, 8}, {0, -1, 4}};
+
 	@Override
 	public void tilePut(int level, int tx, int tz, boolean refreshed) {
 		if (LodClip.PAIRS) this.snaps.remove(LodTile.key(level, tx, tz));
 		this.request(level, tx, tz);
 		// each neighbor's border walls toward this tile: built without it (skirts), or this tile's border cells changed
-		int[][] d = {{1, 0, 2}, {-1, 0, 1}, {0, 1, 8}, {0, -1, 4}};
-		for (int[] n : d) {
+		for (int[] n : NEIGHBORS) {
 			int nx = tx + n[0], nz = tz + n[1];
 			if (!this.clip.resident(level, nx, nz)) continue;
 			int ns = this.clip.slot(nx, nz);
@@ -326,6 +342,7 @@ final class LodMesh implements LodClip.Listener {
 
 	/** Once a frame before drawing: finished meshes go into the arena, freed ranges whose frames are done return. */
 	void integrate(long frame) {
+		this.clip.frame(frame);
 		while (!this.releaseLater.isEmpty() && frame - this.releaseLater.peek()[0] >= RING) {
 			long[] r = this.releaseLater.poll();
 			this.release(r[1], r[2]);
@@ -348,8 +365,16 @@ final class LodMesh implements LodClip.Listener {
 			}
 			this.installOrHold(frame, r);
 		}
-		while (budget-- > 0 && (r = this.results.poll()) != null) this.installOrHold(frame, r);
+		// (and a time budget: each install copies its whole mesh into the arena on this thread)
+		long deadline = System.nanoTime() + INSTALL_NANOS;
+		while (budget-- > 0 && (r = this.results.poll()) != null) {
+			this.installOrHold(frame, r);
+			if (System.nanoTime() > deadline) break;
+		}
 	}
+
+	/** -Dmcopt.lod.installMs=MS: render-thread time a frame may spend installing new tile meshes (default 2). */
+	private static final long INSTALL_NANOS = (long) (Double.parseDouble(System.getProperty("mcopt.lod.installMs", "2")) * 1e6);
 
 	private int publishes;
 
@@ -387,9 +412,10 @@ final class LodMesh implements LodClip.Listener {
 			this.published.incrementAndGet();
 			r[5] = this.clip.writing[level].get(slot);
 			this.install(frame, r, true);
-			int[][] d = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-			for (int[] n : d) {
-				if (!this.clip.resident(level, tx + n[0], tz + n[1])) continue;
+			// (only the neighbors whose border walls read a cell that changed: a chunk inside the tile, most of them at level 0
+			// and nearly all at coarser levels, remeshed all four)
+			for (int[] n : NEIGHBORS) {
+				if ((snap.edges & n[2]) == 0 || !this.clip.resident(level, tx + n[0], tz + n[1])) continue;
 				if (LodPublish.ON) this.requestLater.add(new long[] {frame + RING, level, tx + n[0], tz + n[1]});
 				else this.request(level, tx + n[0], tz + n[1]);
 			}
@@ -436,6 +462,7 @@ final class LodMesh implements LodClip.Listener {
 		this.builtVer[level][slot] = r[5];
 		this.installed++;
 		long e = this.tableHost + ((long) level * this.tps * this.tps + slot) * 16;
+		this.tableVersion++;
 		MemoryUtil.memPutInt(e, (int) (at + 1));
 		MemoryUtil.memPutInt(e + 4, tx);
 		MemoryUtil.memPutInt(e + 8, tz);
@@ -498,6 +525,7 @@ final class LodMesh implements LodClip.Listener {
 		this.key[level][slot] = -1;
 		this.publishedVer[level][slot] = 0;
 		MemoryUtil.memSet(this.tableHost + ((long) level * this.tps * this.tps + slot) * 16, 0, 16);
+		this.tableVersion++;
 	}
 
 	private long lastFrame;
@@ -573,9 +601,23 @@ final class LodMesh implements LodClip.Listener {
 	long table(long frame) {
 		this.lastFrame = frame;
 		long b = this.tableBufs[(int) (frame % RING)];
-		MemoryUtil.memCopy(this.tableHost, LodNative.contents(b), this.tableBytes);
+		int i = (int) (frame % RING);
+		// (a ring slot already holding this version of the table isn't copied again: the whole table is 16 bytes a slot of
+		// every level's window, 80 KB at the defaults, every frame)
+		if (this.tableSlotVersion[i] != this.tableVersion) {
+			MemoryUtil.memCopy(this.tableHost, LodNative.contents(b), this.tableBytes);
+			this.tableSlotVersion[i] = this.tableVersion;
+		}
 		this.current = b;
 		return b;
+	}
+
+	/** Bumped by every change to the tile table (an install or a drop): what the cull reads besides the camera. */
+	private long tableVersion;
+	private final long[] tableSlotVersion = java.util.stream.LongStream.generate(() -> -1).limit(RING).toArray();
+
+	long tableVersion() {
+		return this.tableVersion;
 	}
 
 	private long current;
@@ -593,7 +635,7 @@ final class LodMesh implements LodClip.Listener {
 
 	/** MeshFrame (columns.metal): the camera, the mask, the windows and switch distances. */
 	void pack(org.joml.Matrix4f viewProj, double camX, double camY, double camZ, double reach, boolean maskOn, int maskX, int maskZ, int maskSize,
-		int maskWords, float maskDist) {
+		int maskWords, float maskDist, float plantDist) {
 		long f = this.frame;
 		MemoryUtil.memSet(f, 0, FRAME_BYTES);
 		viewProj.getToAddress(f);
@@ -622,6 +664,7 @@ final class LodMesh implements LodClip.Listener {
 		MemoryUtil.memPutFloat(f + 404, (float) (128.0 / Math.log(Math.max(2.0, reach * 2.0 / 48.0))));
 		MemoryUtil.memPutInt(f + 416, MAX_SURVIVORS);
 		MemoryUtil.memPutInt(f + 420, MAX_LISTED);
+		MemoryUtil.memPutInt(f + 424, (int) plantDist);
 		for (int l = 0; l < this.clip.levels; l++) {
 			MemoryUtil.memPutInt(f + 144 + l * 16L, this.clip.winTx[l]);
 			MemoryUtil.memPutInt(f + 148 + l * 16L, this.clip.winTz[l]);
@@ -647,9 +690,31 @@ final class LodMesh implements LodClip.Listener {
 		this.clip.listener = null;
 	}
 
+	/** Render thread, before encoding a cull: it writes the other set (DOUBLE), the one the level pass two frames back read. */
+	void nextCull() {
+		if (this.second != null) this.onSecond = !this.onSecond;
+	}
+
+	/** The cull's outputs the next cull writes, or the draw reads: the set nextCull picked. */
+	long args() {
+		return this.onSecond ? this.second[0] : this.argsBuf;
+	}
+
+	long inst() {
+		return this.onSecond ? this.second[1] : this.instBuf;
+	}
+
+	long plants() {
+		return this.onSecond ? this.second[2] : this.plantBuf;
+	}
+
+	long survivors() {
+		return this.onSecond ? this.second[3] : this.survBuf;
+	}
+
 	/** GPU buffers, for release by the owner once frames in flight are done (the arena's current and old ones included). */
 	long[] buffers() {
-		long[] b = new long[RING + 7 + this.buffersLater.size()];
+		long[] b = new long[RING + 7 + (this.second != null ? this.second.length : 0) + this.buffersLater.size()];
 		int i = 0;
 		for (long t : this.tableBufs) b[i++] = t;
 		b[i++] = this.arenaBuf;
@@ -659,6 +724,7 @@ final class LodMesh implements LodClip.Listener {
 		b[i++] = this.survBuf;
 		b[i++] = this.horizonBuf;
 		b[i++] = this.listBuf;
+		if (this.second != null) for (long s : this.second) b[i++] = s;
 		for (long[] o : this.buffersLater) b[i++] = o[1];
 		return b;
 	}

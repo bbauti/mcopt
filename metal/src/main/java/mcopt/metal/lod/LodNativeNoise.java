@@ -93,7 +93,15 @@ final class LodNativeNoise {
 	/** Volume calls by size: 1, 2-16, 17-256, 257-4096, 4097-65536, more (and their values), logged every 2^17 calls. */
 	static final java.util.concurrent.atomic.AtomicLongArray sizeCalls = new java.util.concurrent.atomic.AtomicLongArray(6), sizeValues = new java.util.concurrent.atomic.AtomicLongArray(6);
 
+	/**
+	 * -Dmcopt.lod.nativeNoise.stats=true (or -Dmcopt.lod.stats): the call counters and their log line. Off, none is touched:
+	 * shared atomics bumped per point sample by every worker and server worldgen thread, a contended cache line, hottest loop.
+	 */
+	static final boolean COUNT = Boolean.getBoolean("mcopt.lod.nativeNoise.stats") || Boolean.getBoolean("mcopt.lod.stats")
+		|| System.getProperty("mcopt.lod.genBench") != null;
+
 	static void counted(int size) {
+		if (!COUNT) return;
 		long n = volumes.incrementAndGet();
 		volumePoints.addAndGet(size);
 		int b = size <= 1 ? 0 : size <= 16 ? 1 : size <= 256 ? 2 : size <= 4096 ? 3 : size <= 65536 ? 4 : 5;
@@ -190,8 +198,8 @@ final class LodNativeNoise {
 			next.put(root, r);
 			this.roots = next;
 			if (this.leaves + this.blends != before) {
-				System.out.printf(Locale.ROOT, "mcopt-lod: nativeNoise %s: %d noise stacks and %d blended noises replaced in %s samplers (%d records kept)%n",
-					this.mode.backend.name().toLowerCase(Locale.ROOT), this.leaves, this.blends, this.what, this.unknown);
+				System.out.println(String.format(Locale.ROOT, "mcopt-lod: nativeNoise %s: %d noise stacks and %d blended noises replaced in %s samplers (%d records kept)%n",
+					this.mode.backend.name().toLowerCase(Locale.ROOT), this.leaves, this.blends, this.what, this.unknown).stripTrailing());
 			}
 			return r;
 		}
@@ -322,7 +330,7 @@ final class LodNativeNoise {
 		public float sampleValue(SamplerContext ctx, int x, int y, int z) {
 			Backend b = this.mode.backend;
 			if (b == Backend.PLAIN) return this.original.sampleValue(ctx, x, y, z);
-			points.incrementAndGet();
+			if (COUNT) points.incrementAndGet();
 			double xz = this.original.xzScale(), ys = this.original.yScale();
 			return b == Backend.NEON ? Natives.stackPoint(this.stack, x * xz, y * ys, z * xz) : LodNoiseKernels.stackPoint(this.stack, x * xz, y * ys, z * xz);
 		}
@@ -354,7 +362,7 @@ final class LodNativeNoise {
 		public float sampleValue(SamplerContext ctx, int x, int y, int z) {
 			Backend b = this.mode.backend;
 			if (b == Backend.PLAIN) return this.original.sampleValue(ctx, x, y, z);
-			points.incrementAndGet();
+			if (COUNT) points.incrementAndGet();
 			return b == Backend.NEON ? Natives.blendedPoint(this, x, y, z)
 				: LodNoiseKernels.blendedPoint(this.main, this.lo, this.hi, x, y, z, this.mainXz, this.mainY, this.limitXz, this.limitY);
 		}
@@ -375,11 +383,11 @@ final class LodNativeNoise {
 			}
 		}
 		long done = verified.incrementAndGet();
-		if (done % 200 == 0) System.out.printf(Locale.ROOT, "mcopt-lod: nativeNoise verify: %d volumes compared with the game's samplers, %d values differed%n", done, mismatches.get());
+		if (done % 200 == 0) System.out.println(String.format(Locale.ROOT, "mcopt-lod: nativeNoise verify: %d volumes compared with the game's samplers, %d values differed%n", done, mismatches.get()).stripTrailing());
 		if (bad > 0) {
 			long all = mismatches.addAndGet(bad);
-			System.out.printf(Locale.ROOT, "mcopt-lod: nativeNoise verify MISMATCH: %d of %d values (%s, first at %d: game %s, %s %s; %d so far)%n", bad, v.size(), v, first,
-				want.get(first), "copy", got.get(first), all);
+			System.out.println(String.format(Locale.ROOT, "mcopt-lod: nativeNoise verify MISMATCH: %d of %d values (%s, first at %d: game %s, %s %s; %d so far)%n", bad, v.size(), v, first,
+				want.get(first), "copy", got.get(first), all).stripTrailing());
 		}
 	}
 

@@ -40,18 +40,55 @@ final class LodPalette {
 		synchronized (LodPalette.class) {
 			id = IDS.get(state);
 			if (id != null) return id;
+			// a state that looks exactly like another of its block (leaves' distance and persistence, a waterlogged copy, a
+			// fence's connections...) shares its number: the 1023 numbers go to what looks different, not to every state
+			String look = lookKey(state);
+			Integer same = look == null ? null : BY_LOOK.get(look);
+			if (same != null) {
+				IDS.put(state, same);
+				return same;
+			}
 			int n = NEXT.get();
-			if (n >= MAX) return 0;
+			if (n >= MAX) {
+				if (!fullLogged) {
+					fullLogged = true;
+					System.out.println("mcopt-lod: the far terrain's block palette is full (" + (MAX - 1) + " looks): blocks met from now on are drawn with flat colors");
+				}
+				// (remembered: the next call for it doesn't take the lock again)
+				IDS.put(state, 0);
+				return 0;
+			}
 			NEXT.incrementAndGet();
 			write(state, n);
 			STATES.put(n, state);
 			IDS.put(state, n);
+			if (look != null) BY_LOOK.put(look, n);
 			return n;
 		}
 	}
 
+	/** Numbers by look: a block and everything its palette entry holds (null when the look can't be had yet). */
+	private static final ConcurrentHashMap<String, Integer> BY_LOOK = new ConcurrentHashMap<>();
+	private static boolean fullLogged;
+
+	private static @org.jspecify.annotations.Nullable String lookKey(BlockState state) {
+		try {
+			LodColors.Look l = LodColors.look(state);
+			return System.identityHashCode(state.getBlock()) + "/" + state.getBlock().getDescriptionId() + "/" + java.util.Arrays.toString(l.topUv()) + "/"
+				+ java.util.Arrays.toString(l.sideUv()) + "/" + l.top() + "/" + l.side() + "/" + java.util.Arrays.toString(l.profile()) + "/" + l.topTint() + "/"
+				+ l.sideTint() + "/" + l.constant() + "/" + l.cross();
+		} catch (RuntimeException e) {
+			return null;
+		}
+	}
+
+	/** After a resource reload: each number's entry written again from its state's new look (the atlas moved its sprites; cells keep numbers). */
+	static synchronized void rewrite() {
+		STATES.forEach((n, state) -> write(state, n));
+	}
+
 	private static void write(BlockState state, int n) {
-		if (table == 0) return;
+		if (table == 0 || n == 0) return;   // (0 is "none": states remembered as past a full table aren't written there)
 		LodColors.Look l = LodColors.look(state);
 		long at = table + (long) n * STRIDE * 4;
 		for (int i = 0; i < 4; i++) {

@@ -6,7 +6,18 @@ package mcopt.metal.lod;
  */
 public final class LodConfig {
 	/** -Dmcopt.lod=true: far terrain on. A radius alone turns it on too. */
-	public static final boolean ENABLED = Boolean.getBoolean("mcopt.lod") || System.getProperty("mcopt.lod.radius") != null;
+	public static final boolean ENABLED = mcopt.metal.LodSwitch.ENABLED;
+	/** -Dmcopt.lod.quality=auto|low|medium|high|ultra: the defaults of the settings below (each set alone wins); auto: by the GPU (LodQuality). */
+	public static final LodQuality QUALITY = ENABLED ? LodQuality.resolve(System.getProperty("mcopt.lod.quality", "auto")) : LodQuality.HIGH;
+	/** -Dmcopt.lod.multiplayer=false: no far terrain on servers; on, it's built from the chunks received, cached under the server's address. */
+	public static final boolean MULTIPLAYER = Boolean.parseBoolean(System.getProperty("mcopt.lod.multiplayer", "true"));
+	/** -Dmcopt.lod.chunksOnly=false: none where it can't be generated (a server, a flat or modded generator, a roof); on: real chunks, the cache. */
+	public static final boolean CHUNKS_ONLY = Boolean.parseBoolean(System.getProperty("mcopt.lod.chunksOnly", "true"));
+	/** -Dmcopt.lod.ceiling=false: a roofed dimension's (the Nether's) columns read from the top (the roof) instead of under it. */
+	public static final boolean CEILING = Boolean.parseBoolean(System.getProperty("mcopt.lod.ceiling", "true"));
+	/** -Dmcopt.lod.dimensions=ID,ID: far terrain only in these (e.g. minecraft:overworld); -Dmcopt.lod.excludeDimensions=ID,ID: never in these. */
+	private static final java.util.Set<String> DIMENSIONS = ids(System.getProperty("mcopt.lod.dimensions", "")),
+		EXCLUDE_DIMENSIONS = ids(System.getProperty("mcopt.lod.excludeDimensions", ""));
 	/**
 	 * -Dmcopt.lod.small=true: far terrain for small GPUs (a MacBook Neo's 5 cores). Its cost there is
 	 * geometry (the GPU cull and its survivors' quads), not pixels, so this mode culls and draws fewer cells: a quarter-size
@@ -16,18 +27,18 @@ public final class LodConfig {
 	 * the coarser levels held while it's in view and not handed off (lod.chunkHold). Each can still be set
 	 * on its own; an explicit flag wins.
 	 */
-	public static final boolean SMALL = Boolean.getBoolean("mcopt.lod.small");
+	public static final boolean SMALL = Boolean.parseBoolean(System.getProperty("mcopt.lod.small", String.valueOf(QUALITY.small)));
 	/** -Dmcopt.lod.radius=N: how far the far terrain reaches, in chunks (to the edge of the coarsest tiles drawn). */
-	public static final int RADIUS_CHUNKS = Integer.getInteger("mcopt.lod.radius", 512);
+	public static final int RADIUS_CHUNKS = Math.max(16, Integer.getInteger("mcopt.lod.radius", QUALITY.radiusChunks));
 	/**
 	 * -Dmcopt.lod.n=N: cells across each clipmap level's window (a power of two). Level L's cells are 2^L blocks and it is drawn
 	 * out to (N / 2 - 64) x 2^L blocks, so on screen a cell is never more than about twice what a real block at that distance
 	 * would be, and N sets how big that is: at 5K, 2048 gives cells of 2.5-5 px (level 0 to ~960 blocks), 4096 1.2-2.5 px.
 	 * Memory: 8 N^2 bytes a level.
 	 */
-	public static final int N = Integer.getInteger("mcopt.lod.n", SMALL ? 512 : 2048);
+	public static final int N = powerOfTwo(Integer.getInteger("mcopt.lod.n", SMALL ? 512 : QUALITY.n));
 	/** -Dmcopt.lod.threads=N: generation workers (default: the cores the game and the GPU driver leave). */
-	public static final int THREADS = Integer.getInteger("mcopt.lod.threads", Math.max(2, Runtime.getRuntime().availableProcessors() - 4));
+	public static final int THREADS = Math.max(1, Integer.getInteger("mcopt.lod.threads", Math.max(2, Runtime.getRuntime().availableProcessors() - 4)));
 	/**
 	 * -Dmcopt.lod.crownLevels=N: the N finest levels draw tree crowns floating over their ground (the terrain behind shows
 	 * under them), 0: crowns stand on the ground like pillars. Costs 4 bytes a cell on those levels. Default 1 (level 0, where
@@ -56,13 +67,30 @@ public final class LodConfig {
 	 * -Dmcopt.lod.plants=false: no grass, ferns or flowers on level 0. With them (needs textures), the game's own plant features
 	 * run with its trees, and the walk draws each plant's crossed quads where the real chunks will have them.
 	 */
-	public static final boolean PLANTS = TEXTURES && Boolean.parseBoolean(System.getProperty("mcopt.lod.plants", "true"));
+	public static final boolean PLANTS = TEXTURES && Boolean.parseBoolean(System.getProperty("mcopt.lod.plants", String.valueOf(QUALITY.plants)));
+	/** -Dmcopt.lod.clearWater=false: far water drawn opaque, mixed with its floor's color by depth; default see-through, as the game's water is. */
+	/**
+	 * -Dmcopt.lod.plantPx=N: no far plants where a block is under N pixels tall on screen (by the options' field of view); what
+	 * they hid is folded into the terrain's color there (columns.metal meshPlantCover). Default 3: at 1920x1080 the high preset
+	 * runs 642 -> 920 fps on an M4 Pro, the far savanna within ~1 of 255 of its color with them drawn. 0: every plant drawn.
+	 */
+	public static final float PLANT_PX = Float.parseFloat(System.getProperty("mcopt.lod.plantPx", "3"));
+	/** -Dmcopt.lod.plantCover=WALL,TOP,MAX: how much a folded-in plant hides of a wall and of a top, and of either at most. */
+	public static final float[] PLANT_COVER = floats(System.getProperty("mcopt.lod.plantCover", "0.75,0.75,0.9"), 3);
+
+	private static float[] floats(String v, int n) {
+		String[] p = v.split(",");
+		float[] out = new float[n];
+		for (int i = 0; i < n; i++) out[i] = i < p.length ? Float.parseFloat(p[i].strip()) : 0;
+		return out;
+	}
+	public static final boolean CLEAR_WATER = Boolean.parseBoolean(System.getProperty("mcopt.lod.clearWater", "true"));
 	/**
 	 * -Dmcopt.lod.treeLevels=N: the N finest levels (at most 2) get the game's own trees (its tree features run on the far
 	 * terrain); coarser levels the biome's impostor canopy. Level 1 needs every chunk's block-exact ground: ~5x the work of
 	 * its tiles. Default 1.
 	 */
-	public static final int TREE_LEVELS = Integer.getInteger("mcopt.lod.treeLevels", 1);
+	public static final int TREE_LEVELS = Integer.getInteger("mcopt.lod.treeLevels", QUALITY.treeLevels);
 	/** -Dmcopt.lod.crownShade=F: sky light factor under tree crowns (the game's sky light drops under leaves). */
 	public static final double CROWN_SHADE = Double.parseDouble(System.getProperty("mcopt.lod.crownShade", "0.7"));
 	/**
@@ -120,5 +148,26 @@ public final class LodConfig {
 	/** The reach in blocks. */
 	public static double reachBlocks() {
 		return RADIUS_CHUNKS * 16.0;
+	}
+
+	/** Whether far terrain draws in dimension id (mcopt.lod.dimensions, mcopt.lod.excludeDimensions). */
+	public static boolean dimensionAllowed(String id) {
+		return (DIMENSIONS.isEmpty() || DIMENSIONS.contains(id)) && !EXCLUDE_DIMENSIONS.contains(id);
+	}
+
+	private static java.util.Set<String> ids(String list) {
+		java.util.Set<String> out = new java.util.HashSet<>();
+		for (String part : list.split(",")) {
+			String id = part.strip().toLowerCase(java.util.Locale.ROOT);
+			if (!id.isEmpty()) out.add(id.contains(":") ? id : "minecraft:" + id);
+		}
+		return java.util.Set.copyOf(out);
+	}
+
+	/** The clipmap needs a power of two of at least 256 cells (4 tiles) across. */
+	private static int powerOfTwo(int n) {
+		int p = Integer.highestOneBit(Math.clamp(n, 256, 8192));
+		if (p != n) System.out.println("mcopt-lod: mcopt.lod.n=" + n + " is not a power of two in 256..8192; using " + p);
+		return p;
 	}
 }

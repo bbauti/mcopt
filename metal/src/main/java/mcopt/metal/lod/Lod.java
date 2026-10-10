@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.concurrent.CompletableFuture;
 import mcopt.metal.MetalBridge;
 import mcopt.metal.MetalHooks;
 import net.fabricmc.loader.api.FabricLoader;
@@ -43,9 +44,11 @@ public final class Lod {
 	/** ColFrame in columns.metal: A, B, C, cam, origin, cols, lines, screen, mask, maskDist (10 x 16) + 12 levels x 32. */
 	static final int COL_FRAME_BYTES = 10 * 16 + MAX_LEVELS * 32;
 	/** CompFrame: float4x4 + A, B, C, screen, fogColor, fog, skyLight, faceShade, quadDepth, origin, camFrac, tex (12 x 16). */
-	static final int COMP_FRAME_BYTES = 64 + 12 * 16;
+	static final int COMP_FRAME_BYTES = 64 + 13 * 16;
 	private static final int MASK_MAX = 128;
 	private static final int RING = 4;
+	/** -Dmcopt.lod.debugView=N: the far terrain's debug coloring (0: none). */
+	private static final int DEBUG_VIEW = Integer.getInteger("mcopt.lod.debugView", 0);
 
 	private final Object encoder;
 	private final long ctx, lod;
@@ -82,6 +85,7 @@ public final class Lod {
 	// this frame
 	private double camX, camY, camZ;
 	private final Matrix4f viewProj = new Matrix4f();
+	private float plantDist;
 	private final Vector3f forward = new Vector3f();
 	private final FrustumIntersection frustum = new FrustumIntersection();
 	private float fogR, fogG, fogB, fogStart, fogEnd, envStart, envEnd;
@@ -89,6 +93,7 @@ public final class Lod {
 	private long frames;
 	private final int[] mask = new int[MASK_MAX * MASK_MAX / 32];
 	private int maskX, maskZ, maskSize, maskWords;
+	private final java.util.function.Supplier<LodSeam.ChunkMask> maskSnapshotFn = this::maskSnapshot;
 	private boolean maskOn;
 	/** Horizontal distance from the camera to the nearest chunk the real terrain doesn't draw (far terrain can start there). */
 	private double nearestFar;
@@ -105,7 +110,7 @@ public final class Lod {
 	private Lod(Object encoder) {
 		this.encoder = encoder;
 		this.ctx = MetalBridge.ctx(encoder);
-		this.lod = LodNative.create(this.ctx, source());
+		this.lod = prewarmed(this.ctx);
 		this.paletteBuf = LodNative.buffer(this.ctx, (long) LodPalette.MAX * LodPalette.STRIDE * 4);
 		LodPalette.bind(LodNative.contents(this.paletteBuf));
 		this.dbgBuf = LodNative.buffer(this.ctx, 64);
@@ -121,7 +126,17 @@ public final class Lod {
 		this.taaTile = LodTaaTile.ON ? new LodTaaTile(this.ctx) : null;
 	}
 
-	private static String source() {
+	/** columns.metal with its water (LOD_WATER), else (if that doesn't compile on this Mac) without: a mistake there costs the water's look only. */
+	private static long createLibrary(long ctx) {
+		try {
+			return LodNative.create(ctx, source(true));
+		} catch (RuntimeException e) {
+			System.out.println("mcopt-lod: far terrain's water shading didn't compile; drawn without it: " + e.getMessage());
+			return LodNative.create(ctx, source(false));
+		}
+	}
+
+	private static String source(boolean water) {
 		try (InputStream in = Lod.class.getResourceAsStream("/mcopt/lod/columns.metal")) {
 			if (in == null) throw new IllegalStateException("columns.metal missing");
 			String src = new String(in.readAllBytes(), StandardCharsets.UTF_8);
@@ -133,12 +148,45 @@ public final class Lod {
 			// chunk is drawn by both for the frames before its hand-off, the real terrain wins the coplanar tops instead of z-fighting
 			if (HANDOFF_PUSH > 0 && HANDOFF_PUSH < 1) src = "#define SEAM_DEPTH_PUSH " + HANDOFF_PUSH + "\n" + src;
 			if (LodTaaTile.CODES) src = "#define SEAM_TAA_TILE 1\n" + src;
+			// the water's shading (columns.metal compWater), see-through unless -Dmcopt.lod.clearWater=false
+			if (water) src = "#define LOD_WATER 1\n" + (LodConfig.CLEAR_WATER ? "#define LOD_CLEAR_WATER 1\n" : "") + src;
 			if (Boolean.getBoolean("mcopt.lod.thinTex")) src = "#define SEAM_THIN_TEX 1\n" + src;
 			if (Boolean.getBoolean("mcopt.lod.thin")) src = "#define SEAM_THIN 1\n#define SEAM_CROWN_LEVELS " + Math.max(1, LodConfig.CROWN_LEVELS) + "\n" + src;
 			return src;
 		} catch (IOException e) {
 			throw new IllegalStateException(e);
 		}
+	}
+
+	/** The far terrain's shaders, compiled on their own thread while the world loads: no second's freeze on the first frame (uncached). */
+	private static @Nullable CompletableFuture<Long> prewarm;
+	private static long prewarmCtx;
+
+	/** Render thread: starts compiling the far terrain's shaders if nothing has yet. */
+	private static void prewarm() {
+		if (prewarm != null || instance != null || failed || !LodConfig.ENABLED) return;
+		try {
+			Object encoder = MetalBridge.encoder(((FrontendCommandEncoder) RenderSystem.getDevice().createCommandEncoder()).backend());
+			if (encoder == null) return;
+			long ctx = prewarmCtx = MetalBridge.ctx(encoder);
+			prewarm = CompletableFuture.supplyAsync(() -> createLibrary(ctx), Thread.ofPlatform().daemon().name("mcopt-lod-shaders")::start);
+		} catch (RuntimeException e) {
+			prewarm = CompletableFuture.failedFuture(e);
+		}
+	}
+
+	/** The prewarmed library for ctx (waiting for it if it isn't done), else one compiled now. */
+	private static long prewarmed(long ctx) {
+		var f = prewarm;
+		if (f != null && prewarmCtx == ctx) {
+			prewarmCtx = 0; // (taken once)
+			try {
+				return f.join();
+			} catch (RuntimeException e) {
+				// (compiled again below: the error is reported from there)
+			}
+		}
+		return createLibrary(ctx);
 	}
 
 	private static @Nullable Lod get() {
@@ -158,6 +206,94 @@ public final class Lod {
 			System.out.println("mcopt-lod: far terrain disabled: " + e);
 			e.printStackTrace(System.out);
 			return null;
+		}
+	}
+
+	/** Whether far terrain draws (McoptFarTerrain.setDrawEnabled, the toggle key); off, it keeps generating but isn't drawn. */
+	private static volatile boolean drawEnabled = true;
+	/** Chunks other mods asked to be read again (McoptFarTerrain.refreshChunk), as ChunkPos.pack keys; taken on the render thread. */
+	private static final java.util.concurrent.ConcurrentLinkedQueue<Long> refreshQueue = new java.util.concurrent.ConcurrentLinkedQueue<>();
+	/** -Dmcopt.lod.toggleKey=KEY: a key that hides and shows far terrain (F1-F12 or none; default F6, free in vanilla), read with no screen open. */
+	private static final int TOGGLE_KEY = toggleKeyCode(System.getProperty("mcopt.lod.toggleKey", "F6"));
+	private boolean toggleWasDown;
+
+	private static int toggleKeyCode(String name) {
+		String n = name.strip().toUpperCase(java.util.Locale.ROOT);
+		try {
+			if (n.matches("F([1-9]|1[0-2])")) return com.mojang.blaze3d.platform.InputConstants.class.getField("KEY_" + n).getInt(null);
+		} catch (ReflectiveOperationException e) {
+			return -1;
+		}
+		if (!n.equals("NONE") && !n.isEmpty()) System.out.println("mcopt-lod: toggleKey " + name + " isn't F1-F12 or none: no toggle key");
+		return -1;
+	}
+
+	private void toggleKey(Minecraft mc) {
+		boolean down = TOGGLE_KEY >= 0 && mc.gui.screen() == null && com.mojang.blaze3d.platform.InputConstants.isKeyDown(TOGGLE_KEY);
+		if (down && !this.toggleWasDown) {
+			drawEnabled = !drawEnabled;
+			System.out.println("mcopt-lod: far terrain " + (drawEnabled ? "shown" : "hidden") + " (toggle key)");
+		}
+		this.toggleWasDown = down;
+	}
+
+	public static void setDrawEnabled(boolean on) {
+		drawEnabled = on;
+	}
+
+	public static boolean drawEnabled() {
+		return drawEnabled;
+	}
+
+	/** Any thread: the chunk is read into the far terrain again at the next frame (if the client has it). */
+	public static void refreshChunk(int chunkX, int chunkZ) {
+		if (instance != null && refreshQueue.size() < 65536) refreshQueue.add(net.minecraft.world.level.ChunkPos.pack(chunkX, chunkZ));
+	}
+
+	/**
+	 * The reach the fog and far plane go to: generated far terrain's whole reach; built only from real chunks (a server, a roof), the
+	 * farthest tile with anything in it (never nearer than the render distance): a new server looks as it does without far terrain.
+	 */
+	private float reach(Minecraft mc) {
+		double reach = LodConfig.reachBlocks();
+		LodField w = this.field;
+		LodClip clip = this.clip;
+		if (w == null || clip == null || w.noise != null) return (float) reach;
+		if (this.frames - this.dataReachFrame >= 30 || this.dataReachFrame < 0) {
+			this.dataReachFrame = this.frames;
+			double far = 0;
+			for (int l = 0; l < clip.levels; l++) {
+				int span = clip.span(l);
+				long[] keys = clip.slotKey[l];
+				for (int s = 0; s < keys.length; s++) {
+					long k = keys[s];
+					if (k == -1L || clip.slotMax[l][s] <= -512) continue;
+					double x0 = (double) LodTile.txOf(k) * span, z0 = (double) LodTile.tzOf(k) * span;
+					double fx = Math.max(Math.abs(x0 - this.camX), Math.abs(x0 + span - this.camX)), fz = Math.max(Math.abs(z0 - this.camZ), Math.abs(z0 + span - this.camZ));
+					far = Math.max(far, Math.sqrt(fx * fx + fz * fz));
+				}
+			}
+			this.dataReach = far;
+		}
+		double rd = mc.options.getEffectiveRenderDistance() * 16.0;
+		return (float) Math.clamp(this.dataReach, Math.min(rd, reach), reach);
+	}
+
+	private double dataReach;
+	private long dataReachFrame = -1;
+
+	/** A block's far-terrain colors from now on (McoptFarTerrain.setBlockColor). */
+	public static void setBlockColor(String blockId, int topRgb, int sideRgb) {
+		LodColors.setOverride(blockId, topRgb, sideRgb);
+	}
+
+	/** Render thread: the chunks McoptFarTerrain.refreshChunk asked for. */
+	private void refreshChunks(Minecraft mc) {
+		Long k;
+		while ((k = refreshQueue.poll()) != null) {
+			if (mc.level == null || this.field == null) continue;
+			LevelChunk c = mc.level.getChunkSource().getChunk(net.minecraft.world.level.ChunkPos.getX(k), net.minecraft.world.level.ChunkPos.getZ(k), false);
+			if (c != null && LodConfig.CHUNKS) this.field.chunk(c);
 		}
 	}
 
@@ -185,11 +321,25 @@ public final class Lod {
 		}
 	}
 
+	/** Render thread: the level's projection this frame (LodGameRendererMixin), taken by the frame's beginLevel. */
+	private static final Matrix4f LEVEL_PROJECTION = new Matrix4f();
+	private static boolean levelProjectionSet;
+
+	public static void levelProjection(Matrix4f projection) {
+		LEVEL_PROJECTION.set(projection);
+		levelProjectionSet = true;
+	}
+
 	/** Top of the level's frame: the camera and fog this frame draws with. */
 	public static void beginLevel(CameraRenderState camera) {
 		Lod l = get();
 		if (l == null) return;
-		l.begin(camera);
+		if (mcopt.metal.FrameLog.ON) mcopt.metal.FrameLog.begin(mcopt.metal.FrameLog.LOD);
+		try {
+			l.begin(camera);
+		} finally {
+			if (mcopt.metal.FrameLog.ON) mcopt.metal.FrameLog.end(mcopt.metal.FrameLog.LOD);
+		}
 	}
 
 	/** End of the level's opaque phase (after the real terrain and solid features): the far terrain. */
@@ -197,6 +347,7 @@ public final class Lod {
 		Lod l = instance;
 		if (l == null || !l.haveFrame) return;
 		l.haveFrame = false;
+		if (mcopt.metal.FrameLog.ON) mcopt.metal.FrameLog.begin(mcopt.metal.FrameLog.LOD);
 		try {
 			l.draw();
 		} catch (RuntimeException e) {
@@ -205,6 +356,8 @@ public final class Lod {
 			activeReach = 0;
 			System.out.println("mcopt-lod: far terrain stopped: " + e);
 			e.printStackTrace(System.out);
+		} finally {
+			if (mcopt.metal.FrameLog.ON) mcopt.metal.FrameLog.end(mcopt.metal.FrameLog.LOD);
 		}
 	}
 
@@ -295,21 +448,41 @@ public final class Lod {
 		}
 	}
 
+	/** The block models the palette's entries were read from (a new set: the resources were reloaded). */
+	private @Nullable Object models;
+
 	private void begin(CameraRenderState camera) {
 		Minecraft mc = Minecraft.getInstance();
-		this.ensureWorld(mc);
+		Object models;
+		try {
+			models = mc.getModelManager().getBlockStateModelSet();
+		} catch (NullPointerException e) {
+			models = this.models;   // (not loaded yet)
+		}
+		if (models != this.models && this.models != null) {
+			// a resource pack changed: the sprites moved in the atlas, the averages changed
+			LodColors.reloaded();
+			LodPalette.rewrite();
+			System.out.println("mcopt-lod: resources reloaded: block textures read again (far terrain made before keeps its colors)");
+		}
+		this.models = models;
+		this.ensureWorld(mc, mc.level);
+		this.toggleKey(mc);
 		if (this.field == null) {
 			activeReach = 0;
 			shadeReach(0);
 			return;
 		}
-		activeReach = (float) LodConfig.reachBlocks();
+		// (hidden: the fog and far plane are the game's; the field keeps up with the camera, so showing it again is instant)
+		activeReach = drawEnabled ? this.reach(mc) : 0;
 		shadeReach(activeReach);
 		this.camX = camera.pos.x;
 		this.camY = camera.pos.y;
 		this.camZ = camera.pos.z;
-		Matrix4f proj = new Matrix4f(camera.projectionMatrix);
+		// the projection the level is drawn with (bobbing, hurt tilt, nausea, camera rolls), else the camera's alone
+		Matrix4f proj = levelProjectionSet ? LEVEL_PROJECTION : camera.projectionMatrix;
 		this.viewProj.set(proj).mul(camera.viewRotationMatrix);
+		levelProjectionSet = false;
 		camera.viewRotationMatrix.positiveZ(this.forward).negate();
 		this.frustum.set(this.viewProj, false);
 		FogData fog = camera.fogData;
@@ -330,11 +503,25 @@ public final class Lod {
 		}
 	}
 
-	private void ensureWorld(Minecraft mc) {
-		ClientLevel level = mc.level;
+	/** Leaving the world (Minecraft.disconnect): what real chunks changed is saved now, not at the next frame with a level (maybe never). */
+	public static void leavingWorld() {
+		Lod l = instance;
+		if (l == null) return;
+		try {
+			l.ensureWorld(Minecraft.getInstance(), null);
+			activeReach = 0;
+		} catch (RuntimeException e) {
+			System.out.println("mcopt-lod: closing the world's far terrain failed: " + e);
+		}
+	}
+
+	private void ensureWorld(Minecraft mc, @Nullable ClientLevel level) {
 		MinecraftServer server = mc.getSingleplayerServer();
-		Object owner = level == null || server == null ? null : level;
+		// any world: singleplayer generated ahead from its noise, any other (a server, a flat or modded generator, a roof) from real chunks
+		Object owner = level == null || server == null && !LodConfig.MULTIPLAYER ? null : level;
 		if (owner == this.worldOwner) return;
+		this.cullValid = false;
+		this.dataReachFrame = -1;
 		if (this.field != null) {
 			this.field.close();
 			this.field = null;
@@ -357,16 +544,27 @@ public final class Lod {
 		}
 		this.worldOwner = owner;
 		if (owner == null) return;
-		ServerLevel sl = server.getLevel(level.dimension());
-		if (sl == null) return;
-		LodNoise noise = LodNoise.of(sl);
-		if (noise == null) {
-			System.out.println("mcopt-lod: no far terrain in " + level.dimension().identifier() + " (not noise-generated, or a ceiling)");
+		ServerLevel sl = server == null ? null : server.getLevel(level.dimension());
+		if (server != null && sl == null) return;
+		LodNoise noise = sl == null ? null : LodNoise.of(sl);
+		if (noise == null && !LodConfig.CHUNKS_ONLY) {
+			System.out.println("mcopt-lod: no far terrain in " + level.dimension().identifier() + " (not noise-generated, or a ceiling; -Dmcopt.lod.chunksOnly=true builds it from real chunks)");
+			return;
+		}
+		if (!LodConfig.dimensionAllowed(level.dimension().identifier().toString())) {
+			System.out.println("mcopt-lod: no far terrain in " + level.dimension().identifier() + " (mcopt.lod.dimensions)");
 			return;
 		}
 		Path root = LodConfig.CACHE_DIR != null ? Path.of(LodConfig.CACHE_DIR) : mc.gameDirectory.toPath().resolve("mcopt-lod");
-		String save = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize().getFileName().toString();
-		Path cache = root.resolve(save).resolve(level.dimension().identifier().getNamespace() + "_" + level.dimension().identifier().getPath());
+		// (a singleplayer save's own folder name: one name, from this computer's disk)
+		String save = server != null ? server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize().getFileName().toString() : LodWorlds.serverDir(mc);
+		// (a server names its dimensions: as file names made safe, never a path out of the cache)
+		String dimDir = LodWorlds.safe(level.dimension().identifier().getNamespace()) + "_" + LodWorlds.safe(level.dimension().identifier().getPath());
+		// a server's worlds behind one address (a network's lobby and survival, a reset map) are told apart by their hashed seed
+		if (server == null) dimDir += LodWorlds.seedSuffix(level);
+		Path cache = root.resolve(save).resolve(dimDir);
+		// (a new world under an old one's folder name doesn't get the old one's far terrain)
+		if (sl != null && LodConfig.DISK_CACHE) LodWorlds.claim(cache, sl.getSeed());
 		// tiles cached under other crown or tree levels lack (or carry) data these levels need: their own directory
 		if (LodConfig.CROWN_LEVELS != 1 || LodConfig.TREE_LEVELS != 1) cache = cache.resolve("c" + LodConfig.CROWN_LEVELS + "t" + LodConfig.TREE_LEVELS);
 		this.clip = new LodClip(this.ctx, LodConfig.N, LodConfig.reachBlocks());
@@ -382,8 +580,17 @@ public final class Lod {
 			if (this.publish == null) this.publish = new LodPublish(this.ctx);
 			this.clip.publisher = this.publish;
 		}
-		this.field = new LodField(noise, this.clip, cache);
-		if (LodGenBench.ENABLED) LodGenBench.start(noise, this.field);
+		var dim = level.dimensionType();
+		// (a dimension with a roof, the Nether: its columns are read from under the roof)
+		int roof = dim.hasCeiling() && LodConfig.CEILING ? dim.minY() + dim.logicalHeight() - 1 : Integer.MAX_VALUE;
+		this.field = new LodField(noise, this.clip, cache, roof);
+		// singleplayer: the dimension's saved chunks become far terrain too (what was explored before, as it is)
+		if (server != null && sl != null && LodImport.ON && LodConfig.DISK_CACHE && LodConfig.CHUNKS) {
+			this.field.importer = new LodImport(this.field, sl, server.getWorldPath(LevelResource.ROOT), cache);
+		}
+		if (noise == null) System.out.println("mcopt-lod: " + level.dimension().identifier() + (server == null ? " on a server" : " (not noise-generated, or a roof)")
+			+ ": far terrain from the chunks the client receives, kept in " + cache);
+		if (LodGenBench.ENABLED && noise != null) LodGenBench.start(noise, this.field);
 		if (LodYield.ON) LodYield.top = this.clip.levels - 1;
 	}
 
@@ -398,11 +605,12 @@ public final class Lod {
 		w.frame = this.frames;
 		while (!this.releaseLater.isEmpty() && this.frames - this.releaseLater.peek()[0] >= RING) LodNative.release(this.releaseLater.poll()[1]);
 		w.integrate();
+		if (!refreshQueue.isEmpty()) this.refreshChunks(mc);
 		if (LodMesh.REAL_OCC && !this.edited.isEmpty()) this.resnapshot(mc, start);
 		long t1 = System.nanoTime();
 		this.partNanos[0] += t1 - start;
 		w.rdBlocks = mc.options.getEffectiveRenderDistance() * 16.0;
-		if (LodField.PRIO_SCREEN) w.updateScreen(this.camX, this.camZ, this.frustum, this.camY, this.viewProj, this.forward, this::maskSnapshot);
+		if (LodField.PRIO_SCREEN) w.updateScreen(this.camX, this.camZ, this.frustum, this.camY, this.viewProj, this.forward, this.maskSnapshotFn);
 		else w.update(this.camX, this.camZ, this.frustum, this.camY);
 		w.saveDirty(false);
 		long t2 = System.nanoTime();
@@ -410,6 +618,7 @@ public final class Lod {
 		int rd = mc.options.getEffectiveRenderDistance();
 		if (LodGenStats.ON) LodGenStats.frame(mc.level, w, this.camX, this.camZ, rd);
 		if (LodYield.ON) LodYield.frame(mc, this.camX, this.camZ, rd);
+		if (LodYield.ON) w.releaseGated();
 		// (three standalone statements, no else: the indie export removes the first one)
 		if (!(HANDOFF_DRAWN && SODIUM) && (!mcopt.metal.own.OwnSeam.ON || !this.updateMaskOwn())) this.updateMask(mc, rd, this.frames % 8 == 1);
 		if (HANDOFF_DRAWN && SODIUM && CHUNK_HOLD) {
@@ -417,6 +626,8 @@ public final class Lod {
 			w.hold = cl == null ? null : key -> this.heldInView((int) (key >> 32), (int) key, cl);
 			w.releaseHeld();
 		}
+		// (the tiles this frame's chunks, patches and held chunks wrote: one refresh each)
+		w.flushTouched();
 		this.partNanos[2] += System.nanoTime() - t2;
 		boolean probeOn = this.probe(start);
 		if (!LodConfig.DRAW || !probeOn || !MetalBridge.inRenderPass(this.encoder)) {
@@ -430,7 +641,8 @@ public final class Lod {
 		int size = LodNative.encSize(enc);
 		int width = size >>> 16, height = size & 0xFFFF;
 		if (attachments > 0 && width > 0 && height > 0) {
-			this.ensureOut(width, height);
+			// (the walk's output; the mesh draws straight into the pass: W x H x 8 bytes it never reads)
+			if (this.mesh == null) this.ensureOut(width, height);
 			long maskBuf = this.maskBufs[(int) (this.frames % RING)];
 			MemoryUtil.memSet(this.maskAddrs[(int) (this.frames % RING)], 0, MASK_MAX * MASK_MAX / 8);
 			if (this.maskOn) {
@@ -445,13 +657,18 @@ public final class Lod {
 				if (pub != null) pub.encode(enc, clip);
 				this.partNanos[3] += System.nanoTime() - t3;
 			}
-			int columns = this.packFrames(clip, width, height, rd);
+			// (hidden: the tiles' meshes still install and publish above, so nothing piles up; only the cull and draw are left out)
+			// (where a block is under PLANT_PX pixels tall: no plants drawn past it; the mesh's cull and fragment stages read it. From
+			// the options' field of view: sprinting's wider view would move the line under the player's eyes)
+			this.plantDist = LodConfig.PLANT_PX > 0
+				? (float) (height * 0.5 / Math.tan(Math.toRadians(Minecraft.getInstance().options.fov().get()) * 0.5) / LodConfig.PLANT_PX) : 0;
+			int columns = drawEnabled ? this.packFrames(clip, width, height, rd) : 0;
 			LodMesh mesh = this.mesh;
 			if (columns > 0 && mesh != null) {
 				boolean gbuffer = false;
 				if (this.dumpNow(w)) this.dump(clip, this.maskAddrs[(int) (this.frames % RING)], width, height);
 				mesh.pack(this.viewProj, this.camX, this.camY, this.camZ, LodConfig.reachBlocks(), this.maskOn, this.maskX, this.maskZ, this.maskSize, this.maskWords,
-					rd * 16.0F + 48.0F);
+					rd * 16.0F + 48.0F, this.plantDist);
 				long table = mesh.table(this.frames);
 				LodPk pk = this.pk;
 				// (the load switch: every TIME_EVERY-th frame's cull samples its GPU time, read TIME_EVERY frames later)
@@ -461,6 +678,7 @@ public final class Lod {
 				if (pk != null && LodPk.LOAD && sample && !timed) this.cullTimes = false;
 				boolean listsRan = pk != null && pk.lists(this.camX, this.camY, this.camZ, this.viewProj, LodConfig.reachBlocks(), LodPk.LOAD && this.cullTimes,
 					timed);
+				if (listsRan) this.cullValid = false;
 				if (listsRan) {
 					// the position-keyed lists: this frame's rebuilds, the live cull (the live ring, stale sectors), the lists' per-frame pass
 					pk.prepare(this.viewProj, this.camX, this.camY, this.camZ, LodConfig.reachBlocks(), this.forward.x, this.forward.z,
@@ -471,9 +689,13 @@ public final class Lod {
 					LodNative.pkCull(this.lod, enc, mesh.frame, LodMesh.FRAME_BYTES, this.compFrame, COMP_FRAME_BYTES, pk.params, LodPk.PARAMS_BYTES,
 						pkBufs, pk.rebuilding(), pk.liveNow ? 2 : 1, mesh.blocks());
 					pk.encoded(this.camX, this.camY, this.camZ);
+				} else if (this.cullUnchanged(mesh, clip)) {
+					// everything the cull reads is as it was at the last one: its outputs (persistent buffers) are drawn again
+					this.cullsSkipped++;
 				} else {
-					LodNative.meshCull(this.lod, enc, mesh.frame, LodMesh.FRAME_BYTES, this.compFrame, COMP_FRAME_BYTES, table, mesh.arena(), maskBuf, mesh.argsBuf,
-						mesh.instBuf, mesh.plantBuf, mesh.survBuf, mesh.horizonBuf, mesh.listBuf, clip.geomBuf, clip.crownBuf, mesh.blocks(), LodMesh.FENCES);
+					mesh.nextCull();
+					LodNative.meshCull(this.lod, enc, mesh.frame, LodMesh.FRAME_BYTES, this.compFrame, COMP_FRAME_BYTES, table, mesh.arena(), maskBuf, mesh.args(),
+						mesh.inst(), mesh.plants(), mesh.survivors(), mesh.horizonBuf, mesh.listBuf, clip.geomBuf, clip.crownBuf, mesh.blocks(), LodMesh.FENCES);
 				}
 				if (timed) {
 					pk.timedPath(slot, listsRan);
@@ -482,7 +704,7 @@ public final class Lod {
 				}
 				long atlas = this.atlasHandle();
 				if (this.taa != null) this.taa.beforeDraw(this.camX, this.camY, this.camZ, rd * 16.0F + 48.0F);
-				LodNative.meshDraw(this.lod, enc, gbuffer, this.compFrame, COMP_FRAME_BYTES, mesh.arena(), mesh.argsBuf, mesh.instBuf, mesh.plantBuf, mesh.survBuf,
+				LodNative.meshDraw(this.lod, enc, gbuffer, this.compFrame, COMP_FRAME_BYTES, mesh.arena(), mesh.args(), mesh.inst(), mesh.plants(), mesh.survivors(),
 					clip.geomBuf, clip.colorBuf, clip.crownBuf, clip.texBuf, this.paletteBuf, atlas, mesh.currentTable(), mesh.frame, LodMesh.FRAME_BYTES,
 					LodMesh.FENCES && pk == null, this.err, 4096);
 				if (this.taa != null) this.taa.afterDraw(this.viewProj, this.camX, this.camY, this.camZ);
@@ -502,6 +724,37 @@ public final class Lod {
 		this.statCpuNanos += System.nanoTime() - start;
 		this.sample(w, start);
 		if (LodConfig.STATS) this.stats(w);
+	}
+
+	/**
+	 * -Dmcopt.lod.cullSkip=false: the mesh's GPU cull every frame. On, a frame whose cull would read what the last one did skips it and
+	 * draws its survivors (a camera at rest costs only the draw). Off with the temporal filter (its jitter) and the dissolve (its clock).
+	 */
+	private final boolean cullSkip = Boolean.parseBoolean(System.getProperty("mcopt.lod.cullSkip", "true")) && LodMesh.DISSOLVE_MS <= 0;
+	private final long[] cullFrame = new long[LodMesh.FRAME_BYTES / 8], cullComp = new long[COMP_FRAME_BYTES / 8];
+	private final int[] cullMask = new int[MASK_MAX * MASK_MAX / 32];
+	private long cullTable = -1, cullClip = -1, cullArena;
+	private boolean cullValid;
+	long cullsSkipped;
+
+	/** Whether the cull's inputs are what the last cull read; if not, they're recorded as this cull's and false is returned. */
+	private boolean cullUnchanged(LodMesh mesh, LodClip clip) {
+		if (this.cullSkip && this.taa == null && this.cullValid && mesh.tableVersion() == this.cullTable && clip.version == this.cullClip
+			&& mesh.arena() == this.cullArena && same(mesh.frame, this.cullFrame) && same(this.compFrame, this.cullComp)
+			&& java.util.Arrays.equals(this.mask, this.cullMask)) return true;
+		this.cullValid = true;
+		this.cullTable = mesh.tableVersion();
+		this.cullClip = clip.version;
+		this.cullArena = mesh.arena();
+		for (int i = 0; i < this.cullFrame.length; i++) this.cullFrame[i] = MemoryUtil.memGetLong(mesh.frame + i * 8L);
+		for (int i = 0; i < this.cullComp.length; i++) this.cullComp[i] = MemoryUtil.memGetLong(this.compFrame + i * 8L);
+		System.arraycopy(this.mask, 0, this.cullMask, 0, this.mask.length);
+		return false;
+	}
+
+	private static boolean same(long addr, long[] last) {
+		for (int i = 0; i < last.length; i++) if (MemoryUtil.memGetLong(addr + i * 8L) != last[i]) return false;
+		return true;
 	}
 
 	private long settledFrame = -1;
@@ -596,18 +849,24 @@ public final class Lod {
 
 	private final Matrix4d m = new Matrix4d(), inv = new Matrix4d();
 	private final Vector3d pa = new Vector3d(), pb = new Vector3d();
+	private final Vector4d v4 = new Vector4d();
 	private final double[] A = new double[3], B = new double[3], C = new double[3];
+	/** rays()' scratch, and the NDC points its rays go through. */
+	private final double[][] rayD = new double[3][3];
+	private static final double[][] RAY_AT = {{0, 0}, {1, 0}, {0, 1}};
 
 	/** The camera-relative view ray at GL NDC (x, y): A x + B y + C (any length, pointing away from the camera). */
 	private void rays() {
 		this.m.set(this.viewProj);
 		this.m.invert(this.inv);
-		double[][] d = new double[3][];
-		double[][] at = {{0, 0}, {1, 0}, {0, 1}};
+		double[][] d = this.rayD;
+		double[][] at = RAY_AT;
 		for (int i = 0; i < 3; i++) {
 			this.inv.transformProject(at[i][0], at[i][1], 0.25, this.pa);
 			this.inv.transformProject(at[i][0], at[i][1], 0.75, this.pb);
-			d[i] = new double[] {this.pa.x - this.pb.x, this.pa.y - this.pb.y, this.pa.z - this.pb.z};
+			d[i][0] = this.pa.x - this.pb.x;
+			d[i][1] = this.pa.y - this.pb.y;
+			d[i][2] = this.pa.z - this.pb.z;
 		}
 		double sign = d[0][0] * this.forward.x + d[0][1] * this.forward.y + d[0][2] * this.forward.z >= 0 ? 1 : -1;
 		for (int k = 0; k < 3; k++) {
@@ -645,6 +904,14 @@ public final class Lod {
 		double cy = this.camY;
 		// elevation bounds over every resident tile, from its nearest point (never nearer than where far terrain starts)
 		double dMin = Math.max(1, this.nearestFar);
+		if (this.mesh != null && this.taa == null && LodConfig.DUMP == null) {
+			// the mesh draws its own quads: the walk's band and column fan (ColFrame) have no reader; only CompFrame is written
+			this.lastColumns = 0;
+			this.lastR0 = 0;
+			this.lastR1 = height - 1;
+			this.packComp(clip, width, height, 0, height - 1, dMin);
+			return 1;
+		}
 		double tLo = Double.POSITIVE_INFINITY, tHi = Double.NEGATIVE_INFINITY;
 		int top = Integer.MIN_VALUE;
 		for (int l = 0; l < clip.levels; l++) {
@@ -677,7 +944,9 @@ public final class Lod {
 		int r0 = Math.max(0, (int) Math.floor((yBot + 1) * height / 2 - 0.5) - 2);
 		int r1 = Math.min(height - 1, (int) Math.ceil((yTop + 1) * height / 2 - 0.5) + 2);
 		// columns: lines through the vanishing point of the vertical, one pixel apart where they spread most
-		Vector4d v = this.m.transform(new Vector4d(0, 1, 0, 0));
+		Vector4d v = this.m.transform(this.v4.set(0, 1, 0, 0));
+		// (level with the horizon the verticals are parallel on screen; rolled (Camera Overhaul, bobbing) they lean: a far vanishing point)
+		if (Math.abs(v.w) <= 1e-9 * Math.abs(v.y) && Math.abs(v.x) > 1e-6 * Math.abs(v.y)) v.w = Math.copySign(1e-6 * Math.hypot(v.x, v.y), v.w == 0 ? 1 : v.w);
 		boolean parallel = Math.abs(v.w) <= 1e-9 * Math.abs(v.y);
 		double vx = parallel ? 0 : v.x / v.w, vy = parallel ? 0 : v.y / v.w;
 		if (!parallel) {
@@ -770,6 +1039,13 @@ public final class Lod {
 			}
 		}
 
+		this.packComp(clip, width, height, r0, r1, dMin);
+		return columns;
+	}
+
+	/** CompFrame: the constants the composite and the mesh's shading read. */
+	private void packComp(LodClip clip, int width, int height, int r0, int r1, double dMin) {
+		int bx = (int) Math.floor(this.camX), by = (int) Math.floor(this.camY), bz = (int) Math.floor(this.camZ);
 		long c = this.compFrame;
 		this.viewProj.getToAddress(c);
 		putD(c + 64, this.A);
@@ -798,7 +1074,7 @@ public final class Lod {
 		MemoryUtil.memPutFloat(c + 188, 0.6F);
 		// the quad sits at the depth of the nearest point far terrain can have (a view depth of half its horizontal distance
 		// covers the frustum's corners): early depth testing drops what real terrain hides
-		Vector4d q = this.m.transform(new Vector4d(this.forward.x * dMin * 0.5, this.forward.y * dMin * 0.5, this.forward.z * dMin * 0.5, 1));
+		Vector4d q = this.m.transform(this.v4.set(this.forward.x * dMin * 0.5, this.forward.y * dMin * 0.5, this.forward.z * dMin * 0.5, 1));
 		MemoryUtil.memPutFloat(c + 192, (float) Math.clamp(q.z / q.w, 0, 1));
 		MemoryUtil.memPutFloat(c + 196, LodConfig.NEAR_DETAIL ? 1 : 0);
 		MemoryUtil.memPutFloat(c + 200, (float) LodConfig.CROWN_SHADE);
@@ -816,8 +1092,11 @@ public final class Lod {
 		MemoryUtil.memPutFloat(c + 240, (float) (2 * Math.atan(tanY) / height));
 		MemoryUtil.memPutFloat(c + 244, this.atlasMips);
 		MemoryUtil.memPutFloat(c + 248, LodConfig.TEXTURES && this.atlasMips >= 0 ? 1 : 0);
-		MemoryUtil.memPutFloat(c + 252, Integer.getInteger("mcopt.lod.debugView", 0));
-		return columns;
+		MemoryUtil.memPutFloat(c + 252, DEBUG_VIEW);
+		MemoryUtil.memPutFloat(c + 256, this.plantDist);
+		MemoryUtil.memPutFloat(c + 260, LodConfig.PLANT_COVER[0]);
+		MemoryUtil.memPutFloat(c + 264, LodConfig.PLANT_COVER[1]);
+		MemoryUtil.memPutFloat(c + 268, LodConfig.PLANT_COVER[2]);
 	}
 
 	private static void putD(long at, double[] v) {
@@ -1180,7 +1459,7 @@ public final class Lod {
 			(LodField.CHUNK_TILES ? String.format(", chunk tiles %d (generations skipped %d)", w.chunkTiles.get(), w.chunkSkipped.get()) : "")
 				+ (CHUNK_HOLD ? String.format(", chunks held %d (released %d)", w.heldCount(), w.heldReleased) : ""));
 		StringBuilder gen = new StringBuilder();
-		for (int i = 0; i < 16; i++) {
+		for (int i = 0; i < 16 && w.noise != null; i++) {
 			long n = w.noise.stageNanos.get(i * 4 + 3);
 			if (n == 0) continue;
 			gen.append(String.format(" L%d:%d tiles %.0f/%.0f/%.0f ms", i, n, w.noise.stageNanos.get(i * 4) / 1e6 / n, w.noise.stageNanos.get(i * 4 + 1) / 1e6 / n,
@@ -1190,8 +1469,9 @@ public final class Lod {
 		LodMesh mesh = this.mesh;
 		if (mesh != null) {
 			long n = mesh.meshed.get();
-			System.out.printf("mcopt-lod stats: mesh %d tiles installed, %d meshed (%.2f ms, %.0f quads a tile), %d pending, arena %.1f of %.0f MB%n", mesh.installed, n,
-				n == 0 ? 0 : mesh.meshNanos.get() / 1e6 / n, n == 0 ? 0 : (double) mesh.meshQuads.get() / n, mesh.pending(), mesh.usedMb(), mesh.arenaMb());
+			System.out.printf("mcopt-lod stats: mesh %d tiles installed, %d meshed (%.2f ms, %.0f quads a tile), %d pending, arena %.1f of %.0f MB, %d culls skipped%n",
+				mesh.installed, n, n == 0 ? 0 : mesh.meshNanos.get() / 1e6 / n, n == 0 ? 0 : (double) mesh.meshQuads.get() / n, mesh.pending(), mesh.usedMb(),
+				mesh.arenaMb(), this.cullsSkipped);
 		}
 		LodPk pk = this.pk;
 		if (pk != null) {
@@ -1239,8 +1519,14 @@ public final class Lod {
 	/** The client loaded a chunk, or is about to unload it (with whatever the player changed): it becomes far terrain too. */
 	public static void chunk(net.minecraft.world.level.chunk.LevelChunk chunk) {
 		Lod l = instance;
+		if (l == null) prewarm();
 		if (l == null || l.field == null || !LodConfig.CHUNKS || chunk == null) return;
-		l.field.chunk(chunk);
+		if (mcopt.metal.FrameLog.ON) mcopt.metal.FrameLog.begin(mcopt.metal.FrameLog.LOD);
+		try {
+			l.field.chunk(chunk);
+		} finally {
+			if (mcopt.metal.FrameLog.ON) mcopt.metal.FrameLog.end(mcopt.metal.FrameLog.LOD);
+		}
 	}
 
 	/**
@@ -1344,6 +1630,11 @@ public final class Lod {
 		m.put("threads", LodConfig.THREADS);
 		m.put("firstSettleSeconds", w.firstSettledNanos == 0 ? null : (w.firstSettledNanos - w.startNanos) / 1e9);
 		m.put("chunksSummarized", w.chunksSummarized.get());
+		m.put("emptyTiles", w.empty.get());
+		m.put("patchedTiles", w.patched.get());
+		if (w.importer != null) m.put("importedChunks", w.importer.chunks.get());
+		m.put("cullsSkipped", l.cullsSkipped);
+		m.put("quality", LodConfig.QUALITY.name());
 		if (LodField.CHUNK_TILES) {
 			m.put("chunkTiles", w.chunkTiles.get());
 			m.put("chunkSkipped", w.chunkSkipped.get());

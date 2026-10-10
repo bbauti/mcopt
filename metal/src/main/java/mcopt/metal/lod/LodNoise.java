@@ -203,7 +203,9 @@ final class LodNoise {
 		boolean slide = false;
 		Optional<? extends Holder<DensityFunction>> cheese = level.registryAccess().lookupOrThrow(Registries.DENSITY_FUNCTION)
 			.get(ResourceKey.create(Registries.DENSITY_FUNCTION, Identifier.withDefaultNamespace("overworld/sloped_cheese")));
-		if (cheese.isPresent() && gen.stable(NoiseGeneratorSettings.OVERWORLD)) {
+		// (the shortcut's top slide is vanilla's, 240 to 256: a taller overworld (a datapack's or mod's) keeps its own final density)
+		var ns = settings.noiseSettings();
+		if (cheese.isPresent() && gen.stable(NoiseGeneratorSettings.OVERWORLD) && ns.minY() == -64 && ns.height() == 384) {
 			terrain = cheese.get().value();
 			slide = true;
 		}
@@ -234,6 +236,7 @@ final class LodNoise {
 	}
 
 	private void generate0(LodTile t) {
+		t.voidY = this.minY;
 		long t0 = System.nanoTime();
 		Worker w = this.workers.get();
 		int c = t.cell(), x0 = t.minX(), z0 = t.minZ(), size = t.size;
@@ -617,10 +620,13 @@ final class LodNoise {
 						topColor = LodColors.top(this.ice, b, bx, bz);
 						texTop = this.ice;
 					} else {
+						// clear water: its own color on top, the floor's under it (the GPU looks through by depth and angle)
 						texTop = null;
 						int waterColor = LodColors.top(this.water, b, bx, bz);
-						float f = Math.min(1.0F, 0.55F + depth / 24.0F);
-						topColor = LodColors.mix(topColor, waterColor, f);
+						t.clear[i] = (byte) Math.clamp(depth, 1, 127);
+						sideColor = topColor;
+						t.below[i] = topColor;
+						topColor = waterColor;
 					}
 					t.water[i] = (short) waterTop;
 				} else {

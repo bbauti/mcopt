@@ -1060,6 +1060,7 @@ struct CompFrame {
     int4 origin;         // floor(camera) xyz, w: log2 N
     float4 camFrac;      // camera - origin
     float4 tex;          // x: radians a pixel spans, y: the block atlas's highest mip, z: 1 = textures on level 0
+    float4 plants;       // x: blocks past which level 0's plants aren't drawn (0: all drawn), y-w: their cover (meshPlantCover)
 };
 
 struct CompVOut {
@@ -1109,16 +1110,19 @@ static inline float compVertexAo(bool s1, bool s2, bool c) {
 // The real texture of a level-0 face: its block's sprite at the mip the distance and the angle call for, scaled so its
 // average is the cell's own color (which holds the biome tint). Leaves' transparent texels show the crown's shaded inside.
 static inline half3 compTexture(constant CompFrame& f, device const PaletteEntry* palette, texture2d<half> atlas, sampler smp, uint id, bool top,
-                                float2 uv, float3 rel, float3 n, half3 albedo) {
+                                float2 uv, float3 rel, float3 n, half3 albedo, bool solid = false) {
     if (id == 0u) return albedo;
-    PaletteEntry e = palette[id];
-    float4 rect = top ? e.topUv : e.sideUv;
-    if (rect.z <= rect.x) return albedo;
-    float3 avg = max(top ? e.topAvg.rgb : e.sideAvg.rgb, float3(0.02));
     float dist = length(rel);
     float cosA = abs(dot(n, rel)) / max(dist, 1e-3);
     // texels a pixel covers: 16 a block, a pixel covers dist x angle blocks, stretched by the incidence
     float lod = clamp(log2(16.0 * dist * f.tex.x / max(cosA, 0.08)), 0.0, f.tex.y);
+    // (a solid block's sprite at the atlas's top mip is its average, which the color word already is: nothing to read; leaves
+    // aren't solid, their mostly clear top mip shades them below it)
+    if (solid && lod >= f.tex.y && f.tex.w < 2.0) return albedo;
+    PaletteEntry e = palette[id];
+    float4 rect = top ? e.topUv : e.sideUv;
+    if (rect.z <= rect.x) return albedo;
+    float3 avg = max(top ? e.topAvg.rgb : e.sideAvg.rgb, float3(0.02));
 #ifdef SEAM_THIN_TEX
     // (-Dmcopt.lod.thinTex: textures minified with linear filtering and half a mip more, inset by half a texel of that mip so the
     // atlas's neighbouring sprites don't bleed in: far texels no longer crawl as faces slide under the pixel grid)
@@ -1174,6 +1178,108 @@ static inline bool compShade(constant CompFrame& f, uint2 v, device const uint* 
                              device const uint* texWords, device const PaletteEntry* palette, texture2d<half> atlas, sampler smp,
                              thread CompSurface& s);
 
+#ifdef LOD_WATER
+// ---- clear water ----
+//
+// A wet cell whose geometry word holds its water's depth (bits 25-31, 1-127; LodClip.depthBits) has the water's own color in
+// its color word's low half and its floor's top color in the high half (0: older data, ice: the low half is the whole look).
+// Its top is seen through as the game's water is: the bed where the pixel's ray reaches it (looked up there, so slopes and
+// shores show, on level 0 with its block's texture), in the light that gets that deep (the game's sky light drops by one a
+// block of water), under the water's color by how far the ray runs through it. -Dmcopt.lod.clearWater=false (no
+// LOD_CLEAR_WATER): the water over its floor in one color by depth, as before. All of it only with LOD_WATER: should this
+// code not compile on some Mac, Lod compiles the file again without it (the water then looks as its color word's low half).
+#define GEOM_WATER_DEPTH(g) int(((g) >> 25) & 127u)
+#define WATER_ALPHA 0.65     // the water's surface over a bed right under it (the game's water texture's alpha)
+#define WATER_FADE 16.0      // blocks of water a ray crosses for what is left of the bed to fade to 1 / e
+
+// The cell of level L at p (relative to `origin`): its geometry word and index.
+static inline uint compCellAt(constant CompFrame& f, device const uint* geom, int L, float3 p, thread uint& idx) {
+    int ax = (int(floor(p.x)) + f.origin.x) >> L, az = (int(floor(p.z)) + f.origin.z) >> L;
+    int logN = f.origin.w, m = (1 << logN) - 1;
+    idx = uint(L) * (1u << uint(2 * logN)) + uint(((az & m) << logN) | (ax & m));
+    return geom[idx];
+}
+
+// The game's lightmap brightness of sky light `level` (0-15) relative to full sky light (its curve, at the default brightness).
+static inline float compSkyLevel(float level) {
+    float l = clamp(level, 0.0, 15.0) / 15.0;
+    float b = l / (4.0 - 3.0 * l);
+    float nb = 1.0 - b;
+    b = mix(b, 1.0 - nb * nb * nb * nb, 0.5);
+    return mix(b, 0.75, 0.04) / mix(1.0, 0.75, 0.04);
+}
+
+static inline bool compWater(constant CompFrame& f, uint2 v, device const uint* geom, device const uint* color, device const uint* texWords,
+                             device const PaletteEntry* palette, texture2d<half> atlas, sampler smp, thread CompSurface& s) {
+    if (s.face == FACE_BOTTOM || s.face == FACE_PLANT) return false;
+    int L = int((v.y >> 20) & 15u);
+    float3 p = s.rel + f.camFrac.xyz;
+    // the cell the face belongs to: a wall's is behind its plane
+    float3 inward = s.face == FACE_XP ? float3(-0.5, 0, 0) : s.face == FACE_XN ? float3(0.5, 0, 0) : s.face == FACE_ZP ? float3(0, 0, -0.5)
+        : s.face == FACE_ZN ? float3(0, 0, 0.5) : float3(0);
+    uint idx;
+    uint g = compCellAt(f, geom, L, p + inward, idx);
+    int d = GEOM_WATER_DEPTH(g);
+    if ((g & (GEOM_VALID | GEOM_WET | GEOM_CROWN)) != (GEOM_VALID | GEOM_WET) || d == 0) return false;
+    uint cw = color[idx];
+    half3 water = comp565(cw & 0xFFFFu), floorC = comp565(cw >> 16);
+    float surfaceY = float(GEOM_Y(g) - f.origin.y);
+#ifdef LOD_CLEAR_WATER
+    half thick = 0.85h;
+#else
+    half thick = half(min(1.0, 0.55 + float(d) / 24.0));
+#endif
+    if (s.face != FACE_TOP) {
+        // a wall of the water (a cell stepping down to its neighbor): water above the floor, the floor's block under it
+        s.albedo = p.y > surfaceY - float(d) ? mix(floorC, water, thick) : floorC;
+        return true;
+    }
+#ifndef LOD_CLEAR_WATER
+    s.albedo = mix(floorC, water, thick);
+    return true;
+#else
+    float3 D = normalize(s.rel);
+    float down = max(-D.y, 0.02);
+    // the bed where the ray reaches it: from this cell's depth, then from the depth of the cell that lands in
+    float depth = float(d);
+    uint qi = idx;
+    uint gq = compCellAt(f, geom, L, p + D * (depth / down), qi);
+    half3 bed = floorC;
+    bool shore = false;
+    if (qi != idx && (gq & GEOM_VALID) != 0u && (gq & GEOM_CROWN) == 0u) {
+        int dq = GEOM_WATER_DEPTH(gq);
+        float yq = float(GEOM_Y(gq) - f.origin.y);
+        uint cq = color[qi];
+        if ((gq & GEOM_WET) != 0u && dq > 0 && abs(yq - surfaceY) < 0.5) {
+            // the same water: its bed there
+            depth = float(dq);
+            bed = comp565(cq >> 16);
+        } else if ((gq & GEOM_WET) == 0u) {
+            // a shore, or the bed rising out: its top, under what water is over it
+            depth = clamp(surfaceY - yq, 0.0, depth);
+            bed = comp565(cq & 0xFFFFu);
+            shore = true;
+        } else {
+            qi = idx;
+        }
+    } else {
+        qi = idx;
+    }
+    float path = depth / down;
+    float3 q = p + D * path;
+    if (L == 0 && f.quadDepth.y != 0.0 && f.tex.z > 0.0) {
+        // level 0: the bed's block's top texture (a wet cell's texture word names the floor's block as its side)
+        uint tw = texWords[qi];
+        uint id = shore ? (tw & 1023u) : ((tw >> 10) & 1023u);
+        bed = compTexture(f, palette, atlas, smp, id, true, fract(q.xz), q - f.camFrac.xyz, float3(0, 1, 0), bed);
+    }
+    float a = 1.0 - (1.0 - WATER_ALPHA) * exp(-path / WATER_FADE);
+    s.albedo = mix(bed * half(compSkyLevel(15.0 - depth)), water, half(a));
+    return true;
+#endif
+}
+#endif
+
 static inline bool compSurface(constant CompFrame& f, float4 pos, device const uint2* img, device const uint* geom, device const uint* color,
                                device const uint* crowns, device const uint* texWords, device const PaletteEntry* palette, texture2d<half> atlas,
                                sampler smp, thread CompSurface& s) {
@@ -1208,6 +1314,9 @@ static inline bool compShade(constant CompFrame& f, uint2 v, device const uint* 
         return true;
     }
     bool underCrown = (v.y & REC_UNDER_CROWN) != 0u;
+#ifdef LOD_WATER
+    if (s.wet && compWater(f, v, geom, color, texWords, palette, atlas, smp, s)) return true;
+#endif
     if (f.quadDepth.y == 0.0 || level != 0u || s.wet || underCrown && (s.face == FACE_TOP || f.tex.z == 0.0)) return true;
     // near detail on level 0: the cell, from the hit's position (block coordinates relative to `origin`)
     float3 p = s.rel + f.camFrac.xyz;
@@ -1252,7 +1361,7 @@ static inline bool compShade(constant CompFrame& f, uint2 v, device const uint* 
         return true;
     }
     if (s.face == FACE_TOP) {
-        s.albedo = compTexture(f, palette, atlas, smp, tw & 1023u, true, float2(fx, fz), s.rel, nrm, s.albedo);
+        s.albedo = compTexture(f, palette, atlas, smp, tw & 1023u, true, float2(fx, fz), s.rel, nrm, s.albedo, true);
 #ifdef MESH_BENCH_NOAO
         return true;
 #endif
@@ -1293,9 +1402,9 @@ static inline bool compShade(constant CompFrame& f, uint2 v, device const uint* 
     if ((g & GEOM_FRINGE) != 0u && depth < 3.0 / 16.0) {
         s.albedo = comp565(color[idx] & 0xFFFFu);
     } else if (depth >= 1.0 && f.quadDepth.w > 0.0) {
-        s.albedo = compTexture(f, palette, atlas, smp, (tw >> 20) & 1023u, false, wuv, s.rel, nrm, comp565((crowns[idx] >> 12) & 0xFFFFu));
+        s.albedo = compTexture(f, palette, atlas, smp, (tw >> 20) & 1023u, false, wuv, s.rel, nrm, comp565((crowns[idx] >> 12) & 0xFFFFu), true);
     } else {
-        s.albedo = compTexture(f, palette, atlas, smp, (tw >> 10) & 1023u, false, wuv, s.rel, nrm, s.albedo);
+        s.albedo = compTexture(f, palette, atlas, smp, (tw >> 10) & 1023u, false, wuv, s.rel, nrm, s.albedo, true);
     }
     return true;
 }
@@ -1398,7 +1507,8 @@ struct MeshFrame {
     float4 sw[3];            // switch distances (level L: sw[L / 4][L % 4])
     int4 opts;               // x: levels drawn (bit mask; 0: all), y: groups drawn (bit mask; 0: all), z: 1 = the horizon cull
     float4 hz;               // the horizon's bands: x the first band's start (blocks), y 1 / log(the bands' ratio)
-    int4 caps;               // x: surviving quads the buffer holds, y: blocks the list holds (lod_mesh_cull -> lod_mesh_emit)
+    int4 caps;               // x: surviving quads the buffer holds, y: blocks the list holds (lod_mesh_cull -> lod_mesh_emit),
+                             // z: no plants past this distance (blocks; 0: none cut)
 };
 
 // ---- the horizon cull: what nearer terrain surely hides ----
@@ -1957,6 +2067,12 @@ static inline void meshCullBlock(constant MeshFrame& f, device const uint4* tabl
         if (nx * nx + nz * nz > pk->liveFar * pk->liveFar) return;
     }
     if (f.opts.x != 0 && ((f.opts.x >> L) & 1) == 0) return;
+    if (MODE == 0) {
+        // a cheap reject before the level choice, the table walk and the header read: the block's column at every height a
+        // word can hold, wholly outside a side of the view (the frustum tests below, on boxes inside this one, fail too)
+        float ex0 = float((bx * B << L) - f.origin.x) - f.cam.x, ez0 = float((bz * B << L) - f.origin.z) - f.cam.z, es = float(B << L);
+        if (!meshInFrustum(f, float3(ex0, float(-512 - f.origin.y) - f.cam.y, ez0), float3(ex0 + es, float(65535 - 512 - f.origin.y) - f.cam.y, ez0 + es))) return;
+    }
     // opts.w: the harness's stand-in for the real terrain (level 0's blocks where the real terrain draws, nothing else)
     bool fake = f.opts.w != 0;
     // the real terrain as an occluder (horizon bit 16): level 0's blocks the real terrain draws (the hand-off mask) raise the
@@ -2233,7 +2349,9 @@ static inline void meshEmitBlock(constant MeshFrame& f, device const uint* arena
         float yHi = float(int(h[15] >> 16) - 512 - f.origin.y) - f.cam.y;
         if (PK) yHi += f.hz.z;
         if (hzTangent(yHi, dn, df) < hzt) {
+#ifdef MESH_BENCH_STATS
             atomic_fetch_add_explicit(&args[23], 1u, memory_order_relaxed);
+#endif
             if ((f.opts.z & 8) == 0) return;
             hiddenBlock = true;
         } else if (hzt > -INFINITY && sh == 0) {
@@ -2243,10 +2361,17 @@ static inline void meshEmitBlock(constant MeshFrame& f, device const uint* arena
                 if (PK) gy += f.hz.z;
                 if (hzTangent(gy, dn, df) < hzt) {
                     bits &= ~(1u << g);
+#ifdef MESH_BENCH_STATS
                     atomic_fetch_add_explicit(&args[24], 1u, memory_order_relaxed);
+#endif
                 }
             }
         }
+    }
+    if (f.caps.z > 0 && ((bits >> 14) & 1u) != 0u) {
+        // plants too far to be more than a few pixels: none
+        float nx = max(0.0, max(float(ox0) - f.cam.x, f.cam.x - float(ox0 + size))), nz = max(0.0, max(float(oz0) - f.cam.z, f.cam.z - float(oz0 + size)));
+        if (nx * nx + nz * nz > float(f.caps.z) * float(f.caps.z)) bits &= ~(1u << 14);
     }
     bool own = sh == 0;
     uint quadBase = (hdr + uint(bpt * bpt * MESH_HDR)) / 2u;
@@ -2283,20 +2408,30 @@ static inline void meshEmitBlock(constant MeshFrame& f, device const uint* arena
     }
     int4 clip = int4(ox0, ox0 + size, oz0, oz0 + size);
     int ttx = meshTileOf(f, kx), ttz = meshTileOf(f, kz);
+    // (the counters in args 10-12, 15, 23, 24, 32-47 and 48-63 are statistics nothing reads: same-address atomics a listed block,
+    // group or hidden quad each, kept for the offline bench only)
+#ifdef MESH_BENCH_STATS
     uint quads = 0u;
+#endif
     for (int g = 0; g < 14; g++) {
         if (((bits >> g) & 1u) == 0u) continue;
         uint n = h[g] >> 20;
+#ifdef MESH_BENCH_STATS
         atomic_fetch_add_explicit(&args[48 + L], n, memory_order_relaxed);
         atomic_fetch_add_explicit(&args[32 + g], n, memory_order_relaxed);
         quads += n;
+#endif
         meshEmit(f, args, inst, ARGS_CAND, uint(f.counts.z), quadBase + (h[g] & 0xFFFFFu), n, tag, ttx, ttz, clip);
     }
+#ifdef MESH_BENCH_STATS
     atomic_fetch_add_explicit(&args[10], 1u, memory_order_relaxed);
     atomic_fetch_add_explicit(&args[11], quads, memory_order_relaxed);
+#endif
     if (((bits >> 14) & 1u) != 0u) {
         uint np = h[14] >> 20;
+#ifdef MESH_BENCH_STATS
         atomic_fetch_add_explicit(&args[12], np, memory_order_relaxed);
+#endif
         if (PK) {
             // the position pass's plants go into their home sector's own instances (the frames pick the sectors in view)
             device atomic_uint* w = sec + home * PK_SECTOR_WORDS;
@@ -2590,7 +2725,9 @@ kernel void lod_mesh_quads(constant CompFrame& f [[buffer(22)]], device const Me
                         qdbg[3 * at + 5] = float4(lo.x, lo.y, hi.x, hi.y);
                     }
 #endif
+#ifdef MESH_BENCH_STATS
                     atomic_fetch_add_explicit(&args[15], 1u, memory_order_relaxed);
+#endif
                 }
 #ifdef MESH_BENCH_AREA
                 if (keep) {
@@ -2957,6 +3094,46 @@ static inline half3 seamTaa(constant CompFrame& f, constant SeamTaaFrame& tf, te
 }
 #endif
 
+// Level 0's plants past f.plants.x (MeshFrame caps.z: where a block is a few pixels) aren't drawn; what they would hide is folded
+// in here instead. From a ground surface toward the camera over a few cells (a top from its own, a wall from the one in front of
+// it), every plant the view's ray passes through (its height over that cell within the plant's blocks) hides f.plants.y (walls)
+// or f.plants.z (tops) of what is left, at most f.plants.w. A crown's faces are left out (ground plants can't reach them), and
+// one read a cell: plant bits on a geometry word always come with the plant's words. Returns the share, `plant` the nearest
+// such plant's color. Past the cull's own test at the surface's cell (16-cell blocks from their nearest point), so a drawn
+// plant is hardly ever also folded in.
+#define PLANT_STEPS 2
+static inline half meshPlantCover(constant CompFrame& f, device const uint* geom, device const uint* texWords, thread const CompSurface& s,
+                                  uint info, thread half3& plant) {
+    if (f.plants.x <= 0.0 || (info & 0x1F8u) != 0u || s.face == FACE_BOTTOM) return 0.0h;   // level 0, ground faces only
+    float3 p = s.rel + f.camFrac.xyz;
+    int ax = int(floor(p.x)) + f.origin.x, az = int(floor(p.z)) + f.origin.z;
+    float bx = float((ax & ~15) - f.origin.x), bz = float((az & ~15) - f.origin.z);
+    float nx = max(0.0, max(bx - f.camFrac.x, f.camFrac.x - bx - 16.0)), nz = max(0.0, max(bz - f.camFrac.z, f.camFrac.z - bz - 16.0));
+    if (nx * nx + nz * nz <= f.plants.x * f.plants.x) return 0.0h;
+    float lh = max(length(s.rel.xz), 1e-6);
+    float2 toCam = -s.rel.xz / lh;
+    float slope = max(-s.rel.y / lh, 0.0);   // the ray's rise toward the camera, per block across
+    bool top = s.face == FACE_TOP;
+    float y = p.y + float(f.origin.y), miss = 1.0, hide = top ? f.plants.z : f.plants.y;
+    float2 start = p.xz + (s.face == FACE_XP ? float2(0.5, 0) : s.face == FACE_XN ? float2(-0.5, 0) : s.face == FACE_ZP ? float2(0, 0.5)
+        : s.face == FACE_ZN ? float2(0, -0.5) : float2(0));
+    int logN = f.origin.w, m = (1 << logN) - 1;
+    uint n2 = 1u << uint(2 * logN), first = 0xFFFFFFFFu;
+    for (int k = 0; k < PLANT_STEPS; k++) {
+        float2 q = start + toCam * float(k);
+        uint idx = uint((((int(floor(q.y)) + f.origin.z) & m) << logN) | ((int(floor(q.x)) + f.origin.x) & m));
+        uint g = geom[idx];
+        int blocks = GEOM_PLANT_BLOCKS(g);
+        float yr = y + (float(k) + (top ? 0.5 : 0.0)) * slope - float(GEOM_Y(g));
+        if (blocks == 0 || yr < 0.0 || yr >= float(blocks) * 0.8) continue;
+        if (first == 0xFFFFFFFFu) first = idx;
+        miss *= 1.0 - hide;
+    }
+    if (first == 0xFFFFFFFFu) return 0.0h;
+    plant = comp565(texWords[2u * n2 + first] & 0xFFFFu);
+    return half(min(1.0 - miss, f.plants.w));
+}
+
 fragment half4 lod_mesh_vanilla(MeshVOut in [[stage_in]], constant CompFrame& f [[buffer(22)]], device const uint* geom [[buffer(24)]],
                                 device const uint* color [[buffer(25)]], device const uint* crowns [[buffer(26)]],
                                 device const uint* texWords [[buffer(27)]], device const PaletteEntry* palette [[buffer(28)]],
@@ -2986,7 +3163,11 @@ fragment half4 lod_mesh_vanilla(MeshVOut in [[stage_in]], constant CompFrame& f 
     seamThin(f, in.info, s, geom, color, crowns, lit);
     half4 o = half4(compFog(f, s.rel, lit * half3(s.ao * s.sky * f.skyLight.rgb)), 1.0h);
 #else
-    half4 o = half4(compFog(f, s.rel, s.albedo * half3(shade * s.ao * s.sky * f.skyLight.rgb)), 1.0h);
+    half3 plant = half3(0.0h), lit = s.albedo * half(shade * s.ao * s.sky);
+    half cover = meshPlantCover(f, geom, texWords, s, in.info, plant);
+    // (the plants in their own light: a wall's occlusion and shade don't reach them)
+    if (cover > 0.0h) lit = mix(lit, plant * half(f.faceShade.x), cover);
+    half4 o = half4(compFog(f, s.rel, lit * half3(f.skyLight.rgb)), 1.0h);
 #endif
 #ifdef SEAM_TAA
     o.rgb = seamTaa(f, tf, hist, in.info, s, color, o.rgb);

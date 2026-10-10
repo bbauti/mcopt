@@ -22,7 +22,7 @@ final class LodTile {
 	final short[] height;
 	/** World y of the water surface's top face, or DRY. */
 	final short[] water;
-	/** RGB seen from above (water's own color, already mixed with the floor by depth, where wet). */
+	/** RGB seen from above; where wet, the water's own color if `clear` holds its depth (the floor's top is then in `side`), else (ice) the top's. */
 	final int[] top;
 	/**
 	 * RGB of the column's sides: at level 0 the top block's own side, deeper walls take `below`; coarser levels a mix of the
@@ -60,10 +60,14 @@ final class LodTile {
 	final BlockState[] plantLower, plantUpper;
 	final byte[] plantBlocks;
 	final int[] plantColor;
+	/** Open water seen through (LodClip.depthBits): its depth over the floor, 1-127; 0 where dry, frozen or a crown's. */
+	final byte[] clear;
 	/** The water is known (the game's aquifers asked, levels 0-1): `water` holds it; else the sea fills what lies under its level. */
 	boolean waterKnown;
 	/** Impostor canopies from the biome (LodTrees) where no exact trees are planted. */
 	boolean impostorTrees = true;
+	/** Columns whose ground is at or under this y had no solid (the End's void between islands): left out, not drawn as a floor. Set by LodNoise. */
+	int voidY = Integer.MIN_VALUE;
 	int source;
 
 	/** A clipmap tile: tile (tx, tz) of level `level`. */
@@ -101,6 +105,7 @@ final class LodTile {
 		this.plantUpper = new BlockState[n];
 		this.plantBlocks = new byte[n];
 		this.plantColor = new int[n];
+		this.clear = new byte[n];
 	}
 
 	/**

@@ -2,6 +2,7 @@
 // offline harness.
 #include "lodmesh.h"
 
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -45,7 +46,8 @@ static void column0(const LmIn *in, int ax, int az, Col *c);
 static void column(const LmIn *in, int ax, int az, Col *c) {
 	column0(in, ax, az, c);
 	int m = (1 << in->logN) - 1;
-	int depth = GEOM_DEPTH(in->geom[((size_t) (az & m) << in->logN) | (size_t) (ax & m)]);
+	uint32_t g = in->geom[((size_t) (az & m) << in->logN) | (size_t) (ax & m)];
+	int depth = (g & GEOM_WET) ? 0 : GEOM_DEPTH(g);   // (a wet cell's bits there: its clear water's depth, for the fragment stage)
 	c->bot = depth > 0 && c->n > 0 ? c->hi[0] - depth : NEG_INF;
 }
 
@@ -85,14 +87,23 @@ static void column0(const LmIn *in, int ax, int az, Col *c) {
 
 // a's intervals where b has none (b unknown: all of a's, the ground's from LM_DEEP). Returns the pieces.
 static int faceDiff(const Col *a, const Col *b, int *lo, int *hi, unsigned char *kind) {
+	// the common case, a column of ground beside another: what of a stands over b
+	if (a->n == 1 && b->n == 1 && a->lo[0] == NEG_INF && b->lo[0] == NEG_INF) {
+		int l = b->hi[0] < LM_DEEP ? LM_DEEP : b->hi[0], h = a->hi[0];
+		if (h <= l) return 0;
+		lo[0] = l;
+		hi[0] = h;
+		kind[0] = a->kind[0];
+		return 1;
+	}
 	int n = 0;
 	for (int k = 0; k < a->n; k++) {
-		int pl[MAX_IV * 2 + 2], ph[MAX_IV * 2 + 2], pn = 1;
+		int bufL[2][MAX_IV * 2 + 2], bufH[2][MAX_IV * 2 + 2], *pl = bufL[0], *ph = bufH[0], pn = 1;   // (two buffers in turn, no copies)
 		pl[0] = a->lo[k];
 		ph[0] = a->hi[k];
 		for (int j = 0; b->n > 0 && j < b->n; j++) {
 			int bl = b->lo[j], bh = b->hi[j], qn = 0;
-			int ql[MAX_IV * 2 + 2], qh[MAX_IV * 2 + 2];
+			int *ql = pl == bufL[0] ? bufL[1] : bufL[0], *qh = ph == bufH[0] ? bufH[1] : bufH[0];
 			for (int p = 0; p < pn; p++) {
 				if (bh <= pl[p] || bl >= ph[p]) {
 					ql[qn] = pl[p];
@@ -109,8 +120,8 @@ static int faceDiff(const Col *a, const Col *b, int *lo, int *hi, unsigned char 
 				}
 			}
 			pn = qn;
-			memcpy(pl, ql, sizeof(int) * (size_t) qn);
-			memcpy(ph, qh, sizeof(int) * (size_t) qn);
+			pl = ql;
+			ph = qh;
 		}
 		for (int p = 0; p < pn && n < MAX_IV * 2; p++) {
 			int l = pl[p] < LM_DEEP ? LM_DEEP : pl[p], h = ph[p];
@@ -175,18 +186,13 @@ static void rects(Out *o, uint32_t *rows, int b, int x0, int z0, int face, int k
 }
 
 typedef struct {
-	int key;   // kind << 16 | (y + 512)
+	int key;   // kind << 12 | (y + 512): 14 bits
 	int x, z;
 } Item;
 
-static int itemCmp(const void *a, const void *b) {
-	const Item *p = a, *q = b;
-	return p->key != q->key ? (p->key < q->key ? -1 : 1) : 0;
-}
-
 // Tops (bottoms = 0) or undersides (bottoms = 1) of the block's cells, merged per height and kind.
 static void flats(Out *o, const Col *cols, int b, int x0, int z0, int bottoms) {
-	Item items[16 * 16 * MAX_IV];
+	Item items[16 * 16 * MAX_IV], sorted[16 * 16 * MAX_IV];
 	int n = 0;
 	for (int z = 0; z < b; z++) {
 		for (int x = 0; x < b; x++) {
@@ -194,7 +200,7 @@ static void flats(Out *o, const Col *cols, int b, int x0, int z0, int bottoms) {
 			for (int k = 0; k < c->n; k++) {
 				if (bottoms && c->lo[k] == NEG_INF) continue;
 				int y = bottoms ? c->lo[k] : c->hi[k];
-				items[n].key = (int) c->kind[k] << 16 | (y + 512);
+				items[n].key = (int) c->kind[k] << 12 | (y + 512);
 				items[n].x = x;
 				items[n].z = z;
 				n++;
@@ -202,7 +208,13 @@ static void flats(Out *o, const Col *cols, int b, int x0, int z0, int bottoms) {
 		}
 	}
 	if (n == 0) return;
-	qsort(items, (size_t) n, sizeof(Item), itemCmp);
+	for (int pass = 0; pass < 2; pass++) {   // key order: two 7-bit radix passes (the order within a key doesn't matter, its cells only set bits)
+		Item *from = pass == 0 ? items : sorted, *to = pass == 0 ? sorted : items;
+		int count[128] = {0}, shift = pass * 7;
+		for (int i = 0; i < n; i++) count[(from[i].key >> shift) & 127]++;
+		for (int i = 1; i < 128; i++) count[i] += count[i - 1];
+		for (int i = n - 1; i >= 0; i--) to[--count[(from[i].key >> shift) & 127]] = from[i];
+	}
 	for (int i = 0; i < n;) {
 		int j = i;
 		uint32_t rows[16] = {0};
@@ -210,7 +222,7 @@ static void flats(Out *o, const Col *cols, int b, int x0, int z0, int bottoms) {
 			rows[items[j].z] |= 1u << items[j].x;
 			j++;
 		}
-		int y = (items[i].key & 0xFFFF) - 512, kind = items[i].key >> 16;
+		int y = (items[i].key & 0xFFF) - 512, kind = items[i].key >> 12;
 		range(o, y, y);
 		rects(o, rows, b, x0, z0, bottoms ? LM_F_BOTTOM : LM_F_TOP, kind, y);
 		i = j;
@@ -319,9 +331,19 @@ static void plants(Out *o, const LmIn *in, int b, int x0, int z0) {
 	}
 }
 
+// The region's columns: a buffer per thread, kept until it ends (~200 KB malloc'd per call came as fresh pages every time).
+static pthread_key_t scratchKey;
+static pthread_once_t scratchOnce = PTHREAD_ONCE_INIT;
+
+static void scratchInit(void) {
+	pthread_key_create(&scratchKey, free);
+}
+
 int lm_mesh(const LmIn *in, uint32_t *header, uint32_t *quads, int cap) {
 	int b = in->block == 16 ? 16 : 8, nb = LM_TILE / b;
-	Col *cols = malloc(sizeof(Col) * REGION * REGION);
+	pthread_once(&scratchOnce, scratchInit);
+	Col *cols = pthread_getspecific(scratchKey);
+	if (!cols && (cols = malloc(sizeof(Col) * REGION * REGION))) pthread_setspecific(scratchKey, cols);
 	if (!cols) return -1;
 	int ax0 = in->tx * LM_TILE, az0 = in->tz * LM_TILE;
 	for (int z = -1; z <= LM_TILE; z++) {
@@ -349,9 +371,17 @@ int lm_mesh(const LmIn *in, uint32_t *header, uint32_t *quads, int cap) {
 			o.minY = 1 << 20;
 			o.maxY = -(1 << 20);
 			int groupMax[LM_GROUPS];
+			int flat = 1;   // every column the ground up to one top of one kind (still water, a plain)
+			const Col *f = &cols[(z0 + 1) * REGION + (x0 + 1)];
+			for (int z = 0; z < b && flat; z++) {
+				for (int x = 0; x < b && flat; x++) {
+					const Col *c = &cols[(z0 + z + 1) * REGION + (x0 + x + 1)];
+					flat = c->n == 1 && c->lo[0] == NEG_INF && c->hi[0] == f->hi[0] && c->kind[0] == f->kind[0];
+				}
+			}
 			for (int g = 0; g < LM_G_INFO; g++) {
 				int start = o.count;
-				switch (g) {
+				switch (flat && g >= LM_G_XP && g <= LM_G_ZN ? -1 : g) {   // (a flat block has no wall inside it: faceDiff finds none)
 				case LM_G_TOP: flats(&o, cols, b, x0, z0, 0); break;
 				case LM_G_BOTTOM: flats(&o, cols, b, x0, z0, 1); break;
 				case LM_G_XP: walls(&o, cols, b, x0, z0, LM_F_XP, 0, b - 2, 0); break;
@@ -411,7 +441,6 @@ int lm_mesh(const LmIn *in, uint32_t *header, uint32_t *quads, int cap) {
 			}
 		}
 	}
-	free(cols);
 	if (o.overflow || o.count >= (1 << 20)) return -1;
 	return o.count;
 }

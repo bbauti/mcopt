@@ -1,5 +1,6 @@
 package mcopt.metal.lod;
 
+import java.util.concurrent.atomic.LongAdder;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.core.QuartPos;
@@ -10,7 +11,6 @@ import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
-import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.levelgen.Heightmap;
@@ -42,6 +42,7 @@ final class LodChunks {
 	 * clear: the column's top doesn't hide what's behind it (water, glass, a fence, a slab...): it occludes nothing. depth
 	 * (-Dmcopt.lod.realOcc only, else 0): how far the ground's top solid run reaches down, in blocks (1-127, 127: that deep or
 	 * more; 0: none): under it may be air, a cave or the space under an overhang.
+	 * Wet, depth is the water's instead, over its floor (clear water: top is the water's color, side and below the floor's).
 	 */
 	record Summary(int chunkX, int chunkZ, short[] height, short[] water, int[] top, int[] side, int[] below, boolean[] fringe, short[] crownLo,
 		short[] crownHi, int[] groundColor, int[] tex, int[] runs, int[] plantA, int[] plantB, boolean[] clear, byte[] depth) {
@@ -59,6 +60,23 @@ final class LodChunks {
 
 	private static boolean crownBlock(BlockState s) {
 		return s.is(BlockTags.LEAVES) || s.is(Blocks.SNOW);
+	}
+
+	/**
+	 * Under a roof: from y down through the roof's blocks to the first air, then through the air to what stands under it (its
+	 * y). No air within 96 blocks (the Nether's roof is 5-40 thick): y, the roof is all there is to see.
+	 */
+	private static int underRoof(Source src, int x, int z, int y, int minY) {
+		int k = y, floor = Math.max(minY + 1, y - 96);
+		while (k > floor && !src.state(x, k, z).isAir()) k--;
+		if (k <= floor) return y;
+		// sections of only air are skipped whole
+		while (k > minY) {
+			if (src.emptySection(k)) k = ((k - minY) & ~15) + minY - 1;
+			else if (!src.state(x, k, z).isAir()) return k;
+			else k--;
+		}
+		return y;
 	}
 
 	/** The deepest solid run counted (Snapshot.depth). */
@@ -93,9 +111,63 @@ final class LodChunks {
 		return DEPTH_MAX;
 	}
 
+	/** Where a snapshot's blocks come from (a game chunk); x, z: 0-15, y the world's. */
+	interface Source {
+		int minY();
+
+		/** The WORLD_SURFACE heightmap: one over the column's highest block that isn't air (minY: none). */
+		int surface(int x, int z);
+
+		BlockState state(int x, int y, int z);
+
+		/** Whether the 16-block section holding y has only air (it may say false when it doesn't know). */
+		boolean emptySection(int y);
+
+		/** The biome at the quart (4 x 4 x 4 cell) holding the block. */
+		Holder<Biome> biome(int x, int y, int z);
+	}
+
+	/**
+	 * roof: in a dimension with a roof (the Nether), its top y: each column is read from the first air under the roof's solid
+	 * blocks down, so the far terrain shows the ground under the roof instead of the roof's flat top. Integer.MAX_VALUE: none.
+	 */
+	static Snapshot snapshot(net.minecraft.world.level.chunk.ChunkAccess chunk, int roof) {
+		BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+		int bx0 = chunk.getPos().getMinBlockX(), bz0 = chunk.getPos().getMinBlockZ();
+		Snapshot s = snapshot(new Source() {
+			@Override
+			public int minY() {
+				return chunk.getMinY();
+			}
+
+			@Override
+			public int surface(int x, int z) {
+				return chunk.getHeight(Heightmap.Types.WORLD_SURFACE, x, z);
+			}
+
+			@Override
+			public BlockState state(int x, int y, int z) {
+				return chunk.getBlockState(pos.set(bx0 + x, y, bz0 + z));
+			}
+
+			@Override
+			public boolean emptySection(int y) {
+				return chunk.getSection(chunk.getSectionIndex(y)).hasOnlyAir();
+			}
+
+			@Override
+			public Holder<Biome> biome(int x, int y, int z) {
+				return chunk.getNoiseBiome(QuartPos.fromBlock(bx0 + x), QuartPos.fromBlock(y), QuartPos.fromBlock(bz0 + z));
+			}
+		}, chunk, chunk.getPos().x(), chunk.getPos().z(), roof, RUNS);
+		if (SPAN_STATS) spanStatsLater(chunk);
+		return s;
+	}
+
+	/** A chunk's columns from any source; runs (-Dmcopt.lod.realOcc's chunks): where each column's run starts, and chunk's sections it reaches. */
 	@SuppressWarnings("unchecked")
-	static Snapshot snapshot(LevelChunk chunk) {
-		int minY = chunk.getMinY();
+	private static Snapshot snapshot(Source src, net.minecraft.world.level.chunk.ChunkAccess chunk, int chunkX, int chunkZ, int roof, boolean runs) {
+		int minY = src.minY();
 		BlockState[] top = new BlockState[256], under = new BlockState[256], crown = new BlockState[256], crownLeaf = new BlockState[256];
 		short[] height = new short[256], water = new short[256], crownLo = new short[256], crownHi = new short[256];
 		int[] crownRuns = new int[256];
@@ -103,17 +175,15 @@ final class LodChunks {
 		// up to 3 blocks over the ground where a decoration stands on it (a plant, for the worker to tell)
 		BlockState[] above = new BlockState[256 * 3];
 		Holder<Biome>[] biome = new Holder[256];
-		short[] runFrom = RUNS ? new short[256] : null;
+		short[] runFrom = runs ? new short[256] : null;
 		int runLo = Integer.MAX_VALUE, runHi = Integer.MIN_VALUE;
-		BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
-		int bx0 = chunk.getPos().getMinBlockX(), bz0 = chunk.getPos().getMinBlockZ();
 		for (int z = 0; z < 16; z++) {
 			for (int x = 0; x < 16; x++) {
 				int i = z * 16 + x;
-				int px = bx0 + x, pz = bz0 + z;
-				int y = chunk.getHeight(Heightmap.Types.WORLD_SURFACE, x, z);
-				BlockState s = chunk.getBlockState(pos.set(px, y, pz));
-				for (int guard = 0; guard < 8 && y > minY && (s.isAir() || decoration(s)); guard++) s = chunk.getBlockState(pos.set(px, --y, pz));
+				int y = src.surface(x, z);
+				if (roof != Integer.MAX_VALUE) y = underRoof(src, x, z, Math.min(y, roof), minY);
+				BlockState s = src.state(x, y, z);
+				for (int guard = 0; guard < 8 && y > minY && (s.isAir() || decoration(s)); guard++) s = src.state(x, --y, z);
 				crownLo[i] = Short.MIN_VALUE;
 				crown[i] = null;
 				if (crownBlock(s)) {
@@ -122,7 +192,7 @@ final class LodChunks {
 					int topY = y;
 					BlockState topState = s;
 					int k = y - 1, lowest = y;
-					BlockState b = chunk.getBlockState(pos.set(px, k, pz));
+					BlockState b = src.state(x, k, z);
 					boolean air = false;
 					// leaf blocks down from the top (bit d: topY - d), for the crown's runs (a spruce's tiers)
 					long below = topState.is(BlockTags.LEAVES) ? 1L : 0L;
@@ -137,12 +207,12 @@ final class LodChunks {
 						} else {
 							break;
 						}
-						b = chunk.getBlockState(pos.set(px, --k, pz));
+						b = src.state(x, --k, z);
 					}
 					if (b.is(BlockTags.LOGS)) trunk[i] = b;
 					if (air && !b.is(BlockTags.LOGS)) {
 						crown[i] = topState;
-						crownLeaf[i] = topState.is(Blocks.SNOW) ? chunk.getBlockState(pos.set(px, topY - 1, pz)) : topState;
+						crownLeaf[i] = topState.is(Blocks.SNOW) ? src.state(x, topY - 1, z) : topState;
 						crownLo[i] = (short) lowest;
 						// as bits up from the lowest leaf: the leaf at topY - d is lowest + (topY - lowest - d)
 						long up = 0;
@@ -158,14 +228,14 @@ final class LodChunks {
 				if (s.getFluidState().is(FluidTags.WATER)) {
 					wet = (short) (y + 1);
 					for (int guard = 0; guard < 96 && y > minY && (s.getFluidState().is(FluidTags.WATER) || s.isAir()); guard++) {
-						s = chunk.getBlockState(pos.set(px, --y, pz));
+						s = src.state(x, --y, z);
 					}
 				}
 				top[i] = s;
 				// a snow layer is a covering (an eighth of a block), not a block: the column's top stays the block under it
 				height[i] = (short) (s.is(Blocks.SNOW) ? y : y + 1);
 				water[i] = wet;
-				under[i] = chunk.getBlockState(pos.set(px, y - 1, pz));
+				under[i] = src.state(x, y - 1, z);
 				// (a snow layer: the run starts at the block under it)
 				if (runFrom != null) {
 					int from = s.is(Blocks.SNOW) ? y - 1 : y;
@@ -176,19 +246,19 @@ final class LodChunks {
 					}
 				}
 				if (crown[i] == null && wet == LodTile.DRY && !s.is(Blocks.SNOW)) {
-					BlockState a = chunk.getBlockState(pos.set(px, y + 1, pz));
+					BlockState a = src.state(x, y + 1, z);
 					for (int k = 0; k < 3 && decoration(a); k++) {
 						above[i * 3 + k] = a;
-						a = chunk.getBlockState(pos.set(px, y + 2 + k, pz));
+						a = src.state(x, y + 2 + k, z);
 					}
 				}
-				biome[i] = chunk.getNoiseBiome(QuartPos.fromBlock(px), QuartPos.fromBlock(y), QuartPos.fromBlock(pz));
+				biome[i] = src.biome(x, y, z);
 			}
 		}
 		// the sections the runs can reach, copied (the walk runs on a worker)
 		PalettedContainer<BlockState>[] sections = null;
 		int secFirst = 0;
-		if (runFrom != null && runLo <= runHi) {
+		if (chunk != null && runFrom != null && runLo <= runHi) {
 			secFirst = Math.max(0, (Math.max(minY, runLo - DEPTH_MAX) - minY) >> 4);
 			int secLast = Math.min(chunk.getSectionsCount() - 1, (runHi - minY) >> 4);
 			sections = new PalettedContainer[Math.max(0, secLast - secFirst + 1)];
@@ -197,8 +267,139 @@ final class LodChunks {
 				sections[k] = sec.hasOnlyAir() ? null : sec.getStates().copy();
 			}
 		}
-		return new Snapshot(chunk.getPos().x(), chunk.getPos().z(), top, under, height, water, biome, crown, crownLeaf, crownLo, crownHi, crownRuns, trunk, above,
+		return new Snapshot(chunkX, chunkZ, top, under, height, water, biome, crown, crownLeaf, crownLo, crownHi, crownRuns, trunk, above,
 			runFrom, sections, secFirst, minY);
+	}
+
+	/**
+	 * Measurement only (-Dmcopt.lod.spanStats=true): how much of the world isn't a heightfield near its surface, for sizing far
+	 * terrain with more than one span a column (overhangs, arches, cave mouths, floating islands). Per column, down to 64 blocks
+	 * under its top: solid runs (not leaves, not water) with an air gap of 2 or more blocks under them and solid under the gap.
+	 * Such a gap is open when a neighbor column in the chunk has its top under the gap's top (seen from that side), else
+	 * enclosed (a cave pocket, which far terrain would leave solid). Leaf crowns (leaves over air, which far terrain already
+	 * draws) are counted on their own. Logged every 30 s while chunks come in. ~16k block reads a chunk while on: the game's
+	 * chunks are walked on a thread of its own (spanStatsLater).
+	 */
+	static final boolean SPAN_STATS = Boolean.getBoolean("mcopt.lod.spanStats");
+	/** The game's chunks' walks (one thread, low priority; chunks past 256 waiting aren't counted). */
+	private static final java.util.concurrent.ThreadPoolExecutor STATS = SPAN_STATS ? new java.util.concurrent.ThreadPoolExecutor(1, 1, 0,
+		java.util.concurrent.TimeUnit.SECONDS, new java.util.concurrent.ArrayBlockingQueue<>(256), Thread.ofPlatform().name("mcopt-lod span stats")
+		.daemon().priority(Thread.MIN_PRIORITY).factory(), new java.util.concurrent.ThreadPoolExecutor.DiscardPolicy()) : null;
+	private static final LongAdder STAT_CHUNKS = new LongAdder(), STAT_COLUMNS = new LongAdder(), STAT_OPEN1 = new LongAdder(),
+		STAT_OPEN2 = new LongAdder(), STAT_ENCLOSED = new LongAdder(), STAT_LEAVES = new LongAdder(), STAT_THICK = new LongAdder(),
+		STAT_GAP = new LongAdder();
+	private static final java.util.concurrent.atomic.AtomicLong STAT_LOG_AT = new java.util.concurrent.atomic.AtomicLong(System.nanoTime() + 30_000_000_000L);
+
+	/** The calling thread (the game's chunk, render thread): copies of the sections the walk reaches, walked on STATS. */
+	@SuppressWarnings("unchecked")
+	private static void spanStatsLater(net.minecraft.world.level.chunk.ChunkAccess chunk) {
+		if (STATS.getQueue().remainingCapacity() == 0) return;
+		int minY = chunk.getMinY();
+		int[] surface = new int[256];
+		int lo = Integer.MAX_VALUE, hi = Integer.MIN_VALUE;
+		for (int i = 0; i < 256; i++) {
+			surface[i] = chunk.getHeight(Heightmap.Types.WORLD_SURFACE, i & 15, i >> 4);
+			lo = Math.min(lo, surface[i] - 1);
+			hi = Math.max(hi, surface[i] - 1);
+		}
+		if (hi <= minY) return;
+		int secFirst = Math.max(0, (Math.max(minY, lo - 64) - minY) >> 4), secLast = Math.min(chunk.getSectionsCount() - 1, (hi - minY) >> 4);
+		if (secLast < secFirst) return;
+		PalettedContainer<BlockState>[] sections = new PalettedContainer[secLast - secFirst + 1];
+		for (int k = 0; k < sections.length; k++) {
+			LevelChunkSection sec = chunk.getSection(secFirst + k);
+			sections[k] = sec.hasOnlyAir() ? null : sec.getStates().copy();
+		}
+		STATS.execute(() -> spanStats(new Source() {
+			@Override
+			public int minY() {
+				return minY;
+			}
+
+			@Override
+			public int surface(int x, int z) {
+				return surface[z * 16 + x];
+			}
+
+			@Override
+			public BlockState state(int x, int y, int z) {
+				return emptySection(y) ? Blocks.AIR.defaultBlockState() : sections[((y - minY) >> 4) - secFirst].get(x, (y - minY) & 15, z);
+			}
+
+			@Override
+			public boolean emptySection(int y) {
+				int si = ((y - minY) >> 4) - secFirst;
+				return y < minY || si < 0 || si >= sections.length || sections[si] == null;
+			}
+
+			@Override
+			public Holder<Biome> biome(int x, int y, int z) {
+				throw new UnsupportedOperationException();
+			}
+		}));
+	}
+
+	/** One chunk's columns into the counts (any thread). */
+	static void spanStats(Source src) {
+		int minY = src.minY();
+		int[] topY = new int[256];
+		for (int i = 0; i < 256; i++) topY[i] = src.surface(i & 15, i >> 4) - 1;
+		for (int z = 0; z < 16; z++) {
+			for (int x = 0; x < 16; x++) {
+				int i = z * 16 + x, y = topY[i], floor = Math.max(minY, y - 64);
+				if (y <= minY) continue;
+				STAT_COLUMNS.increment();
+				// walking down: in a solid run (not leaves), then the gap under it
+				boolean enclosed = false, leaves = false, inSolid = false, inLeaves = false;
+				int open = 0, gapTop = Integer.MIN_VALUE, runTop = y;
+				for (int k = y; k >= floor; k--) {
+					BlockState b = src.state(x, k, z);
+					if (b.isAir() || decoration(b)) {
+						if ((inSolid || inLeaves) && gapTop == Integer.MIN_VALUE) gapTop = k;
+						continue;
+					}
+					boolean leaf = b.is(BlockTags.LEAVES), water = b.getFluidState().is(FluidTags.WATER);
+					if (gapTop != Integer.MIN_VALUE) {
+						int gap = gapTop - k;
+						if (gap >= 2 && !water) {
+							if (inLeaves) {
+								leaves = true;
+							} else if (x > 0 && topY[i - 1] < gapTop || x < 15 && topY[i + 1] < gapTop || z > 0 && topY[i - 16] < gapTop
+								|| z < 15 && topY[i + 16] < gapTop) {
+								// open: a neighbor column's top lies under the gap's top (in the chunk; edge columns see less)
+								open++;
+								STAT_THICK.add(runTop - gapTop);
+								STAT_GAP.add(gap);
+							} else {
+								enclosed = true;
+							}
+						}
+						gapTop = Integer.MIN_VALUE;
+						runTop = k;
+					}
+					if (water) break;   // (under water: what's below doesn't show from afar)
+					inSolid = !leaf;
+					inLeaves = leaf;
+				}
+				if (open >= 1) STAT_OPEN1.increment();
+				if (open >= 2) STAT_OPEN2.increment();
+				if (open == 0 && enclosed) STAT_ENCLOSED.increment();
+				if (leaves) STAT_LEAVES.increment();
+			}
+		}
+		STAT_CHUNKS.increment();
+		long now = System.nanoTime(), at = STAT_LOG_AT.get();
+		if (now > at && STAT_LOG_AT.compareAndSet(at, now + 30_000_000_000L)) logSpanStats();
+	}
+
+	/** The counts so far, in the log. */
+	static void logSpanStats() {
+		double cols = Math.max(1, STAT_COLUMNS.sum());
+		long spans = Math.max(1, STAT_OPEN1.sum());
+		System.out.println(String.format(java.util.Locale.ROOT, "mcopt-lod span stats: %d chunks, %.0f columns: %.2f%% with a solid span over an open gap"
+			+ " (%.2f%% two or more; spans %.1f blocks thick over %.1f-block gaps on average), %.2f%% over enclosed gaps only, %.2f%% leaf crowns",
+			STAT_CHUNKS.sum(), cols, 100 * STAT_OPEN1.sum() / cols, 100 * STAT_OPEN2.sum() / cols, (double) STAT_THICK.sum() / spans,
+			(double) STAT_GAP.sum() / spans, 100 * STAT_ENCLOSED.sum() / cols, 100 * STAT_LEAVES.sum() / cols));
 	}
 
 	private static final BlockState WATER = Blocks.WATER.defaultBlockState();
@@ -244,22 +445,29 @@ final class LodChunks {
 				below[i] = s.trunk[i] != null ? LodColors.side(s.trunk[i], b, x, z) : sideColor;
 				fringe[i] = false;
 			}
+			int depth = s.water[i] != LodTile.DRY ? s.water[i] - s.height[i] : 0;
 			if (s.water[i] != LodTile.DRY) {
-				int depth = s.water[i] - s.height[i];
 				int waterColor = LodColors.top(WATER, b, x, z);
-				color = LodColors.mix(color, waterColor, Math.min(1.0F, 0.55F + depth / 24.0F));
 				sideColor = color;
+				if (depth > 0) {
+					// clear water (LodClip.depthBits): its own color on top, the floor's under it, looked through on the GPU
+					solidDepth[i] = (byte) Math.min(depth, DEPTH_MAX);
+					below[i] = color;
+					color = waterColor;
+				}
 			}
 			int surface = s.water[i] != LodTile.DRY ? Math.max(s.water[i], s.height[i]) : s.height[i];
 			crownHi[i] = (short) surface;
 			if (LodConfig.TEXTURES) {
 				BlockState sideState = layer ? s.under[i] : s.top[i];
 				BlockState belowState = s.trunk[i] != null && s.crown[i] == null ? s.trunk[i] : layer ? sideState : s.under[i];
-				tex[i] = s.water[i] != LodTile.DRY ? 0 : LodPalette.word(LodPalette.id(s.top[i]), LodPalette.id(sideState), LodPalette.id(belowState));
+				// (under water: the floor's block as the side, whose top sprite the GPU draws through the water)
+				tex[i] = s.water[i] != LodTile.DRY ? LodPalette.word(0, LodPalette.id(s.top[i]), LodPalette.id(s.under[i]))
+					: LodPalette.word(LodPalette.id(s.top[i]), LodPalette.id(sideState), LodPalette.id(belowState));
 			}
 			if (s.crown[i] != null) {
 				// a crown over air: its own colors; the ground keeps its own under it
-				groundColor[i] = color;
+				groundColor[i] = depth > 0 ? LodColors.waterOver(sideColor, color, depth) : color;
 				BlockState leaf = s.crownLeaf[i];
 				BlockState topLeaf = leaf != null && leaf.is(BlockTags.LEAVES) ? leaf : Blocks.OAK_LEAVES.defaultBlockState();
 				color = s.crown[i].is(Blocks.SNOW) ? LodColors.top(s.crown[i], b, x, z) : LodColors.top(topLeaf, b, x, z);
