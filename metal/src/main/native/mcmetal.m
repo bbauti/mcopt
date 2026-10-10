@@ -1747,17 +1747,24 @@ static void startDisplayLink(void) {
 // scanout times (presentedTime 0, as on the mini's display) nothing changes: the margin stays the caller's.
 static int paceAdapt;             // 1: the margin learns; 2 (-Dmcopt.metal.paceAdapt=watch): presents are only measured
 static _Atomic double paceExtra;  // seconds added to the caller's margin
-// Lateness counts from the lowest lately (rising PACE_FLOOR_RISE a present to take up a lasting change), the display's own delay:
-// on bbauti's external 100 Hz monitor every paced frame was over half a refresh late, at 60 fps in menus too. Only presents with
-// under a refresh of slack (target - GPU done) set it: one with more is shown a refresh before its target when the compositor
-// takes it early. Counted, those put the floor a refresh low and presents on time looked late; the lead that added made more
-// presents early, and a simulation of the pacer held at PACE_EXTRA_MAX as d37b2e4 did in every segment after a world load. A
-// present shown late with more slack than usual (paceSlack, a running median) had its lead, a stall did it: it takes PACE_UP
-// away, so lateness as common with more slack as with less (none of the lead's doing: ~3% of in-world presents, in bursts)
-// cancels out, and only lateness the lead helps adds it.
+// Lateness counts from the display's own delay, the reference (paceFloor): the 10th percentile of the presents with under a
+// refresh of slack (target - GPU done), which can't show a refresh early. It moves PACE_REF_DOWN for each below it and
+// PACE_REF_UP for each above, so a present off the refresh grid moves it 90 us: as a running minimum, one (-7.58 ms) set it
+// a refresh low and every present on time looked late until it rose back (260796e). On bbauti's external 100 Hz monitor the
+// delay is a refresh in game. A present shown late with more slack than usual (paceSlack, a running median) had its lead, a
+// stall did it: it takes PACE_UP away, so lateness as common with more slack as with less cancels out, and only lateness the
+// lead helps adds it.
+// A late present also drains the compositor's queue: the next refresh gets no new frame (at most every PACE_DRAIN_GAP). Frames
+// wait their turn there, one a refresh, so after one misses its latch every later one is shown a refresh late too, until a
+// refresh goes without a frame; the lead can't undo that. With paceAdapt=watch and the 2 ms margin, half of the presents were
+// a refresh late that way for whole segments (shown - target +20 ms, the present side waiting 12-15 ms for drawables).
 static _Atomic double paceFloor = INFINITY, paceSlack;
-#define PACE_FLOOR_RISE 0.00002
+#define PACE_REF_UP 0.00001
+#define PACE_REF_DOWN 0.00009
 #define PACE_SLACK_STEP 0.00005
+#define PACE_DRAIN_GAP 0.25
+static _Atomic int paceDrain;     // set by a late present: mc_pace skips a refresh
+static int paceDrains;            // since the last stats line (render thread)
 static double paceTarget;         // the refresh the frame being presented was paced for (render thread)
 #define PACE_UP 0.00025
 #define PACE_DOWN 0.000005
@@ -1774,13 +1781,19 @@ static void paceWatch(id<MTLCommandBuffer> cb, id<CAMetalDrawable> drawable, dou
 	[drawable addPresentedHandler:^(id<MTLDrawable> d) {
 		double shown = d.presentedTime, late = shown - target, slack = target - done, s = paceSlack;
 		if (shown <= 0 || period <= 0 || done <= 0) return;
-		if (slack < period) paceFloor = fmin(paceFloor + PACE_FLOOR_RISE, late);
+		double f = paceFloor;
+		if (slack < period) paceFloor = f = isfinite(f) ? f + (late < f ? -PACE_REF_DOWN : PACE_REF_UP) : late;
 		paceSlack = s = s == 0 ? slack : s + (slack > s ? PACE_SLACK_STEP : -PACE_SLACK_STEP);
-		double off = late - paceFloor;
+		double off = late - f;
 		int k = off > period * 0.5 ? (slack > s ? -1 : 1) : 0, i = atomic_fetch_add(&paceShown, 1);
 		if (i < PACE_SAMPLES) paceLateMs[i] = (float) (late * 1e3);
 		if (k || (isfinite(off) && off < -period * 0.5)) atomic_fetch_add(k > 0 ? &paceLate : k ? &paceLateSlack : &paceEarly, 1);
 		if (paceAdapt != 1) return;
+		static double drainedAt;  // (presented handlers run one at a time)
+		if (k && fabs(remainder(off, period)) < period * 0.2 && shown - drainedAt > PACE_DRAIN_GAP) {
+			drainedAt = shown;
+			paceDrain = 1;
+		}
 		double e = paceExtra + (k > 0 ? PACE_UP : k ? -PACE_UP : -PACE_DOWN);
 		paceExtra = e < 0 ? 0 : e > PACE_EXTRA_MAX ? PACE_EXTRA_MAX : e;
 	}];
@@ -1794,10 +1807,11 @@ const char *mc_pace_stats(void) {
 	int n = atomic_exchange(&paceShown, 0), m = n < PACE_SAMPLES ? n : PACE_SAMPLES;
 	memcpy(v, paceLateMs, m * sizeof(float));
 	qsort(v, m, sizeof(float), cmpFloat);
-	snprintf(line, sizeof line, " (pace margin +%.2f ms%s; of %d shown: %d late, %d late with more slack than usual, %d early; shown - target"
-		" min/median/p90 %+.2f/%+.2f/%+.2f ms, on time %+.2f; slack %.2f ms, GPU %.2f ms)", paceExtra * 1e3, paceAdapt == 1 ? " learned" : "",
-		n, atomic_exchange(&paceLate, 0), atomic_exchange(&paceLateSlack, 0), atomic_exchange(&paceEarly, 0), m ? v[0] : 0, m ? v[m / 2] : 0,
-		m ? v[m * 9 / 10] : 0, paceFloor * 1e3, paceSlack * 1e3, gpuLatency * 1e3);
+	snprintf(line, sizeof line, " (pace margin +%.2f ms%s; of %d shown: %d late, %d late with more slack than usual, %d early, %d refreshes drained;"
+		" shown - target min/median/p90 %+.2f/%+.2f/%+.2f ms, on time %+.2f; slack %.2f ms, GPU %.2f ms)", paceExtra * 1e3, paceAdapt == 1 ? " learned" : "",
+		n, atomic_exchange(&paceLate, 0), atomic_exchange(&paceLateSlack, 0), atomic_exchange(&paceEarly, 0), paceDrains, m ? v[0] : 0,
+		m ? v[m / 2] : 0, m ? v[m * 9 / 10] : 0, paceFloor * 1e3, paceSlack * 1e3, gpuLatency * 1e3);
+	paceDrains = 0;
 	return line;
 }
 
@@ -1835,6 +1849,10 @@ int mc_pace(double margin) {
 		return 1;
 	}
 	double target = anchor + ceil((now + lead - anchor) / period) * period;
+	if (atomic_exchange(&paceDrain, 0)) {  // (this refresh gets no new frame: see paceDrain)
+		pacedFor = fmax(pacedFor, target);
+		paceDrains++;
+	}
 	if (target < pacedFor + period / 2 || now + 2 * frameInterval + lead < target) return 0;
 	pacedFor = target;
 	paceTarget = target;
