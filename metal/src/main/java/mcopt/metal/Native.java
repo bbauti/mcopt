@@ -112,8 +112,9 @@ final class Native {
 	private static final MethodHandle PRESENT_QUEUED_ACQUIRE = fn("mc_present_queued_acquire", false, JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG);
 	private static final MethodHandle PRESENT_DROPPED = fn("mc_present_dropped", false, JAVA_LONG);
 	private static final MethodHandle PACE_ADAPT = fn("mc_pace_adapt", false, null, JAVA_INT);
-	private static final MethodHandle PACE_EXTRA_MS = fn("mc_pace_extra_ms", false, JAVA_DOUBLE);
+	private static final MethodHandle PACE_STATS = fn("mc_pace_stats", false, JAVA_LONG);
 	private static final MethodHandle PACE = fn("mc_pace", false, JAVA_INT, JAVA_DOUBLE);
+	private static final MethodHandle PACE_FOLLOW = fn("mc_pace_follow", false, JAVA_DOUBLE, JAVA_DOUBLE, JAVA_DOUBLE);
 	private static final MethodHandle SLEEP_PRECISE = fn("mc_sleep_precise", false, null, JAVA_LONG);
 
 	private Native() {
@@ -232,9 +233,10 @@ final class Native {
 	static long presentSkipped() { try { return (long) PRESENT_SKIPPED.invokeExact(); } catch (Throwable t) { throw rethrow(t); } }
 	static int presentQueuedAcquire(long enc, long layer, long texture, long cadence) { if (FrameCapture.FULL && FrameCapture.active()) FrameCapture.present(texture); try { return (int) PRESENT_QUEUED_ACQUIRE.invokeExact(enc, layer, texture, cadence); } catch (Throwable t) { throw rethrow(t); } }
 	static void paceAdapt(int on) { try { PACE_ADAPT.invokeExact(on); } catch (Throwable t) { throw rethrow(t); } }
-	static double paceExtraMs() { try { return (double) PACE_EXTRA_MS.invokeExact(); } catch (Throwable t) { throw rethrow(t); } }
+	static String paceStats() { try { return org.lwjgl.system.MemoryUtil.memASCII((long) PACE_STATS.invokeExact()); } catch (Throwable t) { throw rethrow(t); } }
 	static long presentDropped() { try { return (long) PRESENT_DROPPED.invokeExact(); } catch (Throwable t) { throw rethrow(t); } }
 	static void sleepPrecise(long ns) { try { SLEEP_PRECISE.invokeExact(ns); } catch (Throwable t) { throw rethrow(t); } }
+	static double paceFollow(double x, double y) { try { return (double) PACE_FOLLOW.invokeExact(x, y); } catch (Throwable t) { throw rethrow(t); } }
 	static boolean pace(double marginSeconds) { try { return (int) PACE.invokeExact(marginSeconds) != 0; } catch (Throwable t) { throw rethrow(t); } }
 
 	private static RuntimeException rethrow(Throwable t) {

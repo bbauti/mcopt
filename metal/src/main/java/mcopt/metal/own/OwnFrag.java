@@ -1104,7 +1104,7 @@ final class OwnFrag {
 				MemoryUtil.memPutInt(d, (kind & K_EXACT) != 0 ? 0 : id * this.listCap);  // (a1Exact: the table's entries are absolute)
 				long argsOffset = c.mesh ? (lists(c) * 5L + id * 3L) * 4 : id * 20L;
 				int k = kind | (lean == 1 ? K_LEAN : 0);
-				if (this.failed.contains(k)) continue;
+				if (!this.failed.isEmpty() && this.failed.contains(k)) continue;  // (isEmpty first: k boxes)
 				try {
 					long ar = args;
 					if (this.a1sNow > 0 && layer == 0 && bank == 0 && lists == this.lists && id == this.a1sId && !c.mesh && (kind & K_EXACT) == 0
@@ -1138,10 +1138,12 @@ final class OwnFrag {
 		return m;
 	}
 
-	/** (every 5 s while a1Exact or a2Exact is requested) the effective mode, from the native telemetry (mco_frag_exact_telemetry). */
+	/** (every 5 s while a1Exact or a2Exact is requested and on, once if gated off) the effective mode, from mco_frag_exact_telemetry. */
 	private void exactLog() {
 		long now = System.nanoTime();
 		if (!(this.a1Req || this.a2Req) || now - this.exactLogAt < 5_000_000_000L) return;
+		// (requested but gated off on this GPU, as the indie profile's a2 on 16 cores: said once, its telemetry would repeat zeros)
+		if (!(this.a1Exact || this.a2Exact) && this.exactLogAt != 0) return;
 		this.exactLogAt = now;
 		OwnNative.fragExactTelemetry(this.own, this.exactTel);
 		int cores = mcopt.metal.Profile.gpuCores();

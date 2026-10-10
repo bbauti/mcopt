@@ -252,7 +252,7 @@ final class MetalEncoder implements CommandEncoderBackend {
 		double frameMs = (now - this.statStart) / 1e6 / this.statFrames;
 		System.out.printf("mcopt-metal stats: %d fps, %.3f ms/frame, %.3f ms of it waiting on the GPU, %d presents%s%n", this.statFrames,
 			frameMs, this.waitNanos / 1e6 / this.statFrames, this.statPresents, (PRESENT_QUEUE ? " (queued" + (PRESENT_ACQUIRE ? ", acquired on the present side" : "") + "; skipped so far " + Native.presentSkipped() + ", dropped " + Native.presentDropped() + ")" : "")
-			+ (MetalSurface.PACE_ADAPT ? String.format(" (pace margin +%.2f ms learned)", Native.paceExtraMs()) : ""));
+			+ (MetalSurface.PACE_ADAPT > 0 ? Native.paceStats() : ""));
 		if (MetalTerrain.OCC) {
 			long[] t = this.terrain.lastCompletedCounts();
 			System.out.printf("mcopt-metal stats: terrain drew %d of %d quads (%.1f%%), %d before the split, %d chunks (%.1f quads each), %d frames drew terrain%n", t[0], t[1],
@@ -539,7 +539,7 @@ final class MetalEncoder implements CommandEncoderBackend {
 			boolean clearDepth = !Double.isNaN(t.pendingDepthClear);
 			int continued = Native.renderBegin(this.enc, depthFormat ? 0 : 1, colors, clears, depthFormat ? t.handle : 0, clearDepth ? 1 : 0,
 				clearDepth ? (float) t.pendingDepthClear : 0, t.getWidth(0), t.getHeight(0));
-			this.trace(continued == 0 ? "flushClear #" + this.encoderIndex : "flushClear (in place)", t);
+			if (this.tracing()) this.trace(continued == 0 ? "flushClear #" + this.encoderIndex : "flushClear (in place)", t);
 			if (continued == 0) this.encoderIndex++;
 		}
 		t.pendingColorClear = null;
@@ -669,7 +669,7 @@ final class MetalEncoder implements CommandEncoderBackend {
 			FrameLog.op(FrameLog.TEX_WRITES, 1);
 			FrameLog.op(FrameLog.TEX_PX, (long) width * height);
 		}
-		this.trace("writeToTexture", destination, width + "x" + height);
+		if (this.tracing()) this.trace("writeToTexture", destination, width + "x" + height);
 		this.flushClear(destination);
 		GpuBufferSlice staging = this.transientMemory.uploadGpu(source, 16L, GpuBuffer.USAGE_COPY_SRC);
 		int bytesPerRow = width * destination.getFormat().blockSize();
@@ -680,7 +680,7 @@ final class MetalEncoder implements CommandEncoderBackend {
 	@Override
 	public void copyBufferToTexture(GpuBufferSlice source, int sourceX, int sourceY, int sourceWidth, int sourceHeight, GpuTexture destination,
 		int destX, int destY, int copyWidth, int copyHeight, int mip, int layer) {
-		this.trace("copyBufferToTexture", destination, copyWidth + "x" + copyHeight);
+		if (this.tracing()) this.trace("copyBufferToTexture", destination, copyWidth + "x" + copyHeight);
 		this.flushClear(destination);
 		int texel = destination.getFormat().blockSize();
 		long skip = (sourceX + (long) sourceY * sourceWidth) * texel;
@@ -695,7 +695,7 @@ final class MetalEncoder implements CommandEncoderBackend {
 
 	@Override
 	public void copyTextureToBuffer(GpuTexture source, GpuBuffer destination, long offset, Runnable callback, int mip, int x, int y, int width, int height) {
-		this.trace("copyTextureToBuffer", source, width + "x" + height);
+		if (this.tracing()) this.trace("copyTextureToBuffer", source, width + "x" + height);
 		this.flushClear(source);
 		Native.blitTextureToBuffer(this.enc, ((MetalTexture) source).handle, mip, x, y, width, height, this.use(destination).handle, offset,
 			width * source.getFormat().blockSize());
@@ -705,7 +705,7 @@ final class MetalEncoder implements CommandEncoderBackend {
 	@Override
 	public void copyTextureToTexture(GpuTexture source, GpuTexture destination, int mip, int destX, int destY, int sourceX, int sourceY, int width, int height) {
 		if (FrameLog.ON) FrameLog.op(FrameLog.TEX_COPIES, 1);
-		this.trace("copyTextureToTexture", source, destination, width + "x" + height);
+		if (this.tracing()) this.trace("copyTextureToTexture", source, destination, width + "x" + height);
 		this.flushClear(source);
 		this.flushClear(destination);
 		Native.blitTextureToTexture(this.enc, ((MetalTexture) source).handle, ((MetalTexture) destination).handle, mip, destX, destY, sourceX, sourceY,

@@ -164,10 +164,10 @@ LodCols *mcl_cols_new(Ctx *ctx, const char *source, char *err, int errCap) {
 			uint16_t k[6] = {b, (uint16_t) (b + 1), (uint16_t) (b + 2), (uint16_t) (b + 2), (uint16_t) (b + 3), b};
 			memcpy(idx + q * 6, k, sizeof k);
 		}
-		l->meshIdx = [ctx->device newBufferWithBytes:idx length:sizeof idx options:MTLResourceStorageModeShared];
+		l->meshIdx = mc_buffer_private_bytes(ctx, idx, sizeof idx);
 		l->cullDone = [ctx->device newFence];
 		l->drawDone = [ctx->device newFence];
-		l->plantIdx = [ctx->device newBufferWithBytes:idx length:32 * 6 * sizeof(uint16_t) options:MTLResourceStorageModeShared];
+		l->plantIdx = mc_buffer_private_bytes(ctx, idx, 32 * 6 * sizeof(uint16_t));
 		return l;
 	}
 }

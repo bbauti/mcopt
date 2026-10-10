@@ -240,14 +240,14 @@ Own *mco_new(Ctx *ctx, const char *source, int compact, int fat, int cpuClip, ch
 			uint16_t k[6] = {b, (uint16_t) (b + 1), (uint16_t) (b + 2), (uint16_t) (b + 2), (uint16_t) (b + 3), b};
 			memcpy(idx + q * 6, k, sizeof k);
 		}
-		w->quadIdx = [ctx->device newBufferWithBytes:idx length:sizeof idx options:MTLResourceStorageModeShared];
+		w->quadIdx = mc_buffer_private_bytes(ctx, idx, sizeof idx);
 		uint16_t idxG[256 * 6];
 		for (int q = 0; q < 256; q++) {
 			uint16_t b = (uint16_t) (q * 4);
 			uint16_t k[6] = {b, (uint16_t) (b + 1), (uint16_t) (b + 2), (uint16_t) (b + 2), (uint16_t) (b + 3), b};
 			memcpy(idxG + q * 6, k, sizeof k);
 		}
-		w->quadIdxG = [ctx->device newBufferWithBytes:idxG length:sizeof idxG options:MTLResourceStorageModeShared];
+		w->quadIdxG = mc_buffer_private_bytes(ctx, idxG, sizeof idxG);
 		return w;
 	}
 }

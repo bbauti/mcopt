@@ -27,6 +27,7 @@ import java.util.TreeMap;
  */
 public final class Profile {
 	private static boolean applied;
+	private static String overrides = "";
 	/** Alpha keys left out on the small tier: the 4096-entry clone cache costs memory an 8 GB / small-GPU Mac lacks. */
 	static final java.util.List<String> SMALL_OUT = java.util.List.of("mcopt.chunk.clones", "mcopt.chunk.clonesCleanup");
 	static final String DEFAULT = "indie";
@@ -79,7 +80,14 @@ public final class Profile {
 		return false;
 	}
 
+	/** Client entrypoint: the profile and the options that differ from it, for latest.log (applyFlags runs before System.out goes there). */
+	public static synchronized void logOverrides() {
+		System.out.println("[mcopt] " + overrides);
+	}
+
 	private static void applyFlags() {
+		Map<String, String> commandLine = new TreeMap<>();
+		System.getProperties().stringPropertyNames().stream().filter(k -> k.startsWith("mcopt.")).forEach(k -> commandLine.put(k, System.getProperty(k)));
 		Properties file = new Properties();
 		Path cfg = gameDir().resolve("config").resolve("mcopt.properties");
 		if (Files.isRegularFile(cfg)) {
@@ -108,6 +116,13 @@ public final class Profile {
 			if (name.equals("alpha")) tier(flags);
 		}
 		file.stringPropertyNames().stream().filter(k -> k.startsWith("mcopt.")).forEach(k -> flags.put(k, file.getProperty(k).trim()));
+		Map<String, String> fromFile = new TreeMap<>();
+		file.stringPropertyNames().stream().filter(k -> k.startsWith("mcopt.")).forEach(k -> fromFile.put(k, file.getProperty(k).trim()));
+		StringBuilder o = new StringBuilder("profile " + name).append(fromFile.isEmpty() ? "" : "; set in config/mcopt.properties:");
+		fromFile.forEach((k, v) -> o.append(' ').append(k).append('=').append(v));
+		o.append(commandLine.isEmpty() ? "" : "; set on the command line:");
+		commandLine.forEach((k, v) -> o.append(' ').append(k).append('=').append(v));
+		overrides = o.append(fromFile.isEmpty() && commandLine.isEmpty() ? ", no option changed" : "").toString();
 		if (flags.isEmpty()) return;
 		StringBuilder set = new StringBuilder(), kept = new StringBuilder();
 		flags.forEach((k, v) -> {

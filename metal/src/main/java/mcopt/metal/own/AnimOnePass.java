@@ -69,10 +69,32 @@ public final class AnimOnePass {
 	private static int flushes, kernelReady;
 	/** Each animation state -> the sprite contents that created it (OwnAnimIdentityMixin); weak keys, so dropped with the atlas. */
 	private static final Map<SpriteContents.AnimationState, SpriteContents> OWNER = java.util.Collections.synchronizedMap(new WeakHashMap<>());
+	private static java.lang.reflect.@org.jspecify.annotations.Nullable Field animationInfo, infoOwner;   // (linkedOwner's, found once)
 
 	/** SpriteContents.createAnimationState returned state for contents. */
 	public static void owned(SpriteContents.AnimationState state, SpriteContents contents) {
 		OWNER.put(state, contents);
+	}
+
+	/**
+	 * The contents that made state, by vanilla's own link (its animationInfo's this$0: the SpriteContents that built that AnimatedTexture):
+	 * for states made without createAnimationState, as Fusion's connected textures (FusionSpriteContents) make theirs. Null if unreadable.
+	 */
+	private static @org.jspecify.annotations.Nullable SpriteContents linkedOwner(SpriteContents.AnimationState state) {
+		try {
+			if (animationInfo == null) {
+				java.lang.reflect.Field info = SpriteContents.AnimationState.class.getDeclaredField("animationInfo");
+				java.lang.reflect.Field outer = info.getType().getDeclaredField("this$0");
+				info.setAccessible(true);
+				outer.setAccessible(true);
+				infoOwner = outer;
+				animationInfo = info;
+			}
+			Object info = animationInfo.get(state);
+			return info != null && infoOwner.get(info) instanceof SpriteContents c ? c : null;
+		} catch (ReflectiveOperationException | RuntimeException e) {
+			return null;
+		}
 	}
 
 	private static final class Entry {
@@ -266,6 +288,7 @@ public final class AnimOnePass {
 		// another sprite's rectangle; any mismatch leaves the atlas with vanilla
 		for (int i = 0; i < sprites.size(); i++) {
 			SpriteContents owner = OWNER.get(states.get(i));
+			if (owner == null) owner = linkedOwner(states.get(i));
 			if (TEST.equals("mismatch") && i == sprites.size() - 1) owner = null;  // (test: the last state's owner unknown)
 			if (owner != sprites.get(i).contents()) {
 				MISMATCH = "animation state " + i + " doesn't belong to sprite " + sprites.get(i).contents().name()
