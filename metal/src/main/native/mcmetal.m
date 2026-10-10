@@ -1743,21 +1743,24 @@ static void startDisplayLink(void) {
 // a presented handler with the refresh it was aimed at (paceTarget). If the frame reached the screen more than half a refresh
 // after that, it missed the latch (on the laptop's 120 Hz panel such a frame shows a refresh late, or ~1.9 ms after the next
 // refresh, right before its successor: the paired presents of LATENCY.md lt4), and the lead grows by PACE_UP; a frame on time
-// shrinks it by PACE_DOWN. That settles at about PACE_DOWN / PACE_UP (2%) late frames, just at the latch deadline. Without
+// shrinks it by PACE_DOWN. That settles at about PACE_DOWN / PACE_UP (1%) late frames, just at the latch deadline. Without
 // scanout times (presentedTime 0, as on the mini's display) nothing changes: the margin stays the caller's.
 static int paceAdapt;             // 1: the margin learns; 2 (-Dmcopt.metal.paceAdapt=watch): presents are only measured
 static _Atomic double paceExtra;  // seconds added to the caller's margin
 // Lateness counts from the display's own delay, the reference (paceFloor): the 10th percentile of the presents with under a
 // refresh of slack (target - GPU done), which can't show a refresh early. It moves PACE_REF_DOWN for each below it and
 // PACE_REF_UP for each above, so a present off the refresh grid moves it 90 us: as a running minimum, one (-7.58 ms) set it
-// a refresh low and every present on time looked late until it rose back (260796e). On bbauti's external 100 Hz monitor the
-// delay is a refresh in game. A present shown late with more slack than usual (paceSlack, a running median) had its lead, a
-// stall did it: it takes PACE_UP away, so lateness as common with more slack as with less cancels out, and only lateness the
-// lead helps adds it.
+// a refresh low and every present on time looked late until it rose back (260796e). A present shown late with more slack
+// than usual (paceSlack, a running median) had its lead, a stall did it: it takes PACE_UP away, so lateness as common with
+// more slack as with less cancels out, and only lateness the lead helps adds it.
 // A late present also drains the compositor's queue: the next refresh gets no new frame (at most every PACE_DRAIN_GAP). Frames
 // wait their turn there, one a refresh, so after one misses its latch every later one is shown a refresh late too, until a
 // refresh goes without a frame; the lead can't undo that. With paceAdapt=watch and the 2 ms margin, half of the presents were
-// a refresh late that way for whole segments (shown - target +20 ms, the present side waiting 12-15 ms for drawables).
+// a refresh late that way for whole segments (shown - target +20 ms, the present side waiting 12-15 ms for drawables), and the
+// "display delay" of a refresh seen in every earlier round was such a queue too: drained, presents show at their target.
+// Those shown late behind one that missed (queued) say nothing of their own timing: counted, half of them (more slack than
+// usual) took margin away: it fell to ~1 ms on a server, where ~40% of presents were late (d971ef6). Only the one that missed
+// counts.
 static _Atomic double paceFloor = INFINITY, paceSlack;
 #define PACE_REF_UP 0.00001
 #define PACE_REF_DOWN 0.00009
@@ -1767,11 +1770,11 @@ static _Atomic int paceDrain;     // set by a late present: mc_pace skips a refr
 static int paceDrains;            // since the last stats line (render thread)
 static double paceTarget;         // the refresh the frame being presented was paced for (render thread)
 #define PACE_UP 0.00025
-#define PACE_DOWN 0.000005
+#define PACE_DOWN 0.0000025
 #define PACE_EXTRA_MAX 0.006
 #define PACE_SAMPLES 512
 static float paceLateMs[PACE_SAMPLES];  // shown - target of the presents since the last stats line (mc_pace_stats)
-static _Atomic int paceShown, paceLate, paceLateSlack, paceEarly;
+static _Atomic int paceShown, paceLate, paceLateSlack, paceQueued, paceEarly;
 void mc_pace_adapt(int mode) { paceAdapt = mode; }
 static void paceWatch(id<MTLCommandBuffer> cb, id<CAMetalDrawable> drawable, double target) {
 	if (!paceAdapt || target <= 0) return;
@@ -1785,16 +1788,18 @@ static void paceWatch(id<MTLCommandBuffer> cb, id<CAMetalDrawable> drawable, dou
 		if (slack < period) paceFloor = f = isfinite(f) ? f + (late < f ? -PACE_REF_DOWN : PACE_REF_UP) : late;
 		paceSlack = s = s == 0 ? slack : s + (slack > s ? PACE_SLACK_STEP : -PACE_SLACK_STEP);
 		double off = late - f;
-		int k = off > period * 0.5 ? (slack > s ? -1 : 1) : 0, i = atomic_fetch_add(&paceShown, 1);
+		static int prevLate;  // (presented handlers run one at a time, in the order shown)
+		int k = off > period * 0.5 ? (slack > s ? -1 : 1) : 0, queued = k && prevLate, i = atomic_fetch_add(&paceShown, 1);
+		prevLate = k;
 		if (i < PACE_SAMPLES) paceLateMs[i] = (float) (late * 1e3);
-		if (k || (isfinite(off) && off < -period * 0.5)) atomic_fetch_add(k > 0 ? &paceLate : k ? &paceLateSlack : &paceEarly, 1);
+		if (k || (isfinite(off) && off < -period * 0.5)) atomic_fetch_add(queued ? &paceQueued : k > 0 ? &paceLate : k ? &paceLateSlack : &paceEarly, 1);
 		if (paceAdapt != 1) return;
-		static double drainedAt;  // (presented handlers run one at a time)
+		static double drainedAt;
 		if (k && fabs(remainder(off, period)) < period * 0.2 && shown - drainedAt > PACE_DRAIN_GAP) {
 			drainedAt = shown;
 			paceDrain = 1;
 		}
-		double e = paceExtra + (k > 0 ? PACE_UP : k ? -PACE_UP : -PACE_DOWN);
+		double e = paceExtra + (queued ? 0 : k > 0 ? PACE_UP : k ? -PACE_UP : -PACE_DOWN);
 		paceExtra = e < 0 ? 0 : e > PACE_EXTRA_MAX ? PACE_EXTRA_MAX : e;
 	}];
 }
@@ -1804,12 +1809,13 @@ static int cmpFloat(const void *a, const void *b) { float x = *(const float *) a
 const char *mc_pace_stats(void) {
 	static char line[384];
 	static float v[PACE_SAMPLES];
-	int n = atomic_exchange(&paceShown, 0), m = n < PACE_SAMPLES ? n : PACE_SAMPLES;
+	int n = atomic_exchange(&paceShown, 0), m = n < PACE_SAMPLES ? n : PACE_SAMPLES, slack = atomic_exchange(&paceLateSlack, 0);
 	memcpy(v, paceLateMs, m * sizeof(float));
 	qsort(v, m, sizeof(float), cmpFloat);
-	snprintf(line, sizeof line, " (pace margin +%.2f ms%s; of %d shown: %d late, %d late with more slack than usual, %d early, %d refreshes drained;"
-		" shown - target min/median/p90 %+.2f/%+.2f/%+.2f ms, on time %+.2f; slack %.2f ms, GPU %.2f ms)", paceExtra * 1e3, paceAdapt == 1 ? " learned" : "",
-		n, atomic_exchange(&paceLate, 0), atomic_exchange(&paceLateSlack, 0), atomic_exchange(&paceEarly, 0), paceDrains, m ? v[0] : 0,
+	snprintf(line, sizeof line, " (pace margin +%.2f ms%s; of %d shown: %d missed their refresh, %d of them with more slack than usual, %d late behind"
+		" those, %d early, %d refreshes drained; shown - target min/median/p90 %+.2f/%+.2f/%+.2f ms, on time %+.2f; slack %.2f ms, GPU %.2f ms)",
+		paceExtra * 1e3, paceAdapt == 1 ? " learned" : "", n, atomic_exchange(&paceLate, 0) + slack, slack,
+		atomic_exchange(&paceQueued, 0), atomic_exchange(&paceEarly, 0), paceDrains, m ? v[0] : 0,
 		m ? v[m / 2] : 0, m ? v[m * 9 / 10] : 0, paceFloor * 1e3, paceSlack * 1e3, gpuLatency * 1e3);
 	paceDrains = 0;
 	return line;
